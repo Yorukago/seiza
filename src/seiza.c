@@ -27,6 +27,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include "cmd.h"
 #include "constellation.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -280,9 +281,9 @@ static struct star *star_at(struct tinywl_server *server, double wx, double wy) 
 
 /* SEIZA persistence: the active constellation is rewritten whenever its
  * structure changes (never per frame). A failed save is logged, not fatal. */
-static void persist_save(struct tinywl_server *server) {
+static int persist_write(struct tinywl_server *server, const char *name, bool make_last) {
 	struct constellation c = {0};
-	snprintf(c.name, sizeof(c.name), "%s", server->constellation_name);
+	snprintf(c.name, sizeof(c.name), "%s", name);
 	struct star *s;
 	wl_list_for_each(s, &server->stars, link) {
 		if (c.nstars >= CONST_STARS_MAX) {
@@ -296,10 +297,16 @@ static void persist_save(struct tinywl_server *server) {
 		memcpy(cs->apps, s->apps, sizeof(cs->apps));
 	}
 	if (constellation_save(&c, server->cfg_dir) != 0 ||
-			constellation_set_last(server->cfg_dir, c.name) != 0) {
+			(make_last && constellation_set_last(server->cfg_dir, c.name) != 0)) {
 		wlr_log(WLR_ERROR, "seiza: could not save constellation '%s' in %s",
 			c.name, server->cfg_dir);
+		return -1;
 	}
+	return 0;
+}
+
+static void persist_save(struct tinywl_server *server) {
+	persist_write(server, server->constellation_name, true);
 }
 
 /* Build the stars of `c` and make the first one current. */
@@ -547,64 +554,161 @@ static void pan_camera(struct tinywl_server *server, double dx, double dy) {
 	update_current_star(server);
 }
 
+/* SEIZA: the operations behind every command (keys, socket, CLI). cmd.c does
+ * the parsing; these do the work. `ud` is always the server. */
+static void op_overview(void *ud) {
+	struct tinywl_server *server = ud;
+	if (server->overview) {
+		fly_to_star(server, server->current_star);
+	} else {
+		enter_overview(server);
+	}
+}
+
+static int op_new_star(void *ud) {
+	struct tinywl_server *server = ud;
+	fly_to_star(server, star_create(server));
+	persist_save(server);
+	return 0;
+}
+
+/* Drop every star marker (the windows are not touched; the caller reassigns them). */
+static void stars_clear(struct tinywl_server *server) {
+	struct star *s, *tmp;
+	wl_list_for_each_safe(s, tmp, &server->stars, link) {
+		wl_list_remove(&s->link);
+		wlr_scene_node_destroy(&s->marker->node);
+		free(s);
+	}
+	server->current_star = NULL;
+	server->hover_star = NULL;
+}
+
+/* Only an empty star can go, and there is always at least one. */
+static int op_delete_star(void *ud) {
+	struct tinywl_server *server = ud;
+	struct star *s = server->current_star;
+	struct tinywl_toplevel *tl;
+	if (wl_list_length(&server->stars) <= 1) {
+		return -1;
+	}
+	wl_list_for_each(tl, &server->toplevels, link) {
+		if (tl->star == s) {
+			return -1;
+		}
+	}
+	struct star *next = wl_container_of(s->link.next == &server->stars ?
+		server->stars.next : s->link.next, next, link);
+	wl_list_remove(&s->link);
+	wlr_scene_node_destroy(&s->marker->node);
+	free(s);
+	server->hover_star = NULL;
+	fly_to_star(server, next);
+	persist_save(server);
+	return 0;
+}
+
+/* A preset is a copy of the active constellation under another name. */
+static int op_save(void *ud, const char *name) {
+	return persist_write(ud, name, false);
+}
+
+/* Replace the active constellation with `name`. Windows move to its first star. */
+static int op_load(void *ud, const char *name) {
+	struct tinywl_server *server = ud;
+	struct constellation c;
+	if (constellation_load(server->cfg_dir, name, &c) != 0) {
+		return -1;
+	}
+	stars_clear(server);
+	persist_apply(server, &c);
+	int n = 0;
+	struct tinywl_toplevel *tl;
+	wl_list_for_each(tl, &server->toplevels, link) {
+		tl->star = server->current_star;
+		tl->wx = tl->star->cx - STAR_W / 2.0 + 60 + 40 * (n % 8);
+		tl->wy = tl->star->cy - STAR_H / 2.0 + 60 + 40 * (n % 8);
+		n++;
+	}
+	constellation_set_last(server->cfg_dir, name);
+	fly_to_star(server, server->current_star);
+	return 0;
+}
+
+static int op_relaunch(void *ud) { (void)ud; return -1; /* Task 7 */ }
+static int op_reload_config(void *ud) { (void)ud; return -1; /* Task 5 */ }
+
+static void op_quit(void *ud) {
+	struct tinywl_server *server = ud;
+	wl_display_terminate(server->wl_display);
+}
+
+static void op_pan(void *ud, int dx, int dy) { pan_camera(ud, dx, dy); }
+
+/* Reset zoom to 1:1, keeping the screen center fixed. */
+static void op_zoom_reset(void *ud) {
+	struct tinywl_server *server = ud;
+	if (server->overview) {
+		return;
+	}
+	double sx, sy;
+	screen_center(server, &sx, &sy);
+	server->cam_x = (server->cam_x + sx) / server->zoom - sx;
+	server->cam_y = (server->cam_y + sy) / server->zoom - sy;
+	server->zoom = 1.0;
+	relayout_all(server);
+}
+
+static void op_cycle_window(void *ud) {
+	struct tinywl_server *server = ud;
+	if (wl_list_length(&server->toplevels) < 2) {
+		return;
+	}
+	struct tinywl_toplevel *next_toplevel =
+		wl_container_of(server->toplevels.prev, next_toplevel, link);
+	focus_toplevel(next_toplevel);
+}
+
+static void op_spawn(void *ud, const char *cmdline) {
+	(void)ud;
+	if (fork() == 0) {
+		execl("/bin/sh", "/bin/sh", "-c", cmdline, (void *)NULL);
+		_exit(127);
+	}
+}
+
+static const struct cmd_ops seiza_ops = {
+	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
+	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
+};
+
+/* The built-in bindings (all with Alt held). Task 5 moves these into a file. */
+static const struct { xkb_keysym_t sym; const char *cmd; } default_bindings[] = {
+	{XKB_KEY_Escape, "seiza quit"},
+	{XKB_KEY_Left,   "seiza pan -100 0"},
+	{XKB_KEY_Right,  "seiza pan 100 0"},
+	{XKB_KEY_Up,     "seiza pan 0 -100"},
+	{XKB_KEY_Down,   "seiza pan 0 100"},
+	{XKB_KEY_0,      "seiza zoom-reset"},
+	{XKB_KEY_o,      "seiza overview"},
+	{XKB_KEY_n,      "seiza new-star"},
+	{XKB_KEY_x,      "seiza delete-star"},
+	{XKB_KEY_F1,     "seiza cycle-window"},
+	{XKB_KEY_Return, "${SEIZA_TERM:-kitty}"},
+};
+
+/* Called with Alt held. True if the key was a compositor binding. */
 static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 *
-	 * This function assumes Alt is held down.
-	 */
-	switch (sym) {
-	case XKB_KEY_Escape:
-		wl_display_terminate(server->wl_display);
-		break;
-	case XKB_KEY_Left:  pan_camera(server, -100, 0); break;
-	case XKB_KEY_Right: pan_camera(server,  100, 0); break;
-	case XKB_KEY_Up:    pan_camera(server, 0, -100); break;
-	case XKB_KEY_Down:  pan_camera(server, 0,  100); break;
-	case XKB_KEY_0: { /* reset zoom to 1:1, keeping the screen center fixed */
-		if (server->overview) {
-			break;
+	for (size_t i = 0; i < sizeof(default_bindings) / sizeof(default_bindings[0]); i++) {
+		if (default_bindings[i].sym == sym) {
+			char reply[128];
+			if (cmd_run(&seiza_ops, server, default_bindings[i].cmd, reply, sizeof(reply)) != 0) {
+				wlr_log(WLR_INFO, "seiza: %s -> %s", default_bindings[i].cmd, reply);
+			}
+			return true;
 		}
-		double sx, sy;
-		screen_center(server, &sx, &sy);
-		server->cam_x = (server->cam_x + sx) / server->zoom - sx;
-		server->cam_y = (server->cam_y + sy) / server->zoom - sy;
-		server->zoom = 1.0;
-		relayout_all(server);
-		break;
 	}
-	case XKB_KEY_o: /* toggle the constellation overview */
-		if (server->overview) {
-			fly_to_star(server, server->current_star);
-		} else {
-			enter_overview(server);
-		}
-		break;
-	case XKB_KEY_Return: /* launch a terminal; it lands in the current star */
-		if (fork() == 0) {
-			const char *term = getenv("SEIZA_TERM");
-			execl("/bin/sh", "/bin/sh", "-c", term ? term : "kitty", (void *)NULL);
-		}
-		break;
-	case XKB_KEY_n: /* new star, and go there */
-		fly_to_star(server, star_create(server));
-		persist_save(server);
-		break;
-	case XKB_KEY_F1:
-		/* Cycle to the next toplevel */
-		if (wl_list_length(&server->toplevels) < 2) {
-			break;
-		}
-		struct tinywl_toplevel *next_toplevel =
-			wl_container_of(server->toplevels.prev, next_toplevel, link);
-		focus_toplevel(next_toplevel);
-		break;
-	default:
-		return false;
-	}
-	return true;
+	return false;
 }
 
 static void keyboard_handle_key(
