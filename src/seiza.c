@@ -30,6 +30,7 @@
 #include "cmd.h"
 #include "constellation.h"
 #include "ipc.h"
+#include "procinfo.h"
 #include "keys.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -638,7 +639,6 @@ static int op_load(void *ud, const char *name) {
 	return 0;
 }
 
-static int op_relaunch(void *ud) { (void)ud; return -1; /* Task 7 */ }
 /* Defaults first, then the user's file on top. A missing file is fine. */
 static void keys_load(struct tinywl_server *server) {
 	static struct keymap_cfg fresh;
@@ -707,6 +707,16 @@ static void op_spawn(void *ud, const char *cmdline) {
 	}
 }
 
+/* The only thing that ever launches remembered apps: an explicit request. */
+static int op_relaunch(void *ud) {
+	struct tinywl_server *server = ud;
+	struct star *s = server->current_star;
+	wlr_log(WLR_INFO, "seiza: relaunching %d app(s) for %s", s->napps, s->name);
+	for (int i = 0; i < s->napps; i++) {
+		op_spawn(server, s->apps[i]);
+	}
+	return 0;
+}
 static const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
@@ -1287,11 +1297,32 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
 }
 
+/* Remember how this window's program was launched, on its star, so the star can
+ * offer to relaunch it later. Closing the window does not forget it. */
+static void remember_app(struct tinywl_toplevel *tl) {
+	struct star *s = tl->star;
+	pid_t pid;
+	char cmd[256];
+	wl_client_get_credentials(wl_resource_get_client(tl->xdg_toplevel->base->resource),
+		&pid, NULL, NULL);
+	if (procinfo_cmdline(pid, cmd, sizeof(cmd)) != 0) {
+		return;
+	}
+	struct cstar view = {.napps = s->napps}; /* reuse the de-dupe + cap logic */
+	memcpy(view.apps, s->apps, sizeof(view.apps));
+	if (constellation_add_app(&view, cmd)) {
+		s->napps = view.napps;
+		memcpy(s->apps, view.apps, sizeof(s->apps));
+		persist_save(tl->server);
+	}
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+	remember_app(toplevel);
 
 	focus_toplevel(toplevel);
 }
