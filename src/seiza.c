@@ -29,6 +29,7 @@
 #include <xkbcommon/xkbcommon.h>
 #include "cmd.h"
 #include "constellation.h"
+#include "ipc.h"
 #include "keys.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -1527,6 +1528,10 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 }
 
 int main(int argc, char *argv[]) {
+	/* `seiza <command>` from a shell talks to the running compositor. */
+	if (argc > 1 && argv[1][0] != '-') {
+		return ipc_client(argc, argv);
+	}
 	wlr_log_init(WLR_DEBUG, NULL);
 	char *startup_cmd = NULL;
 
@@ -1719,7 +1724,9 @@ int main(int argc, char *argv[]) {
 	 * frame events at the refresh rate, and so on. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
+	ipc_serve(wl_display_get_event_loop(server.wl_display), &seiza_ops, &server);
 	wl_display_run(server.wl_display);
+	ipc_close();
 
 
 	/* Once wl_display_run returns, we destroy all clients then shut down the

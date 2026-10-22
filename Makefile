@@ -37,7 +37,10 @@ tests/bin/%: tests/%.c $(LIB_SRC) $(wildcard src/*.h)
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done; echo "all tests passed"
 
+smoke: seiza
+	python3 -I tests/smoke_ipc.py
+
 clean:
 	rm -f seiza src/xdg-shell-protocol.h; rm -rf tests/bin
 
-.PHONY: all run test clean
+.PHONY: all run test smoke clean

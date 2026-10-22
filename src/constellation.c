@@ -116,9 +116,25 @@ void constellation_config_dir(char *buf, size_t n) {
 	}
 }
 
+/* mkdir -p */
+static int mkdir_p(const char *path) {
+	char tmp[512];
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	for (char *p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = '\0';
+			if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+				return -1;
+			}
+			*p = '/';
+		}
+	}
+	return (mkdir(tmp, 0755) != 0 && errno != EEXIST) ? -1 : 0;
+}
+
 /* Write `text` to <dir>/<file> atomically: temp file in the same dir, then rename. */
 static int write_atomic(const char *dir, const char *file, const char *text) {
-	if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+	if (mkdir_p(dir) != 0) {
 		return -1;
 	}
 	char tmp[512], dst[512];
