@@ -27,6 +27,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include "constellation.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -47,6 +48,8 @@ struct star {
 	struct wlr_scene_rect *frame[4];
 	struct wlr_scene_rect *dot;
 	float color[4];
+	char apps[CSTAR_APPS_MAX][256]; /* remembered launch commands (never auto-launched) */
+	int napps;
 };
 
 struct tinywl_server {
@@ -69,6 +72,8 @@ struct tinywl_server {
 	double pan_last_x, pan_last_y; /* cursor position at the last canvas-drag step */
 	struct wl_list stars;
 	struct star *current_star; /* the star new windows land in */
+	char cfg_dir[400];         /* ~/.config/seiza */
+	char constellation_name[32]; /* the active constellation (autosaved) */
 	bool overview;             /* zoomed-out constellation view */
 	struct star *hover_star;   /* star under the cursor in the overview */
 	struct wl_event_source *hover_timer; /* dwell before flying into it */
@@ -220,17 +225,18 @@ static void layout_star(struct tinywl_server *server, struct star *s) {
 	wlr_scene_rect_set_color(s->dot, c);
 }
 
-/* Make a new star in the next free grid slot. */
-static struct star *star_create(struct tinywl_server *server) {
+/* Make a star at a world position. Its color follows its creation order. */
+static struct star *star_create_at(struct tinywl_server *server, const char *name,
+		double cx, double cy) {
 	static const float palette[6][3] = {
 		{0.95f, 0.60f, 0.90f}, {0.55f, 0.80f, 0.95f}, {0.98f, 0.85f, 0.50f},
 		{0.60f, 0.92f, 0.70f}, {0.85f, 0.65f, 0.98f}, {0.98f, 0.65f, 0.55f},
 	};
 	int n = wl_list_length(&server->stars);
 	struct star *s = calloc(1, sizeof(*s));
-	snprintf(s->name, sizeof(s->name), "star %d", n);
-	s->cx = STAR_W / 2.0 + (n % 3) * STAR_DX;
-	s->cy = STAR_H / 2.0 + (n / 3) * STAR_DY;
+	snprintf(s->name, sizeof(s->name), "%s", name);
+	s->cx = cx;
+	s->cy = cy;
 	memcpy(s->color, palette[n % 6], sizeof(float) * 3);
 	s->marker = wlr_scene_tree_create(server->canvas);
 	float none[4] = {0};
@@ -243,6 +249,24 @@ static struct star *star_create(struct tinywl_server *server) {
 	return s;
 }
 
+static struct star *star_at(struct tinywl_server *server, double wx, double wy);
+
+/* Make a new star in the first free slot of the 3-column grid. */
+static struct star *star_create(struct tinywl_server *server) {
+	int slot = 0;
+	double cx, cy;
+	for (;; slot++) {
+		cx = STAR_W / 2.0 + (slot % 3) * STAR_DX;
+		cy = STAR_H / 2.0 + (slot / 3) * STAR_DY;
+		if (!star_at(server, cx, cy)) {
+			break;
+		}
+	}
+	char name[32];
+	snprintf(name, sizeof(name), "star %d", slot);
+	return star_create_at(server, name, cx, cy);
+}
+
 /* Which star's territory contains this world point, if any. */
 static struct star *star_at(struct tinywl_server *server, double wx, double wy) {
 	struct star *s;
@@ -252,6 +276,54 @@ static struct star *star_at(struct tinywl_server *server, double wx, double wy) 
 		}
 	}
 	return NULL;
+}
+
+/* SEIZA persistence: the active constellation is rewritten whenever its
+ * structure changes (never per frame). A failed save is logged, not fatal. */
+static void persist_save(struct tinywl_server *server) {
+	struct constellation c = {0};
+	snprintf(c.name, sizeof(c.name), "%s", server->constellation_name);
+	struct star *s;
+	wl_list_for_each(s, &server->stars, link) {
+		if (c.nstars >= CONST_STARS_MAX) {
+			break;
+		}
+		struct cstar *cs = &c.stars[c.nstars++];
+		snprintf(cs->name, sizeof(cs->name), "%s", s->name);
+		cs->x = s->cx;
+		cs->y = s->cy;
+		cs->napps = s->napps;
+		memcpy(cs->apps, s->apps, sizeof(cs->apps));
+	}
+	if (constellation_save(&c, server->cfg_dir) != 0 ||
+			constellation_set_last(server->cfg_dir, c.name) != 0) {
+		wlr_log(WLR_ERROR, "seiza: could not save constellation '%s' in %s",
+			c.name, server->cfg_dir);
+	}
+}
+
+/* Build the stars of `c` and make the first one current. */
+static void persist_apply(struct tinywl_server *server, const struct constellation *c) {
+	snprintf(server->constellation_name, sizeof(server->constellation_name), "%s", c->name);
+	for (int i = 0; i < c->nstars; i++) {
+		struct star *s = star_create_at(server, c->stars[i].name, c->stars[i].x, c->stars[i].y);
+		s->napps = c->stars[i].napps;
+		memcpy(s->apps, c->stars[i].apps, sizeof(s->apps));
+	}
+	server->current_star = wl_container_of(server->stars.next, server->current_star, link);
+}
+
+/* Startup: open the constellation named in `last`, else the default one. */
+static void persist_startup(struct tinywl_server *server) {
+	struct constellation c;
+	char name[32];
+	constellation_config_dir(server->cfg_dir, sizeof(server->cfg_dir));
+	if (constellation_get_last(server->cfg_dir, name, sizeof(name)) != 0 ||
+			constellation_load(server->cfg_dir, name, &c) != 0) {
+		wlr_log(WLR_INFO, "seiza: no usable saved constellation, starting 'default'");
+		constellation_default(&c);
+	}
+	persist_apply(server, &c);
 }
 
 /* The current star follows the camera: whichever star's territory is under the
@@ -518,6 +590,7 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		break;
 	case XKB_KEY_n: /* new star, and go there */
 		fly_to_star(server, star_create(server));
+		persist_save(server);
 		break;
 	case XKB_KEY_F1:
 		/* Cycle to the next toplevel */
@@ -1422,13 +1495,14 @@ int main(int argc, char *argv[]) {
 		wl_display_get_event_loop(server.wl_display), hover_timeout, &server);
 	/* Start in star 0: its territory is centered so the default camera
 	 * (0,0) already looks at it on a 1920x1080 screen. */
-	server.current_star = star_create(&server);
+	persist_startup(&server);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
 	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
 	 */
 	wl_list_init(&server.toplevels);
+	fly_to_star(&server, server.current_star); /* restored stars may not sit at the origin */
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
