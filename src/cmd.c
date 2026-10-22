@@ -46,7 +46,10 @@ static int reply(char *out, size_t outn, int rc, const char *err) {
 }
 
 int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, size_t outn) {
-	char buf[512];
+	char buf[1100]; /* a bit over the socket's 1 KiB line limit */
+	if (strlen(line) >= sizeof(buf)) {
+		return reply(out, outn, -1, "command too long");
+	}
 	snprintf(buf, sizeof(buf), "%s", line);
 	/* trim */
 	char *start = buf;

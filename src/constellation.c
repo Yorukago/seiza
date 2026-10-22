@@ -33,8 +33,9 @@ void constellation_default(struct constellation *out) {
 }
 
 int constellation_add_app(struct cstar *s, const char *cmdline) {
+	/* A newline would split the line in the file and corrupt the whole constellation. */
 	if (!cmdline || !*cmdline || strlen(cmdline) >= sizeof(s->apps[0]) ||
-			s->napps >= CSTAR_APPS_MAX) {
+			strpbrk(cmdline, "\r\n") || s->napps >= CSTAR_APPS_MAX) {
 		return 0;
 	}
 	for (int i = 0; i < s->napps; i++) {

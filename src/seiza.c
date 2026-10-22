@@ -5,6 +5,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -86,7 +88,8 @@ struct tinywl_server {
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_xdg_popup;
-	struct wl_list toplevels;
+	struct wl_list toplevels;     /* mapped windows, front to back */
+	struct wl_list all_toplevels; /* SEIZA: every window that exists; each holds a star pointer */
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -124,6 +127,7 @@ struct tinywl_output {
 
 struct tinywl_toplevel {
 	struct wl_list link;
+	struct wl_list all_link; /* SEIZA: in server->all_toplevels from creation to destroy, mapped or not */
 	struct tinywl_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
@@ -300,8 +304,11 @@ static int persist_write(struct tinywl_server *server, const char *name, bool ma
 		cs->napps = s->napps;
 		memcpy(cs->apps, s->apps, sizeof(cs->apps));
 	}
+	char last[32];
+	bool last_changed = make_last && (constellation_get_last(server->cfg_dir, last, sizeof(last)) != 0 ||
+		strcmp(last, c.name) != 0); /* avoids a second fsync on every autosave */
 	if (constellation_save(&c, server->cfg_dir) != 0 ||
-			(make_last && constellation_set_last(server->cfg_dir, c.name) != 0)) {
+			(last_changed && constellation_set_last(server->cfg_dir, c.name) != 0)) {
 		wlr_log(WLR_ERROR, "seiza: could not save constellation '%s' in %s",
 			c.name, server->cfg_dir);
 		return -1;
@@ -331,8 +338,11 @@ static void persist_startup(struct tinywl_server *server) {
 	constellation_config_dir(server->cfg_dir, sizeof(server->cfg_dir));
 	if (constellation_get_last(server->cfg_dir, name, sizeof(name)) != 0 ||
 			constellation_load(server->cfg_dir, name, &c) != 0) {
-		wlr_log(WLR_INFO, "seiza: no usable saved constellation, starting 'default'");
-		constellation_default(&c);
+		/* Don't start a blank 'default' over a real saved one: autosave would overwrite it. */
+		if (constellation_load(server->cfg_dir, "default", &c) != 0) {
+			wlr_log(WLR_INFO, "seiza: no usable saved constellation, starting 'default'");
+			constellation_default(&c);
+		}
 	}
 	persist_apply(server, &c);
 }
@@ -596,7 +606,7 @@ static int op_delete_star(void *ud) {
 	if (wl_list_length(&server->stars) <= 1) {
 		return -1;
 	}
-	wl_list_for_each(tl, &server->toplevels, link) {
+	wl_list_for_each(tl, &server->all_toplevels, all_link) { /* unmapped windows count too */
 		if (tl->star == s) {
 			return -1;
 		}
@@ -628,7 +638,7 @@ static int op_load(void *ud, const char *name) {
 	persist_apply(server, &c);
 	int n = 0;
 	struct tinywl_toplevel *tl;
-	wl_list_for_each(tl, &server->toplevels, link) {
+	wl_list_for_each(tl, &server->all_toplevels, all_link) {
 		tl->star = server->current_star;
 		tl->wx = tl->star->cx - STAR_W / 2.0 + 60 + 40 * (n % 8);
 		tl->wy = tl->star->cy - STAR_H / 2.0 + 60 + 40 * (n % 8);
@@ -694,6 +704,14 @@ static void op_cycle_window(void *ud) {
 	struct tinywl_toplevel *next_toplevel =
 		wl_container_of(server->toplevels.prev, next_toplevel, link);
 	focus_toplevel(next_toplevel);
+}
+
+/* Reap every launched program that has exited (no zombies). */
+static int reap_children(int signo, void *data) {
+	(void)signo; (void)data;
+	while (waitpid(-1, NULL, WNOHANG) > 0) {
+	}
+	return 0;
 }
 
 /* Run through the configured shell, else ysh if installed, else /bin/sh. */
@@ -1360,6 +1378,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	/* Called when the xdg_toplevel is destroyed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
+	wl_list_remove(&toplevel->all_link);
 	wl_list_remove(&toplevel->map.link);
 	wl_list_remove(&toplevel->unmap.link);
 	wl_list_remove(&toplevel->commit.link);
@@ -1478,6 +1497,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	 * that star's top-left so windows don't open stacked exactly on top of each
 	 * other. */
 	toplevel->star = server->current_star;
+	wl_list_insert(&server->all_toplevels, &toplevel->all_link);
 	int n = 0;
 	struct tinywl_toplevel *other;
 	wl_list_for_each(other, &server->toplevels, link) {
@@ -1663,6 +1683,7 @@ int main(int argc, char *argv[]) {
 	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
 	 */
 	wl_list_init(&server.toplevels);
+	wl_list_init(&server.all_toplevels);
 	fly_to_star(&server, server.current_star); /* restored stars may not sit at the origin */
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
@@ -1755,6 +1776,7 @@ int main(int argc, char *argv[]) {
 	 * frame events at the refresh rate, and so on. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
+	wl_event_loop_add_signal(wl_display_get_event_loop(server.wl_display), SIGCHLD, reap_children, NULL);
 	ipc_serve(wl_display_get_event_loop(server.wl_display), &seiza_ops, &server);
 	wl_display_run(server.wl_display);
 	ipc_close();
