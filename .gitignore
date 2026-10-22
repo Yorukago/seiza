@@ -5,3 +5,4 @@ tests/bin/
 spike/tinywl
 spike/seiza
 spike/xdg-shell-protocol.h
+src/xdg-shell-protocol.h
