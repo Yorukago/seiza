@@ -1,0 +1,7 @@
+.superpowers/
+seiza
+tests/bin/
+*.o
+spike/tinywl
+spike/seiza
+spike/xdg-shell-protocol.h
