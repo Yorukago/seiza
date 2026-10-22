@@ -29,6 +29,7 @@
 #include <xkbcommon/xkbcommon.h>
 #include "cmd.h"
 #include "constellation.h"
+#include "keys.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -74,6 +75,7 @@ struct tinywl_server {
 	struct wl_list stars;
 	struct star *current_star; /* the star new windows land in */
 	char cfg_dir[400];         /* ~/.config/seiza */
+	struct keymap_cfg keys;    /* built-in defaults + ~/.config/seiza/keys */
 	char constellation_name[32]; /* the active constellation (autosaved) */
 	bool overview;             /* zoomed-out constellation view */
 	struct star *hover_star;   /* star under the cursor in the overview */
@@ -636,7 +638,31 @@ static int op_load(void *ud, const char *name) {
 }
 
 static int op_relaunch(void *ud) { (void)ud; return -1; /* Task 7 */ }
-static int op_reload_config(void *ud) { (void)ud; return -1; /* Task 5 */ }
+/* Defaults first, then the user's file on top. A missing file is fine. */
+static void keys_load(struct tinywl_server *server) {
+	static struct keymap_cfg fresh;
+	memset(&fresh, 0, sizeof(fresh));
+	keys_parse(KEYS_DEFAULT, &fresh);
+	char path[512];
+	snprintf(path, sizeof(path), "%s/keys", server->cfg_dir);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		static char text[65536];
+		size_t n = fread(text, 1, sizeof(text) - 1, f);
+		fclose(f);
+		text[n] = '\0';
+		int bad = keys_parse(text, &fresh);
+		if (bad > 0) {
+			wlr_log(WLR_ERROR, "seiza: %d bad line(s) skipped in %s", bad, path);
+		}
+	}
+	server->keys = fresh;
+}
+
+static int op_reload_config(void *ud) {
+	keys_load(ud);
+	return 0;
+}
 
 static void op_quit(void *ud) {
 	struct tinywl_server *server = ud;
@@ -669,9 +695,12 @@ static void op_cycle_window(void *ud) {
 	focus_toplevel(next_toplevel);
 }
 
+/* Run through the configured shell, else ysh if installed, else /bin/sh. */
 static void op_spawn(void *ud, const char *cmdline) {
-	(void)ud;
+	struct tinywl_server *server = ud;
 	if (fork() == 0) {
+		const char *shell = server->keys.shell[0] ? server->keys.shell : "ysh";
+		execlp(shell, shell, "-c", cmdline, (void *)NULL);
 		execl("/bin/sh", "/bin/sh", "-c", cmdline, (void *)NULL);
 		_exit(127);
 	}
@@ -682,33 +711,22 @@ static const struct cmd_ops seiza_ops = {
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 };
 
-/* The built-in bindings (all with Alt held). Task 5 moves these into a file. */
-static const struct { xkb_keysym_t sym; const char *cmd; } default_bindings[] = {
-	{XKB_KEY_Escape, "seiza quit"},
-	{XKB_KEY_Left,   "seiza pan -100 0"},
-	{XKB_KEY_Right,  "seiza pan 100 0"},
-	{XKB_KEY_Up,     "seiza pan 0 -100"},
-	{XKB_KEY_Down,   "seiza pan 0 100"},
-	{XKB_KEY_0,      "seiza zoom-reset"},
-	{XKB_KEY_o,      "seiza overview"},
-	{XKB_KEY_n,      "seiza new-star"},
-	{XKB_KEY_x,      "seiza delete-star"},
-	{XKB_KEY_F1,     "seiza cycle-window"},
-	{XKB_KEY_Return, "${SEIZA_TERM:-kitty}"},
-};
-
-/* Called with Alt held. True if the key was a compositor binding. */
-static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
-	for (size_t i = 0; i < sizeof(default_bindings) / sizeof(default_bindings[0]); i++) {
-		if (default_bindings[i].sym == sym) {
-			char reply[128];
-			if (cmd_run(&seiza_ops, server, default_bindings[i].cmd, reply, sizeof(reply)) != 0) {
-				wlr_log(WLR_INFO, "seiza: %s -> %s", default_bindings[i].cmd, reply);
-			}
-			return true;
-		}
+/* Run the binding for this key combo, if there is one. True if it was one. */
+static bool handle_keybinding(struct tinywl_server *server, uint32_t mods, xkb_keysym_t sym) {
+	/* Alt+Escape always quits, even if the keys file is broken or rebinds it. */
+	if (mods == KMOD_ALT && xkb_keysym_to_lower(sym) == XKB_KEY_Escape) {
+		op_quit(server);
+		return true;
 	}
-	return false;
+	const struct binding *b = keys_find(&server->keys, mods, sym);
+	if (!b) {
+		return false;
+	}
+	char reply[128];
+	if (cmd_run(&seiza_ops, server, b->cmd, reply, sizeof(reply)) != 0) {
+		wlr_log(WLR_INFO, "seiza: %s -> %s", b->cmd, reply);
+	}
+	return true;
 }
 
 static void keyboard_handle_key(
@@ -728,13 +746,15 @@ static void keyboard_handle_key(
 			keyboard->wlr_keyboard->xkb_state, keycode, &syms);
 
 	bool handled = false;
-	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & WLR_MODIFIER_ALT) &&
-			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding. */
+	uint32_t wm = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
+	uint32_t modifiers = ((wm & WLR_MODIFIER_SHIFT) ? KMOD_SHIFT : 0) |
+		((wm & WLR_MODIFIER_CTRL) ? KMOD_CTRL : 0) |
+		((wm & WLR_MODIFIER_ALT) ? KMOD_ALT : 0) |
+		((wm & WLR_MODIFIER_LOGO) ? KMOD_SUPER : 0); /* caps/num lock don't count */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		/* A pressed key is tried as a compositor keybinding first. */
 		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i]);
+			handled = handle_keybinding(server, modifiers, syms[i]) || handled;
 		}
 	}
 
@@ -1600,6 +1620,7 @@ int main(int argc, char *argv[]) {
 	/* Start in star 0: its territory is centered so the default camera
 	 * (0,0) already looks at it on a 1920x1080 screen. */
 	persist_startup(&server);
+	keys_load(&server);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
