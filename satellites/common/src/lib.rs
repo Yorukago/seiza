@@ -4,6 +4,7 @@ pub mod apps;
 pub mod art;
 pub mod config;
 pub mod draw;
+pub mod figure;
 pub mod palette;
 pub mod sys;
 

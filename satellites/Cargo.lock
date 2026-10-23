@@ -295,6 +295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-constellations"
+version = "0.1.0"
+dependencies = [
+ "seiza-common",
+ "smithay-client-toolkit",
+]
+
+[[package]]
 name = "seiza-launcher"
 version = "0.1.0"
 dependencies = [

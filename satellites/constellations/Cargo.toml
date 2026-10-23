@@ -1,0 +1,8 @@
+[package]
+name = "seiza-constellations"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+seiza-common = { path = "../common" }
+smithay-client-toolkit = "0.21.1"
