@@ -33,6 +33,7 @@
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_session_lock_v1.h>
+#include <wlr/xwayland.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
@@ -70,6 +71,19 @@ struct star {
 	float color[4];
 	char apps[CSTAR_APPS_MAX][256]; /* remembered launch commands (never auto-launched) */
 	int napps;
+};
+
+/* An X11 override-redirect window: a menu, a tooltip, a drop-down. The program places it
+ * itself, in X coordinates, which are our world coordinates (managed windows are configured
+ * at their world position), so it is drawn there and nobody manages it. */
+struct xunmanaged {
+	struct wl_list link;
+	struct tinywl_server *server;
+	struct wlr_xwayland_surface *xs;
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_surface *surf; /* while mapped */
+	bool attached;                  /* map/unmap are listened to on the X11 surface */
+	struct wl_listener associate, dissociate, destroy, map, unmap, set_geometry, request_configure;
 };
 
 struct tinywl_server {
@@ -121,6 +135,10 @@ struct tinywl_server {
 	bool locked;
 	int links[CONST_LINKS_MAX][2]; /* threads between stars, as indexes in creation order */
 	int nlinks;
+	struct wlr_xwayland *xwayland;
+	struct wl_listener new_xwayland_surface, xwayland_ready;
+	struct wl_list unmanaged; /* struct xunmanaged */
+	struct wlr_scene_tree *xtop; /* in the canvas, raised above the windows: where those menus draw */
 	struct motion motion; /* pan duration and easing, from ~/.config/seiza/motion */
 	struct wlr_box full, usable; /* the output, and what the layer surfaces (the bar) leave of it; set by layers_arrange */
 	struct wlr_scene_tree *corner_tree; /* above everything: black corner masks make the screen rounded */
@@ -173,7 +191,11 @@ struct tinywl_toplevel {
 	struct wl_list link;
 	struct wl_list all_link; /* SEIZA: in server->all_toplevels from creation to destroy, mapped or not */
 	struct tinywl_server *server;
-	struct wlr_xdg_toplevel *xdg_toplevel;
+	struct wlr_xdg_toplevel *xdg_toplevel; /* a Wayland window... */
+	struct wlr_xwayland_surface *xsurface; /* ...or an X11 one (then xdg_toplevel is NULL) */
+	struct wlr_scene_surface *x_scene;     /* the X11 window's surface in the scene, while it is mapped */
+	bool x_attached;                       /* map/unmap/commit are listened to on the X11 window's surface */
+	struct wl_listener associate, dissociate, request_configure; /* X11 only */
 	struct wlr_scene_tree *scene_tree;
 	double wx, wy; /* SEIZA: window origin in world coordinates */
 	struct star *star; /* SEIZA: the workspace this window belongs to */
@@ -226,11 +248,89 @@ struct tinywl_keyboard {
 static float BORDER_FOCUSED[4], BORDER_IDLE[4], GLOW_FOCUSED[4]; /* set by frame_colors_load() */
 static const float GLOW_IDLE[4]      = {0, 0, 0, 0};
 
+/* A window is a Wayland one (xdg) or an X11 one (XWayland); the rest of the compositor asks these. */
+static struct wlr_surface *tl_surface(const struct tinywl_toplevel *tl) {
+	return tl->xsurface ? tl->xsurface->surface : tl->xdg_toplevel->base->surface;
+}
+
+static struct wlr_box tl_geometry(const struct tinywl_toplevel *tl) {
+	if (tl->xsurface) {
+		return (struct wlr_box){0, 0, tl->xsurface->width, tl->xsurface->height};
+	}
+	return tl->xdg_toplevel->base->geometry;
+}
+
+/* True once the client has something to configure: xdg is initialized, X11 is mapped. */
+static bool tl_ready(const struct tinywl_toplevel *tl) {
+	if (tl->xsurface) {
+		return tl->xsurface->surface && tl->xsurface->surface->mapped;
+	}
+	return tl->xdg_toplevel->base->initialized;
+}
+
+static void tl_set_size(struct tinywl_toplevel *tl, int w, int h) {
+	if (!tl->xsurface) {
+		wlr_xdg_toplevel_set_size(tl->xdg_toplevel, w, h);
+	} else if (w > 0 && h > 0) {
+		wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), w, h);
+	}
+}
+
+static void tl_close(struct tinywl_toplevel *tl) {
+	if (tl->xsurface) {
+		wlr_xwayland_surface_close(tl->xsurface);
+	} else {
+		wlr_xdg_toplevel_send_close(tl->xdg_toplevel);
+	}
+}
+
+static void tl_activate(struct tinywl_toplevel *tl, bool on) {
+	if (tl->xsurface) {
+		wlr_xwayland_surface_activate(tl->xsurface, on);
+	} else {
+		wlr_xdg_toplevel_set_activated(tl->xdg_toplevel, on);
+	}
+}
+
+static void tl_set_maximized(struct tinywl_toplevel *tl, bool on) {
+	if (tl->xsurface) {
+		wlr_xwayland_surface_set_maximized(tl->xsurface, on, on);
+	} else {
+		wlr_xdg_toplevel_set_maximized(tl->xdg_toplevel, on);
+	}
+}
+
+static struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, double x, double y, double *sx, double *sy) {
+	if (tl->xsurface) {
+		return tl->xsurface->surface ? wlr_surface_surface_at(tl->xsurface->surface, x, y, sx, sy) : NULL;
+	}
+	return wlr_xdg_surface_surface_at(tl->xdg_toplevel->base, x, y, sx, sy);
+}
+
+static pid_t tl_pid(const struct tinywl_toplevel *tl) {
+	pid_t pid = 0;
+	if (tl->xsurface) {
+		return tl->xsurface->pid;
+	}
+	wl_client_get_credentials(wl_resource_get_client(tl->xdg_toplevel->base->resource), &pid, NULL, NULL);
+	return pid;
+}
+
+/* The window that had keyboard focus, whichever kind it is, is told it no longer does. */
+static void surface_deactivate(struct wlr_surface *surface) {
+	struct wlr_xdg_toplevel *xdg = wlr_xdg_toplevel_try_from_wlr_surface(surface);
+	struct wlr_xwayland_surface *x = wlr_xwayland_surface_try_from_wlr_surface(surface);
+	if (xdg) {
+		wlr_xdg_toplevel_set_activated(xdg, false);
+	} else if (x) {
+		wlr_xwayland_surface_activate(x, false);
+	}
+}
+
 /* Fit the frame around the window's current geometry and color it by focus. */
 static void update_border(struct tinywl_toplevel *tl) {
-	struct wlr_box *g = &tl->xdg_toplevel->base->geometry;
-	bool focused = tl->server->seat->keyboard_state.focused_surface ==
-		tl->xdg_toplevel->base->surface;
+	struct wlr_box geo = tl_geometry(tl), *g = &geo;
+	bool focused = tl_surface(tl) && tl->server->seat->keyboard_state.focused_surface == tl_surface(tl);
 	int t = BORDER_W;
 	double z = tl->server->zoom;
 	int r = lround(WIN_RADIUS * z);
@@ -553,9 +653,21 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		tl->wy = fmin(fmax(tl->wy, tl->star->cy - STAR_H / 2.0 + (tl->mode ? 0 : tl->server->usable.y - tl->server->full.y)), tl->star->cy + STAR_H / 2.0 + WIN_MARGIN);
 	}
 	wlr_scene_node_set_position(&tl->scene_tree->node, lround(tl->wx * z), lround(tl->wy * z));
+	if (tl->xsurface && tl->xsurface->width && tl->xsurface->height &&
+			(tl->xsurface->x != lround(tl->wx) || tl->xsurface->y != lround(tl->wy))) {
+		/* An X11 program needs to know where it is (it places its menus from it). */
+		wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), tl->xsurface->width, tl->xsurface->height);
+	}
 	struct scale_arg arg = {z, tl->mode ? 0 : lround(WIN_RADIUS * z)}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
 	update_border(tl);
+}
+
+static void layout_unmanaged(struct xunmanaged *u) {
+	double z = u->server->zoom;
+	wlr_scene_node_set_position(&u->tree->node, lround(u->xs->x * z), lround(u->xs->y * z));
+	struct scale_arg arg = {z, 0};
+	wlr_scene_node_for_each_buffer(&u->tree->node, scale_buffer, &arg);
 }
 
 /* Re-place the canvas and every window; call after the camera or zoom changes. */
@@ -582,6 +694,10 @@ static void relayout_all(struct tinywl_server *server) {
 	struct star *s;
 	wl_list_for_each(s, &server->stars, link) {
 		layout_star(server, s);
+	}
+	struct xunmanaged *um;
+	wl_list_for_each(um, &server->unmanaged, link) {
+		layout_unmanaged(um);
 	}
 	publish_state(server);
 }
@@ -739,8 +855,8 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	struct tinywl_server *server = toplevel->server;
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *prev_surface = seat->keyboard_state.focused_surface;
-	struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
-	if (prev_surface == surface) {
+	struct wlr_surface *surface = tl_surface(toplevel);
+	if (!surface || prev_surface == surface) {
 		/* Don't re-focus an already focused surface. */
 		return;
 	}
@@ -750,19 +866,16 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 		 * it no longer has focus and the client will repaint accordingly, e.g.
 		 * stop displaying a caret.
 		 */
-		struct wlr_xdg_toplevel *prev_toplevel =
-			wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
-		if (prev_toplevel != NULL) {
-			wlr_xdg_toplevel_set_activated(prev_toplevel, false);
-		}
+		surface_deactivate(prev_surface);
 	}
 	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
 	/* Move the toplevel to the front */
 	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+	wlr_scene_node_raise_to_top(&server->xtop->node); /* X11 menus stay above the windows */
 	wl_list_remove(&toplevel->link);
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Activate the new surface */
-	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+	tl_activate(toplevel, true);
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -1221,11 +1334,11 @@ static struct tinywl_toplevel *focused_toplevel(struct tinywl_server *server) {
  * shortcut: dragging or resizing a maximized window leaves it flagged maximized; fix if it bothers. */
 static void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
 	struct tinywl_server *server = tl->server;
-	if (mode == tl->mode || !tl->star || !tl->xdg_toplevel->base->initialized) {
+	if (mode == tl->mode || !tl->star || !tl_ready(tl)) {
 		return;
 	}
 	if (tl->mode == 0) {
-		struct wlr_box *g = &tl->xdg_toplevel->base->geometry;
+		struct wlr_box geo = tl_geometry(tl), *g = &geo;
 		tl->saved_wx = tl->wx;
 		tl->saved_wy = tl->wy;
 		tl->saved_w = g->width;
@@ -1235,15 +1348,15 @@ static void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
 	if (mode == 0) {
 		tl->wx = tl->saved_wx;
 		tl->wy = tl->saved_wy;
-		wlr_xdg_toplevel_set_size(tl->xdg_toplevel, tl->saved_w, tl->saved_h);
+		tl_set_size(tl, tl->saved_w, tl->saved_h);
 	} else {
 		struct wlr_box r = server->usable;
 		int w = r.width ? r.width : STAR_W, h = r.height ? r.height : STAR_H;
 		tl->wx = tl->star->cx - STAR_W / 2.0 + (r.width ? r.x - server->full.x : 0);
 		tl->wy = tl->star->cy - STAR_H / 2.0 + (r.height ? r.y - server->full.y : 0);
-		wlr_xdg_toplevel_set_size(tl->xdg_toplevel, w, h);
+		tl_set_size(tl, w, h);
 	}
-	wlr_xdg_toplevel_set_maximized(tl->xdg_toplevel, mode == 1);
+	tl_set_maximized(tl, mode == 1);
 	layout_toplevel(tl);
 	if (tl->star == server->current_star) {
 		fly_to_star(server, tl->star);
@@ -1269,16 +1382,15 @@ static void op_move_window(void *ud, int dx, int dy) {
 static void op_resize_window(void *ud, int dw, int dh) {
 	struct tinywl_toplevel *tl = focused_toplevel(ud);
 	if (tl) {
-		struct wlr_box *g = &tl->xdg_toplevel->base->geometry;
-		wlr_xdg_toplevel_set_size(tl->xdg_toplevel,
-			fmax(MIN_WIN_W, g->width + dw), fmax(MIN_WIN_H, g->height + dh));
+		struct wlr_box g = tl_geometry(tl);
+		tl_set_size(tl, fmax(MIN_WIN_W, g.width + dw), fmax(MIN_WIN_H, g.height + dh));
 	}
 }
 
 static void op_close_window(void *ud) {
 	struct tinywl_toplevel *tl = focused_toplevel(ud);
 	if (tl) {
-		wlr_xdg_toplevel_send_close(tl->xdg_toplevel);
+		tl_close(tl);
 	}
 }
 
@@ -1568,10 +1680,19 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	}
 	double wxc = (lx + server->cam_x) / server->zoom;
 	double wyc = (ly + server->cam_y) / server->zoom;
+	struct xunmanaged *um;
+	wl_list_for_each_reverse(um, &server->unmanaged, link) { /* menus and tooltips: a surface, but no window */
+		if (um->surf) {
+			struct wlr_surface *s = wlr_surface_surface_at(um->xs->surface, wxc - um->xs->x, wyc - um->xs->y, sx, sy);
+			if (s) {
+				*surface = s;
+				return NULL;
+			}
+		}
+	}
 	struct tinywl_toplevel *tl;
 	wl_list_for_each(tl, &server->toplevels, link) {
-		struct wlr_surface *s = wlr_xdg_surface_surface_at(
-			tl->xdg_toplevel->base, wxc - tl->wx, wyc - tl->wy, sx, sy);
+		struct wlr_surface *s = tl_surface_at(tl, wxc - tl->wx, wyc - tl->wy, sx, sy);
 		if (s) {
 			*surface = s;
 			return tl;
@@ -1586,9 +1707,9 @@ static void reset_cursor_mode(struct tinywl_server *server) {
 	 * star (judged by its center); dropped in empty space it keeps its star. */
 	struct tinywl_toplevel *tl = server->grabbed_toplevel;
 	if (server->cursor_mode == TINYWL_CURSOR_MOVE && tl) {
-		struct wlr_box *g = &tl->xdg_toplevel->base->geometry;
-		struct star *s = star_at(server, tl->wx + g->x + g->width / 2.0,
-			tl->wy + g->y + g->height / 2.0);
+		struct wlr_box g = tl_geometry(tl);
+		struct star *s = star_at(server, tl->wx + g.x + g.width / 2.0,
+			tl->wy + g.y + g.height / 2.0);
 		if (s) {
 			tl->star = s;
 		}
@@ -1651,14 +1772,14 @@ static void process_cursor_resize(struct tinywl_server *server) {
 		}
 	}
 
-	struct wlr_box *geo_box = &toplevel->xdg_toplevel->base->geometry;
+	struct wlr_box geo = tl_geometry(toplevel), *geo_box = &geo;
 	toplevel->wx = new_left - geo_box->x;
 	toplevel->wy = new_top - geo_box->y;
 	layout_toplevel(toplevel);
 
 	int new_width = new_right - new_left;
 	int new_height = new_bottom - new_top;
-	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, new_width, new_height);
+	tl_set_size(toplevel, new_width, new_height);
 }
 
 /* Move a star and the windows that belong to it by a world-space delta. */
@@ -1854,7 +1975,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 				begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
 			} else {
 				/* Pick the corner by which quadrant of the window was hit. */
-				struct wlr_box *geo = &toplevel->xdg_toplevel->base->geometry;
+				struct wlr_box geometry = tl_geometry(toplevel), *geo = &geometry;
 				double mid_x = (toplevel->wx + geo->x + geo->width / 2.0) * server->zoom - server->cam_x;
 				double mid_y = (toplevel->wy + geo->y + geo->height / 2.0) * server->zoom - server->cam_y;
 				uint32_t edges = (server->cursor->x < mid_x ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
@@ -2104,11 +2225,9 @@ static void server_new_output(struct wl_listener *listener, void *data) {
  * offer to relaunch it later. Closing the window does not forget it. */
 static void remember_app(struct tinywl_toplevel *tl) {
 	struct star *s = tl->star;
-	pid_t pid;
+	pid_t pid = tl_pid(tl);
 	char cmd[256];
-	wl_client_get_credentials(wl_resource_get_client(tl->xdg_toplevel->base->resource),
-		&pid, NULL, NULL);
-	if (procinfo_cmdline(pid, cmd, sizeof(cmd)) != 0) {
+	if (pid <= 0 || procinfo_cmdline(pid, cmd, sizeof(cmd)) != 0) {
 		return;
 	}
 	struct cstar view = {.napps = s->napps}; /* reuse the de-dupe + cap logic */
@@ -2124,6 +2243,9 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
+	if (toplevel->xsurface && !toplevel->x_scene) {
+		toplevel->x_scene = wlr_scene_surface_create(toplevel->scene_tree, toplevel->xsurface->surface);
+	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 	remember_app(toplevel);
 
@@ -2140,6 +2262,10 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		reset_cursor_mode(toplevel->server);
 	}
 
+	if (toplevel->x_scene) {
+		wlr_scene_node_destroy(&toplevel->x_scene->buffer->node);
+		toplevel->x_scene = NULL;
+	}
 	wl_list_remove(&toplevel->link);
 	publish_state(toplevel->server);
 }
@@ -2148,7 +2274,7 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	/* Called when a new surface state is committed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
-	if (toplevel->xdg_toplevel->base->initial_commit) {
+	if (!toplevel->xsurface && toplevel->xdg_toplevel->base->initial_commit) {
 		/* When an xdg_surface performs an initial commit, the compositor must
 		 * reply with a configure so the client can map the surface. tinywl
 		 * configures the xdg_toplevel with 0,0 size to let the client pick the
@@ -2166,15 +2292,27 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 
 	wl_list_remove(&toplevel->all_link);
-	wl_list_remove(&toplevel->map.link);
-	wl_list_remove(&toplevel->unmap.link);
-	wl_list_remove(&toplevel->commit.link);
+	if (!toplevel->xsurface || toplevel->x_attached) {
+		wl_list_remove(&toplevel->map.link);
+		wl_list_remove(&toplevel->unmap.link);
+		wl_list_remove(&toplevel->commit.link);
+	}
+	if (toplevel->xsurface) {
+		wl_list_remove(&toplevel->associate.link);
+		wl_list_remove(&toplevel->dissociate.link);
+		wl_list_remove(&toplevel->request_configure.link);
+	}
 	wl_list_remove(&toplevel->destroy.link);
 	wl_list_remove(&toplevel->request_move.link);
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
 
+	if (toplevel->xsurface) {
+		/* The scene tree of a Wayland window goes with its surface; an X11 window's is ours,
+		 * with its frame and glow in it, and would stay on screen after the window closed. */
+		wlr_scene_node_destroy(&toplevel->scene_tree->node);
+	}
 	free(toplevel);
 }
 
@@ -2196,7 +2334,7 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 		server->grab_x = cur_wx - toplevel->wx;
 		server->grab_y = cur_wy - toplevel->wy;
 	} else {
-		struct wlr_box *geo_box = &toplevel->xdg_toplevel->base->geometry;
+		struct wlr_box geometry = tl_geometry(toplevel), *geo_box = &geometry;
 
 		double border_x = (toplevel->wx + geo_box->x) +
 			((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
@@ -2263,20 +2401,8 @@ static void xdg_toplevel_request_fullscreen(
 	}
 }
 
-static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
-	/* This event is raised when a client creates a new toplevel (application window). */
-	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
-	struct wlr_xdg_toplevel *xdg_toplevel = data;
-
-	/* Allocate a tinywl_toplevel for this surface */
-	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
-	toplevel->server = server;
-	toplevel->xdg_toplevel = xdg_toplevel;
-	toplevel->scene_tree =
-		wlr_scene_xdg_surface_create(toplevel->server->canvas, xdg_toplevel->base);
-	toplevel->scene_tree->node.data = toplevel;
-	xdg_toplevel->base->data = toplevel->scene_tree;
-
+/* What every new window gets, whichever kind: a frame, a star to live in, and a place in it. */
+static void toplevel_init_common(struct tinywl_server *server, struct tinywl_toplevel *toplevel) {
 	toplevel->border = wlr_scene_rect_create(toplevel->scene_tree, 0, 0, BORDER_IDLE);
 	toplevel->glow = wlr_scene_shadow_create(toplevel->scene_tree, 0, 0, WIN_RADIUS, GLOW_SIGMA, GLOW_IDLE);
 	wlr_scene_node_lower_to_bottom(&toplevel->border->node);
@@ -2296,6 +2422,23 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->wx = toplevel->star->cx - STAR_W / 2.0 + 60 + 40 * n;
 	toplevel->wy = toplevel->star->cy - STAR_H / 2.0 + 60 + 40 * n;
 	layout_toplevel(toplevel);
+}
+
+static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
+	/* This event is raised when a client creates a new toplevel (application window). */
+	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
+	struct wlr_xdg_toplevel *xdg_toplevel = data;
+
+	/* Allocate a tinywl_toplevel for this surface */
+	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
+	toplevel->server = server;
+	toplevel->xdg_toplevel = xdg_toplevel;
+	toplevel->scene_tree =
+		wlr_scene_xdg_surface_create(toplevel->server->canvas, xdg_toplevel->base);
+	toplevel->scene_tree->node.data = toplevel;
+	xdg_toplevel->base->data = toplevel->scene_tree;
+
+	toplevel_init_common(server, toplevel);
 
 	/* Listen to the various events it can emit */
 	toplevel->map.notify = xdg_toplevel_map;
@@ -2319,15 +2462,202 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
 }
 
+/* ---- SEIZA X11 windows (XWayland) ---- */
+
+/* The X11 window has a Wayland surface from association until dissociation; map, unmap and
+ * commit are listened to on it only meanwhile. */
+static void xwl_associate(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, associate);
+	struct wlr_surface *surface = tl->xsurface->surface;
+	tl->map.notify = xdg_toplevel_map;
+	wl_signal_add(&surface->events.map, &tl->map);
+	tl->unmap.notify = xdg_toplevel_unmap;
+	wl_signal_add(&surface->events.unmap, &tl->unmap);
+	tl->commit.notify = xdg_toplevel_commit;
+	wl_signal_add(&surface->events.commit, &tl->commit);
+	tl->x_attached = true;
+}
+
+static void xwl_dissociate(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, dissociate);
+	if (tl->x_attached) {
+		wl_list_remove(&tl->map.link);
+		wl_list_remove(&tl->unmap.link);
+		wl_list_remove(&tl->commit.link);
+		tl->x_attached = false;
+	}
+}
+
+/* The program asks for a size; the position is ours to give. */
+static void xwl_request_configure(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_configure);
+	struct wlr_xwayland_surface_configure_event *e = data;
+	wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), e->width, e->height);
+}
+
+static void xwl_request_move(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_move);
+	begin_interactive(tl, TINYWL_CURSOR_MOVE, 0);
+}
+
+static void xwl_request_resize(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_resize);
+	struct wlr_xwayland_resize_event *e = data;
+	begin_interactive(tl, TINYWL_CURSOR_RESIZE, e->edges);
+}
+
+static void xwl_request_maximize(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_maximize);
+	toplevel_set_mode(tl, tl->xsurface->maximized_horz && tl->xsurface->maximized_vert ? 1 : 0);
+}
+
+static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
+	/* No fullscreen in Seiza: the program is simply told it stays as it is. */
+}
+
+static void server_new_xwayland_toplevel(struct tinywl_server *server, struct wlr_xwayland_surface *xs) {
+	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
+	toplevel->server = server;
+	toplevel->xsurface = xs;
+	toplevel->scene_tree = wlr_scene_tree_create(server->canvas);
+	toplevel->scene_tree->node.data = toplevel;
+	xs->data = toplevel;
+	toplevel_init_common(server, toplevel);
+
+	toplevel->associate.notify = xwl_associate;
+	wl_signal_add(&xs->events.associate, &toplevel->associate);
+	toplevel->dissociate.notify = xwl_dissociate;
+	wl_signal_add(&xs->events.dissociate, &toplevel->dissociate);
+	toplevel->destroy.notify = xdg_toplevel_destroy;
+	wl_signal_add(&xs->events.destroy, &toplevel->destroy);
+	toplevel->request_configure.notify = xwl_request_configure;
+	wl_signal_add(&xs->events.request_configure, &toplevel->request_configure);
+	toplevel->request_move.notify = xwl_request_move;
+	wl_signal_add(&xs->events.request_move, &toplevel->request_move);
+	toplevel->request_resize.notify = xwl_request_resize;
+	wl_signal_add(&xs->events.request_resize, &toplevel->request_resize);
+	toplevel->request_maximize.notify = xwl_request_maximize;
+	wl_signal_add(&xs->events.request_maximize, &toplevel->request_maximize);
+	toplevel->request_fullscreen.notify = xwl_request_fullscreen;
+	wl_signal_add(&xs->events.request_fullscreen, &toplevel->request_fullscreen);
+	if (xs->surface) { /* it was associated before we heard of it */
+		xwl_associate(&toplevel->associate, NULL);
+	}
+}
+
+/* ...and the override-redirect ones: menus and tooltips, drawn where their program puts them. */
+static void um_map(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, map);
+	u->surf = wlr_scene_surface_create(u->tree, u->xs->surface);
+	wlr_scene_node_raise_to_top(&u->tree->node);
+	layout_unmanaged(u);
+}
+
+static void um_unmap(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, unmap);
+	if (u->surf) {
+		wlr_scene_node_destroy(&u->surf->buffer->node);
+		u->surf = NULL;
+	}
+}
+
+static void um_associate(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, associate);
+	u->map.notify = um_map;
+	wl_signal_add(&u->xs->surface->events.map, &u->map);
+	u->unmap.notify = um_unmap;
+	wl_signal_add(&u->xs->surface->events.unmap, &u->unmap);
+	u->attached = true;
+}
+
+static void um_dissociate(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, dissociate);
+	if (u->attached) {
+		wl_list_remove(&u->map.link);
+		wl_list_remove(&u->unmap.link);
+		u->attached = false;
+	}
+}
+
+static void um_moved(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, set_geometry);
+	layout_unmanaged(u);
+}
+
+static void um_request_configure(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, request_configure);
+	struct wlr_xwayland_surface_configure_event *e = data;
+	wlr_xwayland_surface_configure(u->xs, e->x, e->y, e->width, e->height); /* it knows where it wants to be */
+	layout_unmanaged(u);
+}
+
+static void um_destroy(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, destroy);
+	if (u->attached) {
+		wl_list_remove(&u->map.link);
+		wl_list_remove(&u->unmap.link);
+	}
+	wl_list_remove(&u->associate.link);
+	wl_list_remove(&u->dissociate.link);
+	wl_list_remove(&u->destroy.link);
+	wl_list_remove(&u->set_geometry.link);
+	wl_list_remove(&u->request_configure.link);
+	wl_list_remove(&u->link);
+	wlr_scene_node_destroy(&u->tree->node);
+	free(u);
+}
+
+static void server_new_xwayland_unmanaged(struct tinywl_server *server, struct wlr_xwayland_surface *xs) {
+	struct xunmanaged *u = calloc(1, sizeof(*u));
+	u->server = server;
+	u->xs = xs;
+	u->tree = wlr_scene_tree_create(server->xtop);
+	wl_list_insert(server->unmanaged.prev, &u->link);
+	u->associate.notify = um_associate;
+	wl_signal_add(&xs->events.associate, &u->associate);
+	u->dissociate.notify = um_dissociate;
+	wl_signal_add(&xs->events.dissociate, &u->dissociate);
+	u->destroy.notify = um_destroy;
+	wl_signal_add(&xs->events.destroy, &u->destroy);
+	u->set_geometry.notify = um_moved;
+	wl_signal_add(&xs->events.set_geometry, &u->set_geometry);
+	u->request_configure.notify = um_request_configure;
+	wl_signal_add(&xs->events.request_configure, &u->request_configure);
+	if (xs->surface) {
+		um_associate(&u->associate, NULL);
+	}
+}
+
+static void server_new_xwayland_surface(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(listener, server, new_xwayland_surface);
+	struct wlr_xwayland_surface *xs = data;
+	if (xs->override_redirect) {
+		server_new_xwayland_unmanaged(server, xs);
+	} else {
+		server_new_xwayland_toplevel(server, xs);
+	}
+}
+
+/* Xwayland is up: it shares our seat (keyboard, clipboard) and shows our pointer over its windows. */
+static void xwayland_ready(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(listener, server, xwayland_ready);
+	wlr_xwayland_set_seat(server->xwayland, server->seat);
+	struct wlr_xcursor *xc = wlr_xcursor_manager_get_xcursor(server->cursor_mgr, "default", 1);
+	if (xc && xc->image_count > 0) {
+		struct wlr_xcursor_image *img = xc->images[0];
+		wlr_xwayland_set_cursor(server->xwayland, wlr_xcursor_image_get_buffer(img), img->hotspot_x, img->hotspot_y);
+	}
+	wlr_log(WLR_INFO, "seiza: xwayland ready on DISPLAY=%s", server->xwayland->display_name);
+}
+
 /* Keyboard focus to a layer surface (launcher, menu), deactivating the window that had it. */
 static void layer_focus(struct tinywl_server *server, struct wlr_surface *surface) {
 	if (server->locked) {
 		return;
 	}
 	struct wlr_surface *prev = server->seat->keyboard_state.focused_surface;
-	struct wlr_xdg_toplevel *pt = prev ? wlr_xdg_toplevel_try_from_wlr_surface(prev) : NULL;
-	if (pt) {
-		wlr_xdg_toplevel_set_activated(pt, false);
+	if (prev) {
+		surface_deactivate(prev);
 	}
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
 	if (kb) {
@@ -2607,7 +2937,7 @@ int main(int argc, char *argv[]) {
 	 * to dig your fingers in and play with their behavior if you want. Note that
 	 * the clients cannot set the selection directly without compositor approval,
 	 * see the handling of the request_set_selection event below.*/
-	wlr_compositor_create(server.wl_display, 5, server.renderer);
+	struct wlr_compositor *compositor = wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
 	wlr_data_control_manager_v1_create(server.wl_display); /* SEIZA: lets wl-paste --watch see the clipboard (make clipboard) */
@@ -2633,6 +2963,8 @@ int main(int argc, char *argv[]) {
 	server.layers[0] = wlr_scene_tree_create(&server.scene->tree);
 	server.layers[1] = wlr_scene_tree_create(&server.scene->tree);
 	server.canvas = wlr_scene_tree_create(&server.scene->tree);
+	server.xtop = wlr_scene_tree_create(server.canvas);
+	wl_list_init(&server.unmanaged);
 	server.layers[2] = wlr_scene_tree_create(&server.scene->tree);
 	server.layers[3] = wlr_scene_tree_create(&server.scene->tree);
 	server.lock_tree = wlr_scene_tree_create(&server.scene->tree);
@@ -2654,6 +2986,19 @@ int main(int argc, char *argv[]) {
 	wl_list_init(&server.all_toplevels);
 	fly_to_star(&server, server.current_star); /* restored stars may not sit at the origin */
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
+	/* XWayland, started when the first X11 program connects. The programs we launch inherit
+	 * DISPLAY from here, so setting it is all they need to find it. */
+	server.xwayland = wlr_xwayland_create(server.wl_display, compositor, true);
+	if (server.xwayland) {
+		server.new_xwayland_surface.notify = server_new_xwayland_surface;
+		wl_signal_add(&server.xwayland->events.new_surface, &server.new_xwayland_surface);
+		server.xwayland_ready.notify = xwayland_ready;
+		wl_signal_add(&server.xwayland->events.ready, &server.xwayland_ready);
+		setenv("DISPLAY", server.xwayland->display_name, true);
+	} else {
+		wlr_log(WLR_ERROR, "seiza: could not set up XWayland: X11 programs will not run");
+	}
+
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 	wlr_viewporter_create(server.wl_display);
@@ -2761,6 +3106,11 @@ int main(int argc, char *argv[]) {
 
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
+	if (server.xwayland) {
+		wl_list_remove(&server.new_xwayland_surface.link);
+		wl_list_remove(&server.xwayland_ready.link);
+		wlr_xwayland_destroy(server.xwayland);
+	}
 	wl_display_destroy_clients(server.wl_display);
 
 	wl_list_remove(&server.new_xdg_toplevel.link);

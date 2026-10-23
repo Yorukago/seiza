@@ -5,7 +5,7 @@
 #   make test   build and run tests/test_*.c
 #   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor) into $(PREFIX)/bin; Seiza autostarts them
 
-PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon
+PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
 LDLIBS  := $(shell pkg-config --libs $(PKGS))
 
