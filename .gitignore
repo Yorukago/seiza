@@ -10,3 +10,4 @@ src/wlr-layer-shell-unstable-v1-protocol.h
 satellites/*/target/
 satellites/target/
 inspo/*.pdf
+src/figures-builtin.h

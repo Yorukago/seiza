@@ -5,22 +5,8 @@
 #include <string.h>
 #include "constellation.h"
 
-/* Built in, in the file syntax. Spread out evenly, so the figures do not come out huge. */
-static const struct { const char *name, *text; } PRESETS[] = {
-	{ "dipper",
-	  "point 0.00 0.15\npoint 0.20 0.38\npoint 0.40 0.52\npoint 0.60 0.45\n"
-	  "point 0.64 0.85\npoint 1.00 0.92\npoint 1.00 0.52\n"
-	  "link 0 1\nlink 1 2\nlink 2 3\nlink 3 4\nlink 4 5\nlink 5 6\nlink 6 3\n" },
-	{ "w",
-	  "point 0.00 0.10\npoint 0.25 0.90\npoint 0.50 0.25\npoint 0.75 0.95\npoint 1.00 0.20\n"
-	  "link 0 1\nlink 1 2\nlink 2 3\nlink 3 4\n" },
-	{ "kite",
-	  "point 0.50 0.00\npoint 0.90 0.38\npoint 0.50 0.76\npoint 0.10 0.38\npoint 0.50 1.30\n"
-	  "link 0 1\nlink 1 2\nlink 2 3\nlink 3 0\nlink 2 4\n" },
-	{ "crown",
-	  "point 0.00 0.70\npoint 0.14 0.28\npoint 0.40 0.04\npoint 0.68 0.04\npoint 0.92 0.30\npoint 1.00 0.74\n"
-	  "link 0 1\nlink 1 2\nlink 2 3\nlink 3 4\nlink 4 5\n" },
-};
+/* The built-in figures: the files in figures/, turned into a table by scripts/gen-figures.sh. */
+#include "figures-builtin.h"
 #define NPRESETS ((int)(sizeof(PRESETS) / sizeof(PRESETS[0])))
 
 int figure_parse(const char *text, struct figure *out) {

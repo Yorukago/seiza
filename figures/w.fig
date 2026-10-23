@@ -1,0 +1,9 @@
+point 0.00 0.10
+point 0.25 0.90
+point 0.50 0.25
+point 0.75 0.95
+point 1.00 0.20
+link 0 1
+link 1 2
+link 2 3
+link 3 4

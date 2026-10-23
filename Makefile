@@ -3,7 +3,7 @@
 #   make run    run nested inside your current compositor, with kitty
 #   make clipboard   same as run, with the clipboard shared with the host
 #   make test   build and run tests/test_*.c
-#   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings) into $(PREFIX)/bin; Seiza autostarts them
+#   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor) into $(PREFIX)/bin; Seiza autostarts them
 
 PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
@@ -16,6 +16,10 @@ ALL_SRC := $(wildcard src/*.c)
 
 all: seiza
 
+# The built-in figures, from figures/*.fig (figure.c includes the table).
+src/figures-builtin.h: $(wildcard figures/*.fig) scripts/gen-figures.sh
+	sh scripts/gen-figures.sh figures > $@
+
 # Protocol header generated from the xdg-shell XML (seiza.c includes it).
 src/xdg-shell-protocol.h:
 	wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
@@ -24,7 +28,7 @@ src/xdg-shell-protocol.h:
 src/wlr-layer-shell-unstable-v1-protocol.h: protocols/wlr-layer-shell-unstable-v1.xml
 	wayland-scanner server-header $< $@
 
-seiza: $(ALL_SRC) $(wildcard src/*.h) src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h
+seiza: $(ALL_SRC) $(wildcard src/*.h) src/figures-builtin.h src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h
 	$(CC) $(CFLAGS) $(ALL_SRC) -o $@ $(LDLIBS)
 
 # The nested compositor doesn't inherit Hyprland's keyboard layout, so pass it
@@ -40,7 +44,7 @@ clipboard: seiza
 
 TESTS :=$(patsubst tests/%.c,tests/bin/%,$(wildcard tests/test_*.c))
 
-tests/bin/%: tests/%.c $(LIB_SRC) $(wildcard src/*.h)
+tests/bin/%: tests/%.c $(LIB_SRC) $(wildcard src/*.h) src/figures-builtin.h
 	@mkdir -p tests/bin
 	$(CC) -O0 -g -Wall -Isrc $(shell pkg-config --cflags xkbcommon) $< $(LIB_SRC) -o $@ $(shell pkg-config --libs xkbcommon) -lm
 
@@ -62,11 +66,12 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-lock $(PREFIX)/bin/seiza-lock
 	install -Dm755 satellites/target/release/seiza-widgets $(PREFIX)/bin/seiza-widgets
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
+	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 scripts/seiza-wallpaper $(PREFIX)/bin/seiza-wallpaper
 	install -Dm644 scripts/wallust/wallust.toml $(PREFIX)/share/seiza/wallust/wallust.toml
 	install -Dm644 scripts/wallust/templates/seiza-palette $(PREFIX)/share/seiza/wallust/templates/seiza-palette
 
 clean:
-	rm -f seiza src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h; rm -rf tests/bin
+	rm -f seiza src/figures-builtin.h src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h; rm -rf tests/bin
 
 .PHONY: all run clipboard test smoke install clean
