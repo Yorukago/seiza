@@ -1,0 +1,5 @@
+sky=#{{background | strip}}
+dust=#{{color1 | strip}}
+mist=#{{color4 | strip}}
+glow=#{{color5 | strip}}
+text=#{{foreground | strip}}

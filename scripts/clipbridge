@@ -1,0 +1,21 @@
+#!/bin/sh
+# Two-way text clipboard sync between the host compositor and nested Seiza (needs wl-clipboard).
+# Started by `make clipboard`: HOST_WAYLAND_DISPLAY is the host, WAYLAND_DISPLAY is Seiza's.
+# shortcut: text only and no primary selection, upgrade if you need images.
+set -eu
+host=$HOST_WAYLAND_DISPLAY
+nested=$WAYLAND_DISPLAY
+last=$(mktemp)
+trap 'kill $(jobs -p) 2>/dev/null; rm -f "$last"' EXIT
+
+# One direction: on every copy at $1, mirror it to $2 unless it is what we just mirrored (stops ping-pong).
+sync() {
+	WAYLAND_DISPLAY=$1 wl-paste --type text --watch sh -c '
+		new=$(mktemp); cat > "$new"
+		cmp -s "$new" "$1" || { cp "$new" "$1"; WAYLAND_DISPLAY=$2 wl-copy --type text/plain < "$new"; }
+		rm -f "$new"' sh "$last" "$2" &
+}
+
+sync "$host" "$nested"
+sync "$nested" "$host"
+wait

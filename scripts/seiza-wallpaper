@@ -1,0 +1,8 @@
+#!/bin/sh
+# Recolor Seiza from an image: seiza-wallpaper picture.jpg. Restart the satellites (or use seiza-settings) to see it.
+set -e
+PATH="$PATH:$HOME/.cargo/bin" # wallust is often installed with cargo, which a session may not have on PATH
+self=$(readlink -f "$0")
+here=$(dirname "$self")/wallust
+[ -d "$here" ] || here=$(dirname "$self")/../share/seiza/wallust # as installed by make install
+exec wallust run -s -q -d "$here" "$@"

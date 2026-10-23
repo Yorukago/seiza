@@ -1,0 +1,5 @@
+# Seiza's own wallust setup: only writes ~/.config/seiza/palette, leaves your global wallust config alone.
+# `star` is left out on purpose so stars stay gold; add `star={{color3 | strip}}` to the template to recolor them.
+templates_dir = "templates"
+[templates]
+seiza = { template = "seiza-palette", target = "~/.config/seiza/palette" }
