@@ -141,6 +141,13 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	}
 	if (IS("relaunch")) { NEED(0); return reply(out, outn, ops->relaunch(ud), "relaunch failed"); }
 	if (IS("reload-config")) { NEED(0); return reply(out, outn, ops->reload_config(ud), "reload failed"); }
+	if (IS("new-constellation")) {
+		NEED(1);
+		if (!constellation_name_ok(w[2])) {
+			return reply(out, outn, -1, "bad name (use letters, digits, _ and -)");
+		}
+		return reply(out, outn, ops->new_constellation(ud, w[2]), "there is a constellation with that name already");
+	}
 	if (IS("save") || IS("load")) {
 		NEED(1);
 		if (!constellation_name_ok(w[2])) {

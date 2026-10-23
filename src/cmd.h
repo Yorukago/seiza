@@ -13,6 +13,7 @@ struct cmd_ops {
 	int  (*delete_star)(void *ud, int n); /* star n (1-based; 0 = the current one); -1 if it has windows, is the last one, or is not there */
 	int  (*save)(void *ud, const char *name);
 	int  (*load)(void *ud, const char *name);
+	int  (*new_constellation)(void *ud, const char *name); /* a fresh one with a single star, opened; -1 if the name is taken */
 	int  (*relaunch)(void *ud);
 	int  (*reload_config)(void *ud);
 	void (*quit)(void *ud);

@@ -1250,6 +1250,21 @@ static int op_load(void *ud, const char *name) {
 	return 0;
 }
 
+/* A new constellation, empty but for one star, and open it. The one you were in is kept as it was. */
+static int op_new_constellation(void *ud, const char *name) {
+	struct tinywl_server *server = ud;
+	struct constellation c;
+	if (constellation_load(server->cfg_dir, name, &c) == 0) {
+		return -1; /* never overwrite one that is there */
+	}
+	constellation_default(&c);
+	snprintf(c.name, sizeof(c.name), "%s", name);
+	if (constellation_save(&c, server->cfg_dir) != 0) {
+		return -1;
+	}
+	return op_load(server, name);
+}
+
 /* Frame colors from the palette file (the star color, a dim mix of it with the
  * sky for unfocused windows, and the star color as a soft premultiplied bloom),
  * and how the camera moves, from the motion file. */
@@ -1537,7 +1552,7 @@ static void op_help(void *ud) {
 }
 
 static const struct cmd_ops seiza_ops = {
-	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
+	op_overview, op_new_star, op_delete_star, op_save, op_load, op_new_constellation, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
 	op_toggle_maximize, op_set_figure, op_rename_star, op_add_star_at, op_move_star, op_debug_windows, op_debug_pointer, op_toggle_link,

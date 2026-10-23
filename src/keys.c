@@ -35,6 +35,7 @@ const char KEYS_DEFAULT[] =
 	"Alt+Shift+l = seiza-lock\n"
 	"Alt+s       = seiza-settings\n"
 	"Alt+c       = seiza-constellations\n"
+	"Alt+k       = seiza-carousel\n"
 	"Alt+1       = seiza goto 1\n"
 	"Alt+2       = seiza goto 2\n"
 	"Alt+3       = seiza goto 3\n"

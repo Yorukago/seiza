@@ -3,7 +3,7 @@
 #   make run    run nested inside your current compositor, with kitty
 #   make clipboard   same as run, with the clipboard shared with the host
 #   make test   build and run tests/test_*.c
-#   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor) into $(PREFIX)/bin; Seiza autostarts them
+#   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor, constellation view) into $(PREFIX)/bin; Seiza autostarts them
 
 PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
@@ -67,6 +67,7 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-widgets $(PREFIX)/bin/seiza-widgets
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
+	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel
 	install -Dm755 scripts/seiza-wallpaper $(PREFIX)/bin/seiza-wallpaper
 	install -Dm644 scripts/wallust/wallust.toml $(PREFIX)/share/seiza/wallust/wallust.toml
 	install -Dm644 scripts/wallust/templates/seiza-palette $(PREFIX)/share/seiza/wallust/templates/seiza-palette
