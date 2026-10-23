@@ -3,6 +3,7 @@
 pub mod apps;
 pub mod art;
 pub mod config;
+pub mod constellation;
 pub mod draw;
 pub mod figure;
 pub mod palette;
@@ -85,6 +86,17 @@ pub fn local_time(fmt: &std::ffi::CStr) -> String {
         let n = libc::strftime(buf.as_mut_ptr() as *mut _, buf.len(), fmt.as_ptr(), &tm);
         String::from_utf8_lossy(&buf[..n]).into_owned()
     }
+}
+
+/// The state Seiza is in right now: one line from `seiza subscribe`, then let go. None if Seiza
+/// is not there or does not answer in a second.
+pub fn snapshot() -> Option<State> {
+    let mut s = UnixStream::connect(sock_path()).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    s.write_all(b"seiza subscribe\n").ok()?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).ok()?;
+    State::parse(&line)
 }
 
 fn sock_path() -> String {

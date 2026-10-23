@@ -100,7 +100,7 @@ struct Bar {
     volume: Option<(u32, bool)>,
     last_poll: Option<Instant>,
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
-    mode_hit: (f32, f32), // the mode icon: opens the overview
+    mode_hit: (f32, f32), // the mode icon: opens the constellation view
     session_hit: (f32, f32), // the power button: opens the session menu
     cpu: Option<u32>,
     cpu_prev: Option<(u64, u64)>,
@@ -332,9 +332,7 @@ impl PointerHandler for Bar {
                     let _ = Command::new("seiza-session").spawn(); // the power menu is its own program
                 }
                 PointerEventKind::Press { button: BTN_LEFT, .. } if x >= self.mode_hit.0 && x < self.mode_hit.1 => {
-                    thread::spawn(|| {
-                        let _ = seiza_common::command("seiza overview");
-                    });
+                    let _ = Command::new("seiza-carousel").spawn(); // the constellation view is its own program (pressing again closes it)
                 }
                 PointerEventKind::Axis { vertical, .. } if on_volume && vertical.absolute != 0.0 => {
                     // scrolling up (negative) raises it; -l 1.0 stops it at 100%

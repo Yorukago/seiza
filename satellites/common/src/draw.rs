@@ -117,6 +117,50 @@ impl Canvas {
     }
 }
 
+/// Draw `src` onto `dst` scaled by `s` about `c`, shifted down by `dy`, at opacity `a`.
+/// `area` limits the work to the box the scaled content can reach (x, y, w, h in dst).
+pub fn composite(dst: &mut Canvas, src: &Canvas, c: (f32, f32), s: f32, dy: f32, a: f32, area: Option<(f32, f32, f32, f32)>) {
+    let (ax, ay, aw, ah) = area.unwrap_or((0.0, 0.0, dst.w as f32, dst.h as f32));
+    let (x0, x1) = (ax.max(0.0) as usize, ((ax + aw) as usize).min(dst.w));
+    let (y0, y1) = (ay.max(0.0) as usize, ((ay + ah) as usize).min(dst.h));
+    let at = |x: i32, y: i32| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= src.w as i32 || y >= src.h as i32 {
+            return [0.0; 4];
+        }
+        let p = src.px[y as usize * src.w + x as usize];
+        [(p >> 24) as f32, (p >> 16 & 255) as f32, (p >> 8 & 255) as f32, (p & 255) as f32]
+    };
+    let still = s == 1.0 && dy.fract() == 0.0; // no resampling: most of the content is empty, skip it
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if still {
+                let (sx, sy) = (x as i32, y as i32 - dy as i32);
+                let p = if sx < 0 || sy < 0 || sx >= src.w as i32 || sy >= src.h as i32 { 0 } else { src.px[sy as usize * src.w + sx as usize] };
+                if p == 0 {
+                    continue;
+                }
+                let m = [(p >> 24) as f32, (p >> 16 & 255) as f32, (p >> 8 & 255) as f32, (p & 255) as f32];
+                let sa = m[0] * a / 255.0;
+                let d = dst.px[y * dst.w + x];
+                let ch = |shift: u32, v: f32| ((d >> shift & 255) as f32 * (1.0 - sa) + v * a).min(255.0) as u32;
+                dst.px[y * dst.w + x] = ((sa * 255.0).min(255.0) as u32 + ((d >> 24 & 255) as f32 * (1.0 - sa)) as u32).min(255) << 24 | ch(16, m[1]) << 16 | ch(8, m[2]) << 8 | ch(0, m[3]);
+                continue;
+            }
+            let (sx, sy) = ((x as f32 + 0.5 - c.0) / s + c.0 - 0.5, (y as f32 + 0.5 - dy - c.1) / s + c.1 - 0.5);
+            let (ix, iy, fx, fy) = (sx.floor() as i32, sy.floor() as i32, sx - sx.floor(), sy - sy.floor());
+            let (p00, p10, p01, p11) = (at(ix, iy), at(ix + 1, iy), at(ix, iy + 1), at(ix + 1, iy + 1));
+            let m = |i: usize| (p00[i] * (1.0 - fx) + p10[i] * fx) * (1.0 - fy) + (p01[i] * (1.0 - fx) + p11[i] * fx) * fy;
+            let sa = m(0) * a / 255.0; // premultiplied: the source alpha scales every channel
+            if sa <= 0.0 {
+                continue;
+            }
+            let d = dst.px[y * dst.w + x];
+            let ch = |shift: u32, v: f32| ((d >> shift & 255) as f32 * (1.0 - sa) + v * a).min(255.0) as u32;
+            dst.px[y * dst.w + x] = ((sa * 255.0).min(255.0) as u32 + ((d >> 24 & 255) as f32 * (1.0 - sa)) as u32).min(255) << 24 | ch(16, m(1)) << 16 | ch(8, m(2)) << 8 | ch(0, m(3));
+        }
+    }
+}
+
 pub struct Text {
     font: Font,
     px: f32,

@@ -286,6 +286,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-carousel"
+version = "0.1.0"
+dependencies = [
+ "seiza-common",
+ "smithay-client-toolkit",
+]
+
+[[package]]
 name = "seiza-common"
 version = "0.1.0"
 dependencies = [
