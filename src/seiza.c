@@ -96,7 +96,6 @@ struct tinywl_server {
 	char constellation_name[32]; /* the active constellation (autosaved) */
 	bool overview;             /* zoomed-out constellation view */
 	struct star *hover_star;   /* star under the cursor in the overview */
-	struct wl_event_source *anim_timer; /* steps the camera glide */
 	struct {                   /* a camera glide: world-space centre and zoom, from -> to */
 		bool on;
 		double t0, dur, cx0, cy0, z0, cx1, cy1, z1;
@@ -565,13 +564,14 @@ static double mono_s(void) {
 
 static void anim_cancel(struct tinywl_server *server) {
 	server->anim.on = false;
-	wl_event_source_timer_update(server->anim_timer, 0);
 }
 
-static int anim_step(void *data) {
-	struct tinywl_server *server = data;
+/* One step of the glide, to the camera the clock says it should have now. It runs
+ * from output_frame, so every frame shown has exactly one step in it: a separate
+ * timer drifts against the screen's refresh and makes the glide stutter. */
+static void anim_step(struct tinywl_server *server) {
 	if (!server->anim.on) {
-		return 0;
+		return;
 	}
 	double p = fmin(1.0, (mono_s() - server->anim.t0) / server->anim.dur);
 	double e = motion_ease(&server->motion, p);
@@ -586,10 +586,7 @@ static int anim_step(void *data) {
 	relayout_all(server);
 	if (p >= 1.0) {
 		server->anim.on = false;
-	} else {
-		wl_event_source_timer_update(server->anim_timer, 16);
 	}
-	return 0;
 }
 
 static void anim_to(struct tinywl_server *server, double cam_x, double cam_y, double zoom) {
@@ -604,7 +601,10 @@ static void anim_to(struct tinywl_server *server, double cam_x, double cam_y, do
 	server->anim.t0 = mono_s();
 	server->anim.dur = motion_duration(&server->motion);
 	server->anim.on = true;
-	wl_event_source_timer_update(server->anim_timer, 1);
+	struct tinywl_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		wlr_output_schedule_frame(o->wlr_output); /* start the frames that will carry it */
+	}
 }
 
 /* The constellation view hides the bar (layer Top), the widgets (layer Bottom) and the windows. */
@@ -1771,8 +1771,13 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(
 		scene, output->wlr_output);
 
+	anim_step(output->server);
+
 	/* Render the scene if needed and commit the output */
 	wlr_scene_output_commit(scene_output, NULL);
+	if (output->server->anim.on) {
+		wlr_output_schedule_frame(output->wlr_output); /* the glide is not done: another frame */
+	}
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -2415,8 +2420,6 @@ int main(int argc, char *argv[]) {
 	wl_list_init(&server.layer_surfaces);
 	server.zoom = 1.0;
 	wl_list_init(&server.stars);
-	server.anim_timer = wl_event_loop_add_timer(
-		wl_display_get_event_loop(server.wl_display), anim_step, &server);
 	/* Start in star 0: its territory is centered so the default camera
 	 * (0,0) already looks at it on a 1920x1080 screen. */
 	persist_startup(&server);
