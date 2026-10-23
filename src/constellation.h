@@ -6,6 +6,8 @@
  *     constellation <name>
  *     star <x> <y> <star name, rest of the line>
  *     app <command line, rest of the line>       (belongs to the star above)
+ *     point <n>                                  (the figure point the star above holds; 1-based)
+ *     figure <name>                              (the figure the stars started from, if any)
  *     end                                        (a file without it was cut short)
  */
 #ifndef SEIZA_CONSTELLATION_H
@@ -21,10 +23,12 @@ struct cstar {
 	double x, y; /* center of the star's territory, world coordinates */
 	char apps[CSTAR_APPS_MAX][256];
 	int napps;
+	int fig_point; /* 1-based point of the constellation's figure this star holds; 0 = none */
 };
 
 struct constellation {
 	char name[32];
+	char figure[32]; /* "" = no figure */
 	struct cstar stars[CONST_STARS_MAX];
 	int nstars;
 };

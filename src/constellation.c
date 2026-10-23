@@ -57,9 +57,15 @@ int constellation_format(const struct constellation *c, char *buf, size_t n) {
 	for (int i = 0; i < c->nstars; i++) {
 		const struct cstar *s = &c->stars[i];
 		PUT("star %.17g %.17g %s\n", s->x, s->y, s->name);
+		if (s->fig_point > 0) {
+			PUT("point %d\n", s->fig_point);
+		}
 		for (int j = 0; j < s->napps; j++) {
 			PUT("app %s\n", s->apps[j]);
 		}
+	}
+	if (c->figure[0]) {
+		PUT("figure %s\n", c->figure);
 	}
 	PUT("end\n");
 	#undef PUT
@@ -96,6 +102,13 @@ int constellation_parse(const char *text, struct constellation *out) {
 			s->x = x;
 			s->y = y;
 			snprintf(s->name, sizeof(s->name), "%s", line + 5 + off);
+		} else if (strncmp(line, "point ", 6) == 0 && out->nstars > 0) {
+			int n;
+			if (sscanf(line + 6, "%d", &n) != 1 || n < 1 || n > 255) { ok = 0; break; }
+			out->stars[out->nstars - 1].fig_point = n;
+		} else if (strncmp(line, "figure ", 7) == 0 && have_header) {
+			if (!constellation_name_ok(line + 7)) { ok = 0; break; }
+			snprintf(out->figure, sizeof(out->figure), "%s", line + 7);
 		} else if (strncmp(line, "app ", 4) == 0 && out->nstars > 0) {
 			constellation_add_app(&out->stars[out->nstars - 1], line + 4);
 		} else if (strcmp(line, "end") == 0 && have_header) {

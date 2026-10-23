@@ -47,6 +47,7 @@
 #include "keys.h"
 #include "palette.h"
 #include "motion.h"
+#include "figure.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -69,6 +70,7 @@ struct star {
 	float color[4];
 	char apps[CSTAR_APPS_MAX][256]; /* remembered launch commands (never auto-launched) */
 	int napps;
+	int fig_point; /* 1-based point of the constellation's figure this star holds; 0 = none */
 };
 
 struct tinywl_server {
@@ -118,6 +120,8 @@ struct tinywl_server {
 	struct wlr_scene_tree *lock_tree;
 	struct wlr_scene_rect *lock_bg;
 	bool locked;
+	char figure_name[32]; /* the figure the constellation's stars started from, "" = none */
+	struct figure fig;    /* that figure, loaded; valid while figure_name is set */
 	struct motion motion; /* pan duration and easing, from ~/.config/seiza/motion */
 	struct wlr_box full, usable; /* the output, and what the layer surfaces (the bar) leave of it; set by layers_arrange */
 	struct wlr_scene_tree *corner_tree; /* above everything: black corner masks make the screen rounded */
@@ -305,17 +309,41 @@ static struct star *star_create_at(struct tinywl_server *server, const char *nam
 
 static struct star *star_at(struct tinywl_server *server, double wx, double wy);
 
-/* Make a new star in the first free slot of the 3-column grid. */
-static struct star *star_create(struct tinywl_server *server) {
+/* The first free slot of the 3-column grid. */
+static int grid_slot(struct tinywl_server *server, double *cx, double *cy) {
 	int slot = 0;
-	double cx, cy;
 	for (;; slot++) {
-		cx = STAR_W / 2.0 + (slot % 3) * STAR_DX;
-		cy = STAR_H / 2.0 + (slot / 3) * STAR_DY;
-		if (!star_at(server, cx, cy)) {
-			break;
+		*cx = STAR_W / 2.0 + (slot % 3) * STAR_DX;
+		*cy = STAR_H / 2.0 + (slot / 3) * STAR_DY;
+		if (!star_at(server, *cx, *cy)) {
+			return slot;
 		}
 	}
+}
+
+/* Make a new star: on the first free point of the constellation's figure, if it has
+ * one, else in the first free slot of the grid. */
+static struct star *star_create(struct tinywl_server *server) {
+	double cx, cy;
+	if (server->figure_name[0]) {
+		double scale = figure_scale(&server->fig, STAR_DX, STAR_DY);
+		for (int i = 0; i < server->fig.n; i++) {
+			struct star *s;
+			bool taken = false;
+			wl_list_for_each(s, &server->stars, link) {
+				taken |= s->fig_point == i + 1;
+			}
+			figure_point(&server->fig, i, scale, STAR_W / 2.0, STAR_H / 2.0, &cx, &cy);
+			if (!taken && !star_at(server, cx, cy)) {
+				char name[32];
+				snprintf(name, sizeof(name), "star %d", i);
+				struct star *n = star_create_at(server, name, cx, cy);
+				n->fig_point = i + 1;
+				return n;
+			}
+		}
+	}
+	int slot = grid_slot(server, &cx, &cy);
 	char name[32];
 	snprintf(name, sizeof(name), "star %d", slot);
 	return star_create_at(server, name, cx, cy);
@@ -337,6 +365,7 @@ static struct star *star_at(struct tinywl_server *server, double wx, double wy) 
 static int persist_write(struct tinywl_server *server, const char *name, bool make_last) {
 	struct constellation c = {0};
 	snprintf(c.name, sizeof(c.name), "%s", name);
+	snprintf(c.figure, sizeof(c.figure), "%s", server->figure_name);
 	struct star *s;
 	wl_list_for_each(s, &server->stars, link) {
 		if (c.nstars >= CONST_STARS_MAX) {
@@ -347,6 +376,7 @@ static int persist_write(struct tinywl_server *server, const char *name, bool ma
 		cs->x = s->cx;
 		cs->y = s->cy;
 		cs->napps = s->napps;
+		cs->fig_point = s->fig_point;
 		memcpy(cs->apps, s->apps, sizeof(cs->apps));
 	}
 	char last[32];
@@ -368,8 +398,13 @@ static void persist_save(struct tinywl_server *server) {
 /* Build the stars of `c` and make the first one current. */
 static void persist_apply(struct tinywl_server *server, const struct constellation *c) {
 	snprintf(server->constellation_name, sizeof(server->constellation_name), "%s", c->name);
+	server->figure_name[0] = '\0'; /* a figure that cannot be found just means no threads */
+	if (c->figure[0] && figure_find(server->cfg_dir, c->figure, &server->fig) == 0) {
+		snprintf(server->figure_name, sizeof(server->figure_name), "%s", c->figure);
+	}
 	for (int i = 0; i < c->nstars; i++) {
 		struct star *s = star_create_at(server, c->stars[i].name, c->stars[i].x, c->stars[i].y);
+		s->fig_point = c->stars[i].fig_point;
 		s->napps = c->stars[i].napps;
 		memcpy(s->apps, c->stars[i].apps, sizeof(s->apps));
 	}
@@ -434,6 +469,24 @@ static void publish_state(struct tinywl_server *server) {
 			st->cx, st->cy, STAR_W, STAR_H, windows);
 		if (at + 200 >= sizeof(buf)) {
 			return; /* does not fit: keep the last good state rather than send half */
+		}
+	}
+	/* threads: the figure's links between points, as pairs of indexes into `stars` */
+	at += snprintf(buf + at, sizeof(buf) - at, "],\"links\":[");
+	bool first = true;
+	for (int l = 0; server->figure_name[0] && l < server->fig.nlinks; l++) {
+		int ends[2] = {-1, -1}, idx = 0;
+		wl_list_for_each(st, &server->stars, link) {
+			for (int e = 0; e < 2; e++) {
+				if (st->fig_point == server->fig.links[l][e] + 1) {
+					ends[e] = idx;
+				}
+			}
+			idx++;
+		}
+		if (ends[0] >= 0 && ends[1] >= 0 && at + 40 < sizeof(buf)) {
+			at += snprintf(buf + at, sizeof(buf) - at, "%s[%d,%d]", first ? "" : ",", ends[0], ends[1]);
+			first = false;
 		}
 	}
 	snprintf(buf + at, sizeof(buf) - at, "]}");
@@ -770,6 +823,48 @@ static int op_new_star(void *ud) {
 	struct tinywl_server *server = ud;
 	fly_to_star(server, star_create(server));
 	persist_save(server);
+	return 0;
+}
+
+static void star_move(struct tinywl_server *server, struct star *s, double dx, double dy);
+
+/* Lay the constellation's stars out on a figure, in order, and join them with its threads;
+ * "none" lets go of the figure. The stars stay free to move afterwards. */
+static int op_set_figure(void *ud, const char *name) {
+	struct tinywl_server *server = ud;
+	struct star *s;
+	if (strcmp(name, "none") == 0) {
+		server->figure_name[0] = '\0';
+		wl_list_for_each(s, &server->stars, link) {
+			s->fig_point = 0;
+		}
+	} else {
+		struct figure f;
+		if (figure_find(server->cfg_dir, name, &f) != 0) {
+			return -1;
+		}
+		server->fig = f;
+		snprintf(server->figure_name, sizeof(server->figure_name), "%s", name);
+		double scale = figure_scale(&f, STAR_DX, STAR_DY), x, y;
+		int i = 0;
+		wl_list_for_each(s, &server->stars, link) {
+			s->fig_point = i < f.n ? i + 1 : 0;
+			if (i < f.n) {
+				figure_point(&f, i, scale, STAR_W / 2.0, STAR_H / 2.0, &x, &y);
+				star_move(server, s, x - s->cx, y - s->cy);
+			}
+			i++;
+		}
+		wl_list_for_each(s, &server->stars, link) { /* stars past the last point go to free grid slots */
+			if (!s->fig_point) {
+				int slot = grid_slot(server, &x, &y);
+				(void)slot;
+				star_move(server, s, x - s->cx, y - s->cy);
+			}
+		}
+	}
+	persist_save(server);
+	relayout_all(server);
 	return 0;
 }
 
@@ -1127,7 +1222,7 @@ static const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
-	op_toggle_maximize,
+	op_toggle_maximize, op_set_figure,
 };
 
 /* Run the binding for this key combo, if there is one. True if it was one. */

@@ -117,6 +117,7 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 		return reply(out, outn, ops->goto_star(ud, n), "no such star");
 	}
 	if (IS("help")) { NEED(0); ops->help(ud); return reply(out, outn, 0, ""); }
+	if (IS("figure")) { NEED(1); return reply(out, outn, ops->set_figure(ud, w[2]), "no such figure"); }
 	if (IS("maximize")) { NEED(0); ops->toggle_maximize(ud); return reply(out, outn, 0, ""); }
 	if (IS("close-window")) { NEED(0); ops->close_window(ud); return reply(out, outn, 0, ""); }
 	if (IS("move-window") || IS("resize-window") || IS("focus")) {

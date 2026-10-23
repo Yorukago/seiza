@@ -27,6 +27,7 @@ struct cmd_ops {
 	void (*help)(void *ud);                          /* show the key bindings in a window */
 	void (*focus_dir)(void *ud, int dx, int dy);     /* nearest window that way (signs only) */
 	void (*toggle_maximize)(void *ud);               /* focused window */
+	int  (*set_figure)(void *ud, const char *name);  /* lay the stars out on a figure; "none" lets go; -1 if unknown */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other
