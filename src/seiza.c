@@ -83,7 +83,8 @@ struct xunmanaged {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_surface *surf; /* while mapped */
 	bool attached;                  /* map/unmap are listened to on the X11 surface */
-	struct wl_listener associate, dissociate, destroy, map, unmap, set_geometry, request_configure;
+	bool committing;                /* so is commit, while it is shown */
+	struct wl_listener associate, dissociate, destroy, map, unmap, set_geometry, request_configure, commit;
 };
 
 struct tinywl_server {
@@ -1135,8 +1136,9 @@ static void op_debug_windows(void *ud) {
 			}
 			star++;
 		}
-		wlr_log(WLR_INFO, "seiza windows: #%d %s star %d at (%.0f,%.0f) %dx%d mode %d surface %p class '%s' title '%s'", i++,
-			tl->xsurface ? "x11" : "wayland", star, tl->wx, tl->wy, g.width, g.height, tl->mode, (void *)tl_surface(tl),
+		wlr_log(WLR_INFO, "seiza windows: #%d %s star %d at (%.0f,%.0f) %dx%d (drawn %dx%d) mode %d surface %p class '%s' title '%s'", i++,
+			tl->xsurface ? "x11" : "wayland", star, tl->wx, tl->wy, g.width, g.height,
+			tl->x_scene ? tl->x_scene->buffer->dst_width : -1, tl->x_scene ? tl->x_scene->buffer->dst_height : -1, tl->mode, (void *)tl_surface(tl),
 			tl->xsurface && tl->xsurface->class ? tl->xsurface->class : (tl->xdg_toplevel && tl->xdg_toplevel->app_id ? tl->xdg_toplevel->app_id : ""),
 			tl->xsurface && tl->xsurface->title ? tl->xsurface->title : (tl->xdg_toplevel && tl->xdg_toplevel->title ? tl->xdg_toplevel->title : ""));
 	}
@@ -2317,6 +2319,11 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 	if (toplevel->xsurface && !toplevel->x_scene) {
 		toplevel->x_scene = wlr_scene_surface_create(toplevel->scene_tree, toplevel->xsurface->surface);
+		/* The scene puts the drawn size back to the unscaled one on every commit, so our commit
+		 * listener (which re-applies the zoom) has to come after its own: add it again, last. */
+		wl_list_remove(&toplevel->commit.link);
+		wl_signal_add(&toplevel->xsurface->surface->events.commit, &toplevel->commit);
+		layout_toplevel(toplevel);
 	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 	remember_app(toplevel);
@@ -2628,15 +2635,28 @@ static void server_new_xwayland_toplevel(struct tinywl_server *server, struct wl
 }
 
 /* ...and the override-redirect ones: menus and tooltips, drawn where their program puts them. */
+/* The scene resets the drawn size on every commit: put the zoom back, after it. */
+static void um_commit(struct wl_listener *listener, void *data) {
+	struct xunmanaged *u = wl_container_of(listener, u, commit);
+	layout_unmanaged(u);
+}
+
 static void um_map(struct wl_listener *listener, void *data) {
 	struct xunmanaged *u = wl_container_of(listener, u, map);
 	u->surf = wlr_scene_surface_create(u->tree, u->xs->surface);
+	u->commit.notify = um_commit;
+	wl_signal_add(&u->xs->surface->events.commit, &u->commit); /* after the scene's own */
+	u->committing = true;
 	wlr_scene_node_raise_to_top(&u->tree->node);
 	layout_unmanaged(u);
 }
 
 static void um_unmap(struct wl_listener *listener, void *data) {
 	struct xunmanaged *u = wl_container_of(listener, u, unmap);
+	if (u->committing) {
+		wl_list_remove(&u->commit.link);
+		u->committing = false;
+	}
 	if (u->surf) {
 		wlr_scene_node_destroy(&u->surf->buffer->node);
 		u->surf = NULL;
@@ -2675,6 +2695,9 @@ static void um_request_configure(struct wl_listener *listener, void *data) {
 
 static void um_destroy(struct wl_listener *listener, void *data) {
 	struct xunmanaged *u = wl_container_of(listener, u, destroy);
+	if (u->committing) {
+		wl_list_remove(&u->commit.link);
+	}
 	if (u->attached) {
 		wl_list_remove(&u->map.link);
 		wl_list_remove(&u->unmap.link);
