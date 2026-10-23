@@ -59,6 +59,9 @@ impl Settings {
             Effect::ReloadConfig => {
                 let _ = seiza_common::command("seiza reload-config");
             }
+            Effect::Run(cmd) => {
+                let _ = seiza_common::command(cmd);
+            }
             Effect::ApplyColors => {
                 let path = self.ui.values["look/wallpaper"].trim().replace('~', &std::env::var("HOME").unwrap_or_default());
                 self.ui.msg = match Command::new("seiza-wallpaper").arg(&path).output() {
@@ -79,14 +82,15 @@ impl Settings {
     }
 
     fn key(&mut self, event: &KeyEvent) {
-        let typing = self.ui.focus.is_some_and(|id| id == "look/wallpaper");
+        let typing = self.ui.focus.is_some();
         match event.keysym {
             Keysym::Escape if typing => self.ui.focus = None,
             Keysym::Escape => self.exit = true,
             Keysym::Return | Keysym::KP_Enter if typing => {
-                self.ui.focus = None;
-                let e = self.ui.set("look/apply", "1".into());
-                self.run(e);
+                if self.ui.focus.take() == Some("look/wallpaper") {
+                    let e = self.ui.set("look/apply", "1".into());
+                    self.run(e);
+                }
             }
             Keysym::BackSpace => self.ui.backspace(),
             Keysym::Up if !typing => self.ui.page = self.ui.page.saturating_sub(1),

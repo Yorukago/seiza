@@ -11,7 +11,7 @@ use seiza_common::{
 };
 
 pub const W: f32 = 900.0;
-pub const H: f32 = 560.0;
+pub const H: f32 = 640.0;
 const NAV_W: f32 = 190.0;
 const ROW_H: f32 = 78.0;
 
@@ -22,6 +22,7 @@ pub enum Ctl {
     Toggle,
     Path,
     Button(&'static str),
+    Swatches, // the palette's colors, read-only
 }
 
 pub struct Row {
@@ -39,24 +40,53 @@ pub struct Page {
 }
 
 pub fn pages() -> Vec<Page> {
+    let row = |id, label, hint, ctl, default| Row { id, label, hint, ctl, default };
+    let tog = |id, label, hint, default| row(id, label, hint, Ctl::Toggle, default);
     vec![
         Page { name: "look", blurb: "seiza reads a picture and borrows its colors.", rows: vec![
-            Row { id: "sky/nebula", label: "painted sky", hint: "how much cloud the night shows", ctl: Ctl::Slider(0.0, 1.0, 0.05), default: "0.4" },
-            Row { id: "look/wallpaper", label: "colors from picture", hint: "a path to an image; wallust does the reading", ctl: Ctl::Path, default: "" },
-            Row { id: "look/apply", label: "borrow the colors", hint: "restarts the bar, the sky and the widgets", ctl: Ctl::Button("apply"), default: "" },
+            row("look/swatches", "the sky now", "the colors every program draws with", Ctl::Swatches, ""),
+            row("look/wallpaper", "colors from picture", "a path to an image; wallust does the reading", Ctl::Path, ""),
+            row("look/apply", "borrow the colors", "restarts the bar, the sky and the widgets", Ctl::Button("apply"), ""),
+            tog("look/contrast_guard", "keep text readable", "swaps in cream text if a picture is too dim", "1"),
+            row("look/clock", "clock", "24 hours or 12", Ctl::Choice(&["24", "12"]), "24"),
+        ]},
+        Page { name: "window", blurb: "the frame around every window.", rows: vec![
+            row("frame/radius", "corner roundness", "in pixels", Ctl::Slider(0.0, 32.0, 1.0), "14"),
+            row("frame/border", "frame thickness", "in pixels", Ctl::Slider(0.0, 8.0, 1.0), "2"),
+            row("frame/glow", "glow", "the bloom behind a window", Ctl::Choice(&["off", "soft", "bright"]), "soft"),
+        ]},
+        Page { name: "bar", blurb: "what the bar says.", rows: vec![
+            tog("bar/date", "date", "next to the clock", "1"),
+            tog("bar/stats", "system stats", "cpu and ram", "1"),
+            tog("bar/volume", "volume", "the speaker level", "1"),
+            tog("bar/battery", "battery", "only where there is one", "1"),
+        ]},
+        Page { name: "stars", blurb: "the sky behind everything.", rows: vec![
+            row("sky/nebula", "painted sky", "how much cloud the night shows", Ctl::Slider(0.0, 1.0, 0.05), "0.4"),
+            tog("sky/shooting", "shooting stars", "now and then", "1"),
+            tog("sky/labels", "star names", "in the overview", "1"),
+            tog("sky/threads", "threads", "the lines joining stars in the overview", "1"),
         ]},
         Page { name: "motion", blurb: "seiza is never in a hurry.", rows: vec![
-            Row { id: "motion/pan_secs", label: "pan duration", hint: "how long a pan between altitudes takes", ctl: Ctl::Slider(0.1, 2.0, 0.05), default: "0.35" },
-            Row { id: "motion/easing", label: "easing", hint: "how a pan settles", ctl: Ctl::Choice(&["drift", "glide", "float"]), default: "drift" },
-            Row { id: "motion/reduce", label: "reduce motion", hint: "pans become jumps", ctl: Ctl::Toggle, default: "0" },
+            row("motion/pan_secs", "pan duration", "how long a pan between altitudes takes", Ctl::Slider(0.1, 2.0, 0.05), "0.35"),
+            row("motion/easing", "easing", "how a pan settles", Ctl::Choice(&["drift", "glide", "float"]), "drift"),
+            tog("motion/reduce", "reduce motion", "pans become jumps", "0"),
         ]},
-        Page { name: "launcher", blurb: "how the sky answers when you ask.", rows: vec![
-            Row { id: "launcher/style", label: "look", hint: "a list, or apps as stars", ctl: Ctl::Choice(&["list", "stars"]), default: "list" },
+        Page { name: "yoru", blurb: "how the launcher and the menus behave.", rows: vec![
+            tog("yoru/lines", "Yoru's lines", "the little quips on the lock screen and launcher", "1"),
+            tog("yoru/confirm", "confirm power actions", "press twice to shut down or log out", "1"),
+            row("launcher/style", "launcher look", "a list, or apps as stars", Ctl::Choice(&["list", "stars"]), "list"),
+            row("launcher/search", "web search", "what a query that is no app asks", Ctl::Choice(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo"),
+            row("launcher/terminal", "terminal", "runs apps that want one; kitty if empty", Ctl::Path, ""),
         ]},
         Page { name: "widgets", blurb: "what lives on the sky.", rows: vec![
-            Row { id: "widgets/clock", label: "clock", hint: "the time, and the moon's phase", ctl: Ctl::Toggle, default: "1" },
-            Row { id: "widgets/calendar", label: "calendar", hint: "this month", ctl: Ctl::Toggle, default: "1" },
-            Row { id: "widgets/system", label: "system", hint: "cpu, ram and temperature", ctl: Ctl::Toggle, default: "1" },
+            tog("widgets/clock", "clock", "the time, and the moon's phase", "1"),
+            tog("widgets/calendar", "calendar", "this month", "1"),
+            tog("widgets/system", "system", "cpu, ram and temperature", "1"),
+        ]},
+        Page { name: "keys", blurb: "keys are written in ~/.config/seiza/keys.", rows: vec![
+            row("keys/help", "show all bindings", "asks seiza to list them", Ctl::Button("show"), ""),
+            row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
         ]},
     ]
 }
@@ -85,6 +115,7 @@ pub enum Effect {
     None,
     ReloadConfig,
     ApplyColors,
+    Run(&'static str),
 }
 
 impl Ui {
@@ -95,6 +126,7 @@ impl Ui {
         for r in pages.iter().flat_map(|p| &p.rows) {
             let v = match (r.id.split_once('/'), &widgets) {
                 (Some(("widgets", name)), Some(text)) => if text.lines().any(|l| l.trim() == name) { "1" } else { "0" }.to_string(),
+                (Some((file, key)), _) if file != "widgets" && matches!(r.ctl, Ctl::Toggle) => if config::flag(file, key, r.default == "1") { "1" } else { "0" }.to_string(),
                 (Some((file, key)), _) if file != "widgets" => config::get(file, key).unwrap_or_else(|| r.default.to_string()),
                 _ => r.default.to_string(),
             };
@@ -123,6 +155,7 @@ impl Ui {
             Ctl::Toggle => (50.0, 28.0),
             Ctl::Path => (330.0, 36.0),
             Ctl::Button(_) => (110.0, 36.0),
+            Ctl::Swatches => (6.0 * 34.0, 28.0),
         };
         let x = W - 36.0 - w;
         let y = 112.0 + i as f32 * ROW_H + (ROW_H - h) / 2.0 - 6.0;
@@ -138,6 +171,7 @@ impl Ui {
                 std::fs::create_dir_all(config::path("widgets").parent().unwrap()).and_then(|_| std::fs::write(config::path("widgets"), text))
             }
             "look" if key == "apply" => Ok(()),
+            "keys" => Ok(()),
             _ => config::set(file, key, &val),
         };
         self.msg = match saved {
@@ -147,6 +181,8 @@ impl Ui {
         let restart: &[&'static str] = match file {
             "sky" => &["seiza-starfield"],
             "widgets" => &["seiza-widgets"],
+            "bar" => &["seiza-bar"],
+            "look" if key != "apply" => &["seiza-bar", "seiza-widgets", "seiza-starfield"],
             _ => &[],
         };
         for p in restart {
@@ -155,7 +191,9 @@ impl Ui {
             }
         }
         match file {
-            "motion" => Effect::ReloadConfig,
+            "motion" | "frame" => Effect::ReloadConfig,
+            "keys" if key == "help" => Effect::Run("seiza help"),
+            "keys" => Effect::ReloadConfig,
             "look" if key == "apply" => Effect::ApplyColors,
             _ => Effect::None,
         }
@@ -183,7 +221,8 @@ impl Ui {
                     self.focus = Some(id); // dragging stays on this slider even when the pointer leaves it
                     let t = ((px - cx) / cw).clamp(0.0, 1.0);
                     let v = (min + (max - min) * t) / step;
-                    return self.set(id, format!("{:.2}", v.round() * step));
+                    let v = v.round() * step;
+                    return self.set(id, if step.fract() == 0.0 { format!("{v}") } else { format!("{v:.2}") });
                 }
                 Ctl::Choice(opts) if inside && !dragging => {
                     let n = (((px - cx) / cw) * opts.len() as f32) as usize;
@@ -295,12 +334,19 @@ impl Ui {
                     let focused = self.focus == Some(id);
                     cv.round_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, ch / 2.0 + 1.0, rgba(p.star, if focused { 0.7 } else { 0.2 }));
                     cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.sky, 0.8));
-                    let shown = if val.is_empty() && !focused { "~/pictures/sky.jpg".to_string() } else { val.clone() };
+                    let shown = if val.is_empty() && !focused { (if id == "look/wallpaper" { "~/pictures/sky.jpg" } else { "kitty" }).to_string() } else { val.clone() };
                     // keep the tail of a long path in view
                     let tail: String = shown.chars().rev().scan(0.0, |acc, c| { *acc += self.t13.glyph(c).0.advance_width; (*acc < cw - 36.0).then_some(c) }).collect::<Vec<_>>().into_iter().rev().collect();
                     let end = self.t13.draw(&mut cv, cx + 18.0, cy + ch / 2.0 + 5.0, &tail, rgba(p.text, if val.is_empty() && !focused { 0.3 } else { 1.0 }));
                     if focused {
                         cv.round_rect(end + 1.0, cy + 9.0, 1.5, ch - 18.0, 0.0, rgba(p.text, 0.9));
+                    }
+                }
+                Ctl::Swatches => {
+                    for (n, c) in [p.sky, p.dust, p.mist, p.glow, p.star, p.text].into_iter().enumerate() {
+                        let x = cx + n as f32 * 34.0;
+                        cv.round_rect(x - 1.0, cy - 1.0, 30.0, ch + 2.0, 15.0, rgba(p.text, 0.25));
+                        cv.round_rect(x, cy, 28.0, ch, 14.0, rgba(c, 1.0));
                     }
                 }
                 Ctl::Button(text) => {
@@ -337,7 +383,7 @@ mod tests {
         with_config(|| {
             let mut ui = Ui::new();
             assert_eq!(ui.values["motion/easing"], "drift");
-            ui.page = 1; // motion
+            ui.page = 4; // motion
             let (w, h) = (1920.0, 1080.0);
             let (ox, oy) = ((w - W) / 2.0, (h - H) / 2.0);
             // the easing choice: click its second segment
@@ -353,7 +399,7 @@ mod tests {
             ui.press(ox + cx + cw, oy + cy + ch / 2.0, w, h, false);
             assert_eq!(config::get("motion", "pan_secs").as_deref(), Some("2.00"));
             // the widgets toggles rewrite the whole file, and ask for a restart
-            ui.page = 3;
+            ui.page = 6;
             let (cx, cy, cw, ch) = ui.control(1); // calendar off
             ui.press(ox + cx + cw / 2.0, oy + cy + ch / 2.0, w, h, false);
             assert_eq!(std::fs::read_to_string(config::path("widgets")).unwrap(), "clock\nsystem\n");
@@ -361,6 +407,25 @@ mod tests {
             // a fresh run reads it all back
             assert_eq!(Ui::new().values["widgets/calendar"], "0");
             assert_eq!(Ui::new().values["motion/easing"], "glide");
+        });
+    }
+
+    #[test]
+    fn frame_numbers_are_whole_toggles_read_on_off_and_keys_buttons_write_nothing() {
+        with_config(|| {
+            std::fs::create_dir_all(config::path("bar").parent().unwrap()).unwrap();
+            std::fs::write(config::path("bar"), "date=off\n").unwrap();
+            let mut ui = Ui::new();
+            assert_eq!(ui.values["bar/date"], "0", "off in the file shows as off");
+            assert!(matches!(ui.set("frame/radius", "20".into()), Effect::ReloadConfig));
+            assert_eq!(config::get("frame", "radius").as_deref(), Some("20"));
+            ui.page = 1;
+            let (w, h) = (1920.0, 1080.0);
+            let (cx, cy, cw, ch) = ui.control(0);
+            ui.press((w - W) / 2.0 + cx + cw, (h - H) / 2.0 + cy + ch / 2.0, w, h, false);
+            assert_eq!(config::get("frame", "radius").as_deref(), Some("32"), "no .00 for the C parser");
+            assert!(matches!(ui.set("keys/help", "1".into()), Effect::Run("seiza help")));
+            assert!(!config::path("keys").exists());
         });
     }
 
