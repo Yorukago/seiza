@@ -6,3 +6,7 @@ spike/tinywl
 spike/seiza
 spike/xdg-shell-protocol.h
 src/xdg-shell-protocol.h
+src/wlr-layer-shell-unstable-v1-protocol.h
+satellites/*/target/
+satellites/target/
+inspo/*.pdf

@@ -108,6 +108,28 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 		ops->pan(ud, dx, dy);
 		return reply(out, outn, 0, "");
 	}
+	if (IS("goto")) {
+		NEED(1);
+		int n;
+		if (parse_int(w[2], &n) != 0) {
+			return reply(out, outn, -1, "goto needs a star number");
+		}
+		return reply(out, outn, ops->goto_star(ud, n), "no such star");
+	}
+	if (IS("help")) { NEED(0); ops->help(ud); return reply(out, outn, 0, ""); }
+	if (IS("maximize")) { NEED(0); ops->toggle_maximize(ud); return reply(out, outn, 0, ""); }
+	if (IS("close-window")) { NEED(0); ops->close_window(ud); return reply(out, outn, 0, ""); }
+	if (IS("move-window") || IS("resize-window") || IS("focus")) {
+		NEED(2);
+		int a, b;
+		if (parse_int(w[2], &a) != 0 || parse_int(w[3], &b) != 0) {
+			return reply(out, outn, -1, "needs two integers");
+		}
+		if (IS("move-window")) ops->move_window(ud, a, b);
+		else if (IS("resize-window")) ops->resize_window(ud, a, b);
+		else ops->focus_dir(ud, a, b);
+		return reply(out, outn, 0, "");
+	}
 	return reply(out, outn, -1, "unknown command");
 	#undef IS
 	#undef NEED

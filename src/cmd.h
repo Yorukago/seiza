@@ -20,6 +20,13 @@ struct cmd_ops {
 	void (*zoom_reset)(void *ud);
 	void (*cycle_window)(void *ud);
 	void (*spawn)(void *ud, const char *cmdline); /* run through the configured shell */
+	void (*move_window)(void *ud, int dx, int dy);   /* focused window, world pixels */
+	void (*resize_window)(void *ud, int dw, int dh); /* focused window, grows right/down */
+	void (*close_window)(void *ud);
+	int  (*goto_star)(void *ud, int n);              /* 1-based, in creation order; -1 if no such star */
+	void (*help)(void *ud);                          /* show the key bindings in a window */
+	void (*focus_dir)(void *ud, int dx, int dy);     /* nearest window that way (signs only) */
+	void (*toggle_maximize)(void *ud);               /* focused window */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other

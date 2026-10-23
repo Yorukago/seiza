@@ -1,6 +1,7 @@
 /* SEIZA: control socket, server and client. See ipc.h. */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +21,13 @@ static struct wl_event_loop *g_loop;
 static struct wl_event_source *g_listen_src;
 static int g_listen_fd = -1;
 
+static struct wl_list g_subs; /* conns that sent "seiza subscribe" */
+static char g_last[16384];    /* last published state */
+
 /* One connected client, until it sends a full line or misbehaves. */
 struct conn {
+	struct wl_list link; /* in g_subs, once subscribed */
+	bool sub;
 	int fd;
 	struct wl_event_source *src;
 	char buf[LINE_MAX_BYTES];
@@ -29,14 +35,53 @@ struct conn {
 };
 
 static void conn_close(struct conn *c) {
+	if (c->sub) {
+		wl_list_remove(&c->link);
+	}
 	wl_event_source_remove(c->src);
 	close(c->fd);
 	free(c);
 }
 
+/* One whole line, without blocking the compositor. False if it did not all fit
+ * (a subscriber that does not read is dropped, never waited for). */
+static bool send_line(struct conn *c, const char *line) {
+	size_t n = strlen(line);
+	char *buf = malloc(n + 1);
+	memcpy(buf, line, n);
+	buf[n] = '\n';
+	ssize_t w = send(c->fd, buf, n + 1, MSG_NOSIGNAL | MSG_DONTWAIT);
+	free(buf);
+	return w == (ssize_t)(n + 1);
+}
+
+void ipc_publish(const char *json) {
+	if (!g_subs.next) { /* publishing starts before ipc_serve */
+		wl_list_init(&g_subs);
+	}
+	if (strlen(json) >= sizeof(g_last) || strcmp(json, g_last) == 0) {
+		return;
+	}
+	strcpy(g_last, json);
+	struct conn *c, *tmp;
+	wl_list_for_each_safe(c, tmp, &g_subs, link) {
+		if (!send_line(c, json)) {
+			conn_close(c);
+		}
+	}
+}
+
 static int conn_readable(int fd, uint32_t mask, void *data) {
 	struct conn *c = data;
 	(void)mask;
+	if (c->sub) { /* subscribers only listen: anything they send is dropped */
+		char junk[64];
+		ssize_t k = read(fd, junk, sizeof(junk));
+		if (k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) {
+			conn_close(c);
+		}
+		return 0;
+	}
 	ssize_t n = read(fd, c->buf + c->len, sizeof(c->buf) - c->len);
 	if (n <= 0) { /* disconnected before sending a full line */
 		if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
@@ -54,6 +99,17 @@ static int conn_readable(int fd, uint32_t mask, void *data) {
 		return 0;
 	}
 	*nl = '\0';
+	if (strcmp(c->buf, "seiza subscribe") == 0) {
+		c->sub = true;
+		if (!g_subs.next) {
+			wl_list_init(&g_subs);
+		}
+		wl_list_insert(&g_subs, &c->link);
+		if (g_last[0] && !send_line(c, g_last)) {
+			conn_close(c);
+		}
+		return 0;
+	}
 	char reply[160];
 	cmd_run(g_ops, g_ud, c->buf, reply, sizeof(reply) - 1);
 	size_t rl = strlen(reply);
@@ -159,6 +215,15 @@ int ipc_client(int argc, char **argv) {
 	if (write(fd, line, strlen(line)) < 0) {
 		fprintf(stderr, "error: could not send\n");
 		return 1;
+	}
+	if (argc == 2 && strcmp(argv[1], "subscribe") == 0) { /* stream until killed or the compositor exits */
+		char chunk[4096];
+		ssize_t k;
+		while ((k = read(fd, chunk, sizeof(chunk))) > 0) {
+			fwrite(chunk, 1, k, stdout);
+			fflush(stdout);
+		}
+		return 0;
 	}
 	char reply[256];
 	ssize_t n = read(fd, reply, sizeof(reply) - 1);
