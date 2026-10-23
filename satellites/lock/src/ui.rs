@@ -31,6 +31,7 @@ pub struct Ui {
     phase: f32,
     shown_n: f32,                     // how many slots the line spreads over, easing toward the real number
     busy: bool,
+    fast: bool,                       // something quick is moving (a pop, a shake): worth every frame the screen has
 }
 
 fn hash(n: u64) -> u64 {
@@ -113,6 +114,7 @@ impl Ui {
             phase: 0.0,
             shown_n: 3.0,
             busy: true,
+            fast: false,
         }
     }
 
@@ -124,6 +126,11 @@ impl Ui {
     /// True while something on screen is moving by itself, so the caller should keep redrawing.
     pub fn busy(&self) -> bool {
         self.busy
+    }
+
+    /// True while that movement is quick; the slow twist of an empty field is fine at half the frames.
+    pub fn fast(&self) -> bool {
+        self.fast
     }
 
     fn centered(t: &mut Text, cv: &mut Canvas, cx: f32, base: f32, s: &str, c: Rgba) {
@@ -152,12 +159,12 @@ impl Ui {
         self.phase += dt * (0.1 + 0.4 * self.spin); // very slowly: about 12 s for a full twist while empty
         let want = typed.max(3) as f32;
         self.shown_n += (want - self.shown_n) * (1.0 - (-dt * 10.0).exp());
-        self.busy = typed == 0
-            || status == Status::Checking
+        self.fast = status == Status::Checking
             || self.births.last().is_some_and(|b| now - b < 0.65)
             || !self.dying.is_empty()
             || self.wrong_at.is_some_and(|w| now - w < 0.7)
             || (self.shown_n - want).abs() > 0.01;
+        self.busy = typed == 0 || self.fast;
         now
     }
 

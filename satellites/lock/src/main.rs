@@ -14,7 +14,7 @@ use std::{
 };
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::client::{
@@ -129,6 +129,9 @@ struct Lock {
     status: Status,
     checking: Option<Receiver<bool>>,
     shown: String,
+    qh: QueueHandle<Lock>,
+    frame_pending: bool, // a frame callback is out: the next redraw of an animation waits for it
+    last_draw: std::time::Instant,
     user: String,
     ui: Ui,
     exit: bool,
@@ -140,6 +143,7 @@ impl Lock {
     fn draw(&mut self) {
         let typed = self.password.chars().count();
         self.shown = self.ui.key(typed, self.status);
+        self.last_draw = std::time::Instant::now();
         for (s, (w, h)) in &self.surfaces {
             if *w == 0 {
                 continue; // not configured yet: a commit now would be a protocol error
@@ -150,6 +154,10 @@ impl Lock {
             let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
             canvas[..bytes.len()].copy_from_slice(bytes);
             s.wl_surface().damage_buffer(0, 0, *w as i32, *h as i32);
+            if !self.frame_pending {
+                s.wl_surface().frame(&self.qh, FrameCallbackData(s.wl_surface().clone())); // animations are paced by the screen, not a timer
+                self.frame_pending = true;
+            }
             buffer.attach_to(s.wl_surface()).expect("buffer attach");
             s.wl_surface().commit();
         }
@@ -196,7 +204,7 @@ impl Lock {
             }
             _ => {}
         }
-        if !self.surfaces.is_empty() && (self.ui.busy() || self.ui.key(self.password.chars().count(), self.status) != self.shown) {
+        if !self.surfaces.is_empty() && ((self.ui.busy() && !self.frame_pending) || self.ui.key(self.password.chars().count(), self.status) != self.shown) {
             self.draw();
         }
     }
@@ -224,7 +232,19 @@ impl SessionLockHandler for Lock {
 impl CompositorHandler for Lock {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        self.frame_pending = false;
+        if self.ui.fast() || (self.ui.busy() && self.last_draw.elapsed() >= Duration::from_millis(30)) {
+            self.draw(); // the next step of whatever is animating
+        } else if self.ui.busy() {
+            // a slow twist does not need every frame: skip this one, but ask for the next
+            if let Some((s, _)) = self.surfaces.first() {
+                s.wl_surface().frame(&self.qh, FrameCallbackData(s.wl_surface().clone()));
+                s.wl_surface().commit();
+                self.frame_pending = true;
+            }
+        }
+    }
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
@@ -296,8 +316,8 @@ impl ShmHandler for Lock {
     }
 }
 
-/// A thread asks the compositor for a sync callback 25 times a second; the reply wakes the
-/// event loop to check the PAM answer, the clock, and to step any animation.
+/// A thread asks the compositor for a sync callback ten times a second; the reply wakes the
+/// event loop to check the PAM answer and the clock (animation is paced by frame callbacks).
 struct Tick;
 
 impl Dispatch<wl_callback::WlCallback, Tick> for Lock {
@@ -356,6 +376,9 @@ fn main() {
         status: Status::Idle,
         checking: None,
         shown: String::new(),
+        qh: qh.clone(),
+        frame_pending: false,
+        last_draw: std::time::Instant::now(),
         user: current_user(),
         ui: Ui::new(),
         exit: false,
@@ -372,7 +395,7 @@ fn main() {
 
     let (tick_conn, tick_qh) = (conn.clone(), qh.clone());
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(100));
         tick_conn.display().sync(&tick_qh, Tick);
         let _ = tick_conn.flush();
     });
