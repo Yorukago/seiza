@@ -1,0 +1,9 @@
+[package]
+name = "seiza-common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1.0.154"
+fontdue = "0.9"
+libc = "0.2"

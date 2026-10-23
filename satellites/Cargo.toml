@@ -1,0 +1,7 @@
+[workspace]
+members = ["common"]
+resolver = "3"
+
+# Software rendering: unoptimised builds are far too slow, so `cargo run` is always fast.
+[profile.dev]
+opt-level = 3
