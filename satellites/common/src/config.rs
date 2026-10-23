@@ -12,6 +12,15 @@ fn value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim())
 }
 
+/// A yes/no setting: 1, on, true or yes; or 0, off, false or no. `default` if it is not there or says something else.
+pub fn flag(file: &str, key: &str, default: bool) -> bool {
+    match get(file, key).as_deref() {
+        Some("1" | "on" | "true" | "yes") => true,
+        Some("0" | "off" | "false" | "no") => false,
+        _ => default,
+    }
+}
+
 pub fn get(file: &str, key: &str) -> Option<String> {
     value(&std::fs::read_to_string(path(file)).ok()?, key).map(String::from)
 }
@@ -44,6 +53,19 @@ pub fn set(file: &str, key: &str, val: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_read_yes_and_no_and_fall_back() {
+        let dir = std::env::temp_dir().join(format!("seiza-flag-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("seiza")).unwrap();
+        std::fs::write(dir.join("seiza/f"), "a=on\nb=0\nc=maybe\n").unwrap();
+        // SAFETY: this is the only test in the crate that sets the config directory.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        assert!(flag("f", "a", false) && !flag("f", "b", true));
+        assert!(flag("f", "c", true) && !flag("f", "c", false), "something else means the default");
+        assert!(flag("f", "missing", true) && !flag("nofile", "a", false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn reads_and_rewrites_one_key_and_keeps_the_rest() {

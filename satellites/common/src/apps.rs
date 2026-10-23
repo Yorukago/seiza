@@ -66,10 +66,20 @@ pub fn parse_desktop(text: &str) -> Option<App> {
     let exec = strip_codes(exec?);
     Some(App {
         name: name?.to_string(),
-        exec: if terminal { format!("kitty -e {exec}") } else { exec },
+        exec: if terminal { format!("{} -e {exec}", terminal_command()) } else { exec },
         extra: format!("{generic};{keywords}").to_lowercase(),
         group: group_of(cats),
     })
+}
+
+/// What runs apps that want a terminal: `terminal=` in ~/.config/seiza/launcher, kitty if it is not there
+/// or is anything but a plain command name or path (it ends up on a shell line).
+pub fn terminal_command() -> String {
+    static TERM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TERM.get_or_init(|| {
+        crate::config::get("launcher", "terminal").filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || "_-./".contains(c))).unwrap_or_else(|| "kitty".into())
+    })
+    .clone()
 }
 
 /// Drop `%f %U ...` field codes; `%%` is a literal percent.
@@ -155,7 +165,7 @@ mod tests {
         assert!(parse_desktop("[Desktop Entry]\nType=Application\nName=X\nExec=x\nNoDisplay=true\n").is_none());
         assert!(parse_desktop("[Desktop Entry]\nType=Link\nName=X\nExec=x\n").is_none());
         let t = parse_desktop("[Desktop Entry]\nType=Application\nName=htop\nExec=htop\nTerminal=true\n").unwrap();
-        assert_eq!(t.exec, "kitty -e htop");
+        assert_eq!(t.exec, format!("{} -e htop", terminal_command()));
         assert_eq!(strip_codes("a %f  b %% %U"), "a b %");
     }
 

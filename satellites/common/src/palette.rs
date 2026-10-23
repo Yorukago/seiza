@@ -36,7 +36,7 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 }
 
 impl Palette {
-    pub fn parse(file: &str) -> Palette {
+    pub fn parse(file: &str, guard: bool) -> Palette {
         let map: HashMap<&str, Rgb> = file
             .lines()
             .filter_map(|l| l.split_once('='))
@@ -46,7 +46,7 @@ impl Palette {
         let sky = get("sky", "0C0A12");
         let dust = get("dust", "2A2150");
         let mut text = get("text", "F2E8C9");
-        if lum(text) - lum(sky) < 0.5 {
+        if guard && lum(text) - lum(sky) < 0.5 {
             text = hex("F2E8C9").unwrap(); // contrast guard: text must stay readable on the sky
         }
         Palette {
@@ -68,7 +68,7 @@ pub fn palette() -> &'static Palette {
     P.get_or_init(|| {
         let dir = std::env::var("XDG_CONFIG_HOME")
             .unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
-        Palette::parse(&std::fs::read_to_string(format!("{dir}/seiza/palette")).unwrap_or_default())
+        Palette::parse(&std::fs::read_to_string(format!("{dir}/seiza/palette")).unwrap_or_default(), crate::config::flag("look", "contrast_guard", true))
     })
 }
 
@@ -78,10 +78,11 @@ mod tests {
 
     #[test]
     fn defaults_and_overrides() {
-        assert_eq!(Palette::parse("").star, hex("E9D48F").unwrap());
-        let p = Palette::parse("sky=#000000\nstar = ff0000\nbogus\ntext=#101010");
+        assert_eq!(Palette::parse("", true).star, hex("E9D48F").unwrap());
+        let p = Palette::parse("sky=#000000\nstar = ff0000\nbogus\ntext=#101010", true);
         assert_eq!(p.sky, [0.0; 3]);
         assert_eq!(p.star, [1.0, 0.0, 0.0]);
         assert_eq!(p.text, hex("F2E8C9").unwrap()); // dark text is rejected
+        assert_eq!(Palette::parse("sky=#000000\ntext=#101010", false).text, hex("101010").unwrap(), "unless the guard is switched off");
     }
 }

@@ -31,6 +31,7 @@ pub struct Ui {
     phase: f32,
     shown_n: f32,                     // how many slots the line spreads over, easing toward the real number
     busy: bool,
+    lines: bool, // Yoru's lines (the words under the password): `lines` in ~/.config/seiza/yoru
     fast: bool,                       // something quick is moving (a pop, a shake): worth every frame the screen has
 }
 
@@ -114,13 +115,14 @@ impl Ui {
             phase: 0.0,
             shown_n: 3.0,
             busy: true,
+            lines: seiza_common::config::flag("yoru", "lines", true),
             fast: false,
         }
     }
 
     /// What decides whether a redraw is needed even when nothing is animating.
     pub fn key(&self, typed: usize, status: Status) -> String {
-        format!("{}|{typed}|{status:?}", local_time(c"%H:%M"))
+        format!("{}|{typed}|{status:?}", local_time(seiza_common::clock_fmt()))
     }
 
     /// True while something on screen is moving by itself, so the caller should keep redrawing.
@@ -178,15 +180,16 @@ impl Ui {
 
         // the part that changes only with the minute or the words: the clock and what Seiza says
         let quip = match status {
+            _ if !self.lines => "", // Yoru's lines are switched off in the settings
             Status::Idle if typed == 0 => "welcome back. i didn't touch anything..",
             Status::Idle => "",
             Status::Checking => "one sec..",
             Status::Wrong => "hm. that's not it.. try again?",
         };
-        let key = format!("{w}x{h}|{}|{quip}", local_time(c"%H:%M"));
+        let key = format!("{w}x{h}|{}|{quip}", local_time(seiza_common::clock_fmt()));
         if self.base.as_ref().is_none_or(|(k, _)| *k != key) {
             let mut cv = Canvas { w, h, px: self.sky.as_ref().unwrap().px.clone() };
-            Self::centered(&mut self.big, &mut cv, cx, fh * 0.55, &local_time(c"%H:%M"), rgba(p.text, 1.0));
+            Self::centered(&mut self.big, &mut cv, cx, fh * 0.55, &local_time(seiza_common::clock_fmt()), rgba(p.text, 1.0));
             Self::centered(&mut self.small, &mut cv, cx, fh * 0.55 + 36.0, &local_time(c"%a %d %b").to_lowercase(), rgba(p.text, 0.6));
             Self::centered(&mut self.small, &mut cv, cx, fh * 0.70 + 56.0 + 44.0, quip, rgba(p.text, 0.7));
             self.base = Some((key, cv));

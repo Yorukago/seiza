@@ -76,6 +76,12 @@ pub const STAR_COLORS: [[f32; 3]; 6] = [
     [0.663, 0.847, 0.961],
 ];
 
+/// The clock's format: 24 hours unless `clock=12` is in ~/.config/seiza/look. Read once.
+pub fn clock_fmt() -> &'static std::ffi::CStr {
+    static TWELVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *TWELVE.get_or_init(|| config::get("look", "clock").as_deref() == Some("12")) { c"%I:%M %p" } else { c"%H:%M" }
+}
+
 /// A local-time string, `fmt` being strftime's.
 pub fn local_time(fmt: &std::ffi::CStr) -> String {
     unsafe {

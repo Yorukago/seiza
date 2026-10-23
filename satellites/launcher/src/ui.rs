@@ -50,11 +50,22 @@ pub struct Ui {
     t17: Text,
     t13: Text,
     content: Option<(String, Canvas)>, // the last drawn content and the state it was drawn for
+    lines: bool,                       // Yoru's lines: `lines` in ~/.config/seiza/yoru
     glide: Option<(f32, Instant)>,     // the list highlight sliding: the row it left, and when
     born: Instant,                     // the stars twinkle against this clock
 }
 
 const GLIDE: Duration = Duration::from_millis(140);
+
+/// Where the web-search row goes: `search=` in ~/.config/seiza/launcher, one of duckduckgo (the default), google, startpage, brave.
+fn search_url() -> &'static str {
+    match seiza_common::config::get("launcher", "search").as_deref() {
+        Some("google") => "https://www.google.com/search?q=",
+        Some("startpage") => "https://www.startpage.com/do/search?q=",
+        Some("brave") => "https://search.brave.com/search?q=",
+        _ => "https://duckduckgo.com/?q=",
+    }
+}
 
 fn url_encode(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
@@ -78,7 +89,7 @@ fn fit(t: &mut Text, s: &str, max: f32) -> String {
 
 impl Ui {
     pub fn new(apps: Vec<App>, style: Style, w: f32, h: f32) -> Ui {
-        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, apps, items: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None, glide: None, born: Instant::now() };
+        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, apps, items: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None, lines: seiza_common::config::flag("yoru", "lines", true), glide: None, born: Instant::now() };
         ui.refresh();
         ui
     }
@@ -99,7 +110,7 @@ impl Ui {
                 }
                 if !q.is_empty() {
                     self.items.push(Item { kind: Kind::Command, label: q.clone(), line: q.clone(), pos: usize::MAX });
-                    self.items.push(Item { kind: Kind::Web, label: q.clone(), line: format!("xdg-open https://duckduckgo.com/?q={}", url_encode(&q)), pos: usize::MAX });
+                    self.items.push(Item { kind: Kind::Web, label: q.clone(), line: format!("xdg-open {}{}", search_url(), url_encode(&q)), pos: usize::MAX });
                 }
             }
             Style::Stars => {
@@ -223,6 +234,9 @@ impl Ui {
     // ---- drawing ----
 
     fn quip(&self) -> String {
+        if !self.lines {
+            return String::new(); // Yoru's lines are switched off in the settings
+        }
         match self.items.get(self.sel) {
             _ if self.query.trim().is_empty() => "where to..?".into(),
             Some(it) if matches!(it.kind, Kind::App(_)) => format!("{} again? ok..", it.label.to_lowercase()),
@@ -458,7 +472,7 @@ mod tests {
         u.query = "fir e".into();
         u.refresh();
         assert!(u.items.iter().all(|i| matches!(i.kind, Kind::Command | Kind::Web)), "no app matches 'fir e'");
-        assert_eq!(u.items[1].line, "xdg-open https://duckduckgo.com/?q=fir%20e");
+        assert_eq!(u.items[1].line, format!("xdg-open {}fir%20e", search_url()));
         u.query = "fire".into();
         u.refresh();
         assert_eq!((u.items[0].label.as_str(), u.sel), ("Firefox", 0));

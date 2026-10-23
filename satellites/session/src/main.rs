@@ -59,9 +59,15 @@ const ACTIONS: [Action; 5] = [
 ];
 
 /// Arm-then-confirm: dangerous actions need a second press of the same button.
-#[derive(Default)]
 struct Menu {
     armed: Option<usize>,
+    ask: bool, // the dangerous ones ask twice: `confirm` in ~/.config/seiza/yoru, on unless switched off
+}
+
+impl Default for Menu {
+    fn default() -> Menu {
+        Menu { armed: None, ask: seiza_common::config::flag("yoru", "confirm", true) }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -72,7 +78,7 @@ enum Step {
 
 impl Menu {
     fn press(&mut self, i: usize) -> Step {
-        if !ACTIONS[i].confirm || self.armed == Some(i) {
+        if !ACTIONS[i].confirm || !self.ask || self.armed == Some(i) {
             return Step::Run(i);
         }
         self.armed = Some(i);

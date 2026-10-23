@@ -48,6 +48,7 @@
 #include "keys.h"
 #include "palette.h"
 #include "motion.h"
+#include "frame.h"
 #include "figure.h"
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -245,9 +246,10 @@ struct tinywl_keyboard {
 /* SEIZA window frame: a rounded plate behind the window (only its rim shows)
  * plus a soft gold bloom while focused. Thickness and radius are in screen px
  * at zoom 1; the radius follows the zoom, the thickness does not. */
-#define BORDER_W 2
-#define WIN_RADIUS 14
 #define GLOW_SIGMA 18
+static struct frame FRAME; /* radius, border and glow: from the frame file, set by frame_colors_load() */
+#define WIN_RADIUS FRAME.radius
+#define BORDER_W FRAME.border
 static float BORDER_FOCUSED[4], BORDER_IDLE[4], GLOW_FOCUSED[4]; /* set by frame_colors_load() */
 static const float GLOW_IDLE[4]      = {0, 0, 0, 0};
 
@@ -1289,6 +1291,22 @@ static void frame_colors_load(struct tinywl_server *server) {
 	BORDER_FOCUSED[3] = BORDER_IDLE[3] = 1.0f;
 	GLOW_FOCUSED[3] = 0.30f;
 
+	frame_defaults(&FRAME);
+	snprintf(path, sizeof(path), "%s/frame", server->cfg_dir);
+	if ((f = fopen(path, "r"))) {
+		static char frame_text[65536];
+		size_t n = fread(frame_text, 1, sizeof(frame_text) - 1, f);
+		fclose(f);
+		frame_text[n] = '\0';
+		frame_parse(frame_text, &FRAME);
+	}
+	/* the bloom: off, or the star color at 0.3 (soft) or about twice that (bright), premultiplied */
+	float strength = FRAME.glow == GLOW_OFF ? 0.0f : FRAME.glow == GLOW_BRIGHT ? 0.55f : 0.30f;
+	for (int i = 0; i < 3; i++) {
+		GLOW_FOCUSED[i] = p.star[i] * strength;
+	}
+	GLOW_FOCUSED[3] = strength;
+
 	motion_defaults(&server->motion);
 	snprintf(path, sizeof(path), "%s/motion", server->cfg_dir);
 	if ((f = fopen(path, "r"))) {
@@ -1350,6 +1368,7 @@ static int op_reload_config(void *ud) {
 	struct tinywl_server *server = ud;
 	keys_load(server);
 	frame_colors_load(server);
+	relayout_all(server); /* a new radius or border changes every window */
 	struct tinywl_toplevel *tl;
 	wl_list_for_each(tl, &server->all_toplevels, all_link) {
 		update_border(tl);

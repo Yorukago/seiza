@@ -49,7 +49,7 @@ fn date_text() -> String {
 }
 
 fn time_text() -> String {
-    local_time(c"%H:%M")
+    local_time(seiza_common::clock_fmt())
 }
 
 // ---- battery, volume, PC status ---------------------------------------------
@@ -79,6 +79,21 @@ fn wpctl(args: &'static [&'static str]) {
 
 // ---- the app ----------------------------------------------------------------
 
+/// Which modules of the bar are shown: `date`, `stats`, `volume`, `battery` in ~/.config/seiza/bar, each on unless switched off.
+struct Modules {
+    date: bool,
+    stats: bool,
+    volume: bool,
+    battery: bool,
+}
+
+impl Modules {
+    fn load() -> Modules {
+        let on = |k| seiza_common::config::flag("bar", k, true);
+        Modules { date: on("date"), stats: on("stats"), volume: on("volume"), battery: on("battery") }
+    }
+}
+
 struct Bar {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -104,6 +119,7 @@ struct Bar {
     session_hit: (f32, f32), // the power button: opens the session menu
     cpu: Option<u32>,
     cpu_prev: Option<(u64, u64)>,
+    show: Modules, // which modules the settings page switched on
     ram: Option<u32>,
     temp: Option<u32>,
     load: Option<f32>,
@@ -141,12 +157,17 @@ impl Bar {
         }
         self.mode_hit = (x, x + 30.0);
         x += 30.0 + 6.0;
-        let (date, time) = (date_text(), time_text());
+        let (date, time) = (if self.show.date { date_text() } else { String::new() }, time_text());
         let (dw, tw) = (self.text.width(&date), self.text.width(&time));
-        Self::module(&mut cv, x, dw + tw + 46.0);
-        self.text.draw(&mut cv, x + 14.0, base, &date, ink);
-        cv.round_rect(x + 14.0 + dw + 8.0, cy - 6.0, 1.0, 12.0, 0.5, dim);
-        self.text.draw(&mut cv, x + 14.0 + dw + 18.0, base, &time, ink);
+        if date.is_empty() {
+            Self::module(&mut cv, x, tw + 28.0);
+            self.text.draw(&mut cv, x + 14.0, base, &time, ink);
+        } else {
+            Self::module(&mut cv, x, dw + tw + 46.0);
+            self.text.draw(&mut cv, x + 14.0, base, &date, ink);
+            cv.round_rect(x + 14.0 + dw + 8.0, cy - 6.0, 1.0, 12.0, 0.5, dim);
+            self.text.draw(&mut cv, x + 14.0 + dw + 18.0, base, &time, ink);
+        }
 
         // center: one sparkle per open window in the current star
         let idx = st.stars.iter().position(|s| s.name == st.current).unwrap_or(0);
@@ -168,10 +189,12 @@ impl Bar {
         self.session_hit = (rx, rx + 30.0);
         rx -= 6.0;
         let mut stats = Vec::new();
-        if let Some(c) = self.cpu { stats.push(format!("cpu {c}%")); }
-        if let Some(r) = self.ram { stats.push(format!("ram {r}%")); }
-        if let Some(t) = self.temp { stats.push(format!("{t}°C")); }
-        if let Some(l) = self.load { stats.push(format!("load {l:.2}")); }
+        if self.show.stats {
+            if let Some(c) = self.cpu { stats.push(format!("cpu {c}%")); }
+            if let Some(r) = self.ram { stats.push(format!("ram {r}%")); }
+            if let Some(t) = self.temp { stats.push(format!("{t}°C")); }
+            if let Some(l) = self.load { stats.push(format!("load {l:.2}")); }
+        }
         let widths: Vec<f32> = stats.iter().map(|t| self.text.width(t)).collect();
         let sw: f32 = widths.iter().sum::<f32>() + 14.0 * stats.len().saturating_sub(1) as f32 + 28.0;
         if !stats.is_empty() {
@@ -184,7 +207,7 @@ impl Bar {
             }
             rx -= 6.0;
         }
-        if let Some((pct, charging)) = self.battery {
+        if let Some((pct, charging)) = self.battery.filter(|_| self.show.battery) {
             let label = format!("{pct}%");
             let bw = 24.0 + 8.0 + self.text.width(&label) + 24.0;
             rx -= bw;
@@ -199,7 +222,7 @@ impl Bar {
             rx -= 6.0;
         }
         self.vol_hit = (0.0, 0.0);
-        if let Some((pct, muted)) = self.volume {
+        if let Some((pct, muted)) = self.volume.filter(|_| self.show.volume) {
             let label = if muted { "muted".to_string() } else { format!("{pct}%") };
             let vw = 18.0 + 8.0 + self.text.width(&label) + 24.0;
             rx -= vw;
@@ -403,6 +426,7 @@ fn main() {
         session_hit: (0.0, 0.0),
         cpu: None,
         cpu_prev: None,
+        show: Modules::load(),
         ram: None,
         temp: None,
         load: None,

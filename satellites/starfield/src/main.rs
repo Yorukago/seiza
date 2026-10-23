@@ -212,6 +212,9 @@ struct Starfield {
     shooters: Vec<Shooter>,
     next_shot: f32,
     rng: u64,
+    shooting: bool, // `shooting`, `labels`, `threads` in ~/.config/seiza/sky: each on unless switched off
+    labels: bool,
+    threads: bool,
     nebula_gain: f32, // SEIZA_STARFIELD_NEBULA or `nebula=` in ~/.config/seiza/sky: default 0.4; 1 = full colour, 0 = black sky
     bg: Vec<u32>,
     spent: Duration, // SEIZA_STARFIELD_TIMING: time spent drawing, over `frames` frames
@@ -363,14 +366,14 @@ impl Starfield {
         }
 
         // threads between the stars of a figure: hand-inked, doubled, never straight
-        for (n, &(a, b)) in self.sky_links.iter().enumerate() {
+        for (n, &(a, b)) in self.sky_links.iter().enumerate().filter(|_| self.threads) {
             if let (Some(sa), Some(sb)) = (self.sky_stars.get(a), self.sky_stars.get(b)) {
                 let (p0, p1) = (to_screen(sa.x, sa.y), to_screen(sb.x, sb.y));
                 thread(&mut cv.px, w, h, p0, p1, n as u64, [0.95, 0.85, 0.55]);
             }
         }
 
-        for st in &self.sky_stars {
+        for st in self.sky_stars.iter().filter(|_| self.labels) {
             let (x, y) = to_screen(st.x, st.y);
             let tw = self.text.width(&st.name);
             self.text.draw(&mut cv, x - tw / 2.0, y + 36.0, &st.name, [1.0, 1.0, 1.0, if st.current { 0.95 } else { 0.6 }]);
@@ -379,6 +382,10 @@ impl Starfield {
     }
 
     fn shooting_stars(&mut self, dt: f32) {
+        if !self.shooting {
+            self.shooters.clear();
+            return;
+        }
         let (w, h) = (self.width as f32, self.height as f32);
         self.next_shot -= dt;
         if self.next_shot <= 0.0 {
@@ -569,6 +576,9 @@ fn main() {
         shooters: Vec::new(),
         next_shot: 1.0,
         rng: 0x5E12A,
+        shooting: seiza_common::config::flag("sky", "shooting", true),
+        labels: seiza_common::config::flag("sky", "labels", true),
+        threads: seiza_common::config::flag("sky", "threads", true),
         nebula_gain: std::env::var("SEIZA_STARFIELD_NEBULA").ok().or_else(|| seiza_common::config::get("sky", "nebula")).and_then(|v| v.parse().ok()).unwrap_or(0.4),
         bg: Vec::new(),
         spent: Duration::ZERO,

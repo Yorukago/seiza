@@ -129,7 +129,7 @@ impl Ui {
     fn clock(&mut self, cv: &mut Canvas, x: f32, cw: f32, ch: f32) {
         let p = palette();
         let (_, _, _, _, t) = now_parts();
-        self.t64.draw(cv, x + 26.0, 82.0, &local_time(c"%H:%M"), rgba(p.text, 1.0));
+        self.t64.draw(cv, x + 26.0, 82.0, &local_time(seiza_common::clock_fmt()), rgba(p.text, 1.0));
         self.t18.draw(cv, x + 28.0, 116.0, &local_time(c"%a %d %b").to_lowercase(), rgba(p.text, 0.6));
         // the moon, drawn dim as a whole disc with the lit part over it
         let (mx, my, r) = (x + cw - 52.0, 56.0, 20.0);
