@@ -65,6 +65,28 @@ struct Msg {
     overview: bool,
     cam: Cam,
     stars: Vec<SkyStar>,
+    links: Vec<(usize, usize)>,
+}
+
+/// An inked thread between two points: a gentle arc, drawn twice with a small wobble.
+fn thread(px: &mut [u32], w: usize, h: usize, a: (f32, f32), b: (f32, f32), seed: u64, color: [f32; 3]) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy).max(1.0);
+    let bend = len * (0.08 + (seed % 5) as f32 * 0.02) * if seed % 2 == 0 { 1.0 } else { -1.0 };
+    let ctrl = ((a.0 + b.0) / 2.0 - dy / len * bend, (a.1 + b.1) / 2.0 + dx / len * bend);
+    for pass in 0..2 {
+        let steps = (len / 1.6).ceil() as i32; // close enough that the dots read as one line
+        for s in 0..=steps {
+            let t = s as f32 / steps as f32;
+            let (u, v) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t));
+            let wob = if pass == 0 { 0.0 } else { 1.8 * (t * 11.0 + seed as f32).sin() + 1.4 };
+            let x = u * a.0 + v * ctrl.0 + t * t * b.0 - dy / len * wob;
+            let y = u * a.1 + v * ctrl.1 + t * t * b.1 + dx / len * wob;
+            let alpha = if pass == 0 { 1.0 } else { 0.45 };
+            glow(px, w, h, x, y, 3.2, color, 0.06 * alpha, false); // soft halo
+            glow(px, w, h, x, y, 1.0, [1.0, 0.97, 0.85], 0.4 * alpha, false); // thin bright core
+        }
+    }
 }
 
 /// A meteor crossing the screen.
@@ -87,7 +109,7 @@ fn read_state(tx: channel::Sender<Msg>) {
             .iter()
             .map(|s| SkyStar { name: s.name.clone(), x: s.x, y: s.y, windows: s.windows, current: s.name == st.current })
             .collect();
-        tx.send(Msg { overview: st.overview, cam, stars }).is_ok() // false once the main loop is gone
+        tx.send(Msg { overview: st.overview, cam, stars, links: st.links }).is_ok() // false once the main loop is gone
     });
 }
 
@@ -122,6 +144,9 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
+
+/// How far past the screen the nebula is painted, in pixels.
+const NEBULA_MARGIN: usize = 256;
 
 /// (depth: how much of the world's movement this layer follows, tile size in
 /// sky pixels, stars per tile, base radius in pixels, brightness).
@@ -176,6 +201,7 @@ struct Starfield {
     target: Cam,
     cur: Cam,
     sky_stars: Vec<SkyStar>,
+    sky_links: Vec<(usize, usize)>,
     overview: bool,
     art: Option<art::Match>, // a figure the stars currently form
     art_key: Vec<(i64, i64)>,
@@ -186,30 +212,38 @@ struct Starfield {
     rng: u64,
     nebula_gain: f32, // SEIZA_STARFIELD_NEBULA or `nebula=` in ~/.config/seiza/sky: default 0.4; 1 = full colour, 0 = black sky
     bg: Vec<u32>,
-    bg_key: (i32, i32, i32, u32, u32),
+    bg_origin: (f32, f32), // the parallax offset the nebula was made for
+    bg_size: (usize, usize),
     frame: Vec<u32>,
     start: Instant,
     last: Instant,
 }
 
 impl Starfield {
-    /// Cached nebula; redone only when the (eased) camera has moved a pixel or so.
-    fn nebula(&mut self, wcx: f64, wcy: f64) {
+    /// The nebula is painted onto a canvas a margin larger than the screen, and a pan only
+    /// slides the screen over it: repainting costs tens of milliseconds, which is what made
+    /// the glide into the overview choppy. Returns how far to slide, in pixels; it is repainted
+    /// only when the slide would run out of margin.
+    fn nebula(&mut self, wcx: f64, wcy: f64) -> (i32, i32) {
         let (w, h) = (self.width as usize, self.height as usize);
-        let key = ((wcx * 0.05) as i32, (wcy * 0.05) as i32, (self.cur.zoom.ln() * 200.0) as i32, self.width, self.height);
-        if key == self.bg_key && self.bg.len() == w * h {
-            return;
+        let (bw, bh) = (w + 2 * NEBULA_MARGIN, h + 2 * NEBULA_MARGIN);
+        let (ox, oy) = (wcx as f32 * 0.04, wcy as f32 * 0.04);
+        let room = (NEBULA_MARGIN - 16) as f32;
+        let fresh = self.bg.len() == bw * bh && self.bg_size == (w, h) && (ox - self.bg_origin.0).abs() < room && (oy - self.bg_origin.1).abs() < room;
+        if fresh {
+            return ((ox - self.bg_origin.0).round() as i32, (oy - self.bg_origin.1).round() as i32);
         }
-        self.bg_key = key;
+        self.bg_origin = (ox, oy);
+        self.bg_size = (w, h);
+        let (w, h) = (bw, bh);
         // Sample at 1/6 resolution, then upscale: a nebula is soft anyway.
         const D: usize = 6;
         let (lw, lh) = (w / D + 2, h / D + 2);
-        let (ox, oy) = (wcx as f32 * 0.04, wcy as f32 * 0.04);
         let sc = 1.0 / 650.0;
         let mut low = vec![[0f32; 3]; lw * lh];
         for ly in 0..lh {
             for lx in 0..lw {
-                let (sx, sy) = ((lx * D) as f32 + ox, (ly * D) as f32 + oy);
+                let (sx, sy) = ((lx * D) as f32 - NEBULA_MARGIN as f32 + ox, (ly * D) as f32 - NEBULA_MARGIN as f32 + oy);
                 // gouache: warp the coordinates so edges wander, and keep the cloud edges tight and soft
                 let (wx, wy) = (sx + 140.0 * (fbm(sx * sc * 0.6, sy * sc * 0.6, 3) - 0.5), sy + 140.0 * (fbm(sx * sc * 0.6 + 9.0, sy * sc * 0.6, 4) - 0.5));
                 let a = smooth(0.50, 0.66, fbm(wx * sc, wy * sc, 11));
@@ -244,6 +278,7 @@ impl Starfield {
                 self.bg[y * w + x] = out;
             }
         }
+        (0, 0)
     }
 
     fn stars(&mut self, wcx: f64, wcy: f64, t: f32) {
@@ -323,6 +358,14 @@ impl Starfield {
             self.text.draw(&mut cv, cx - tw / 2.0, cy, title, [color[0], color[1], color[2], a]);
         }
 
+        // threads between the stars of a figure: hand-inked, doubled, never straight
+        for (n, &(a, b)) in self.sky_links.iter().enumerate() {
+            if let (Some(sa), Some(sb)) = (self.sky_stars.get(a), self.sky_stars.get(b)) {
+                let (p0, p1) = (to_screen(sa.x, sa.y), to_screen(sb.x, sb.y));
+                thread(&mut cv.px, w, h, p0, p1, n as u64, [0.95, 0.85, 0.55]);
+            }
+        }
+
         for st in &self.sky_stars {
             let (x, y) = to_screen(st.x, st.y);
             let tw = self.text.width(&st.name);
@@ -385,9 +428,13 @@ impl Starfield {
         }
         let (w, h) = (self.width as usize, self.height as usize);
         let (wcx, wcy) = ((self.cur.x + self.cur.screen.0 / 2.0) / self.cur.zoom, (self.cur.y + self.cur.screen.1 / 2.0) / self.cur.zoom);
-        self.nebula(wcx, wcy);
+        let (dx, dy) = self.nebula(wcx, wcy);
         self.frame.clear();
-        self.frame.extend_from_slice(&self.bg);
+        let bw = w + 2 * NEBULA_MARGIN;
+        for y in 0..h {
+            let at = (y as i32 + dy + NEBULA_MARGIN as i32) as usize * bw + (dx + NEBULA_MARGIN as i32) as usize;
+            self.frame.extend_from_slice(&self.bg[at..at + w]);
+        }
         let t = self.start.elapsed().as_secs_f32();
         self.stars(wcx, wcy, t);
         self.seiza_stars(t);
@@ -500,6 +547,7 @@ fn main() {
         target: cam,
         cur: cam,
         sky_stars: Vec::new(),
+        sky_links: Vec::new(),
         overview: false,
         art: None,
         art_key: Vec::new(),
@@ -510,7 +558,8 @@ fn main() {
         rng: 0x5E12A,
         nebula_gain: std::env::var("SEIZA_STARFIELD_NEBULA").ok().or_else(|| seiza_common::config::get("sky", "nebula")).and_then(|v| v.parse().ok()).unwrap_or(0.4),
         bg: Vec::new(),
-        bg_key: (i32::MAX, 0, 0, 0, 0),
+        bg_origin: (0.0, 0.0),
+        bg_size: (0, 0),
         frame: Vec::new(),
         start: Instant::now(),
         last: Instant::now(),
@@ -528,6 +577,7 @@ fn main() {
                 app.target = m.cam;
                 app.overview = m.overview;
                 app.sky_stars = m.stars;
+                app.sky_links = m.links;
                 // Look for a figure only when a star has actually moved.
                 let key: Vec<(i64, i64)> = app.sky_stars.iter().map(|s| (s.x as i64, s.y as i64)).collect();
                 if key != app.art_key {

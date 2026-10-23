@@ -33,6 +33,7 @@ pub struct State {
     pub cam: (f64, f64),
     pub screen: (f64, f64),
     pub stars: Vec<Star>,
+    pub links: Vec<(usize, usize)>, // threads joining stars, as indexes into `stars`
 }
 
 impl State {
@@ -56,6 +57,7 @@ impl State {
                     windows: s["windows"].as_u64().unwrap_or(0),
                 })
                 .collect(),
+            links: v["links"].as_array().map_or(vec![], |l| l.iter().filter_map(|p| Some((p[0].as_u64()? as usize, p[1].as_u64()? as usize))).collect()),
         })
     }
 }
@@ -127,6 +129,9 @@ mod tests {
         assert_eq!(st.constellation, "default");
         assert_eq!(st.cam, (0.0, -3.5));
         assert_eq!(st.stars[0].windows, 2);
+        assert!(st.links.is_empty(), "an older stream without links still parses");
+        let st = State::parse(r#"{"constellation":"c","stars":[{"name":"a","x":0,"y":0},{"name":"b","x":1,"y":1}],"links":[[0,1],[1,0]]}"#).unwrap();
+        assert_eq!(st.links, [(0, 1), (1, 0)]);
         assert!(State::parse("not json").is_none());
     }
 }
