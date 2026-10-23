@@ -1,8 +1,8 @@
-//! seiza-constellations: draw constellations and tend the stars in them. Draw a figure by
-//! clicking (click a star then another to join them, drag to move, right-click to take one
-//! away), save it, and lay the current constellation's stars out on it; add, remove and
-//! rename stars. Figures are files in ~/.config/seiza/figures; the stars are Seiza's.
-//! `seiza-constellations --dump out.ppm [figure]` draws one frame to a file.
+//! seiza-constellations: draw your constellation. The middle of the window IS the sky:
+//! click to add a star, drag one to move it, click two to join them, right-click to remove
+//! one. Templates (built in, or saved from your sky) lay the stars out on a figure.
+//! Everything goes to Seiza as commands, and the window follows what Seiza says.
+//! `seiza-constellations --dump out.ppm` draws one frame to a file.
 mod model;
 mod ui;
 
@@ -30,12 +30,11 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use model::{Sky, Star};
 use ui::{Effect, Ui};
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
-
-type Stars = (Vec<(String, u64)>, String); // the constellation's stars (name, apps) and the current one
 
 struct Editor {
     registry_state: RegistryState,
@@ -53,8 +52,8 @@ struct Editor {
     exit: bool,
     chord: bool, // ctrl or alt held: not typing
     down: bool,  // a button held: dragging a star
-    live: Arc<Mutex<Option<Stars>>>, // what Seiza last said about the stars
-    seen: Option<Stars>,
+    live: Arc<Mutex<Option<Sky>>>, // what Seiza last said about the sky
+    seen: Option<Sky>,
     ui: Ui,
 }
 
@@ -62,11 +61,17 @@ impl Editor {
     fn run(&mut self, effect: Effect) {
         if let Effect::Run(cmds) = effect {
             for c in cmds {
-                self.ui.msg = match seiza_common::command(&c) {
-                    Ok(reply) if reply.starts_with("error") => reply.replacen("error: ", "", 1),
-                    Ok(_) => if c.starts_with("seiza figure") { "stars laid out. press alt+o to see them..".into() } else { "done..".into() },
-                    Err(e) => format!("couldn't reach seiza: {e}"),
-                };
+                match seiza_common::command(&c) {
+                    Ok(reply) if reply.starts_with("error") => {
+                        self.ui.msg = reply.replacen("error: ", "", 1);
+                        break; // the rest depended on this one
+                    }
+                    Ok(_) => self.ui.msg = if c.starts_with("seiza figure") { "stars laid out. press alt+o to see them..".into() } else { String::new() },
+                    Err(e) => {
+                        self.ui.msg = format!("couldn't reach seiza: {e}");
+                        break;
+                    }
+                }
             }
         }
         self.dirty = true;
@@ -76,18 +81,19 @@ impl Editor {
         let (w, h) = (self.size.0 as f32, self.size.1 as f32);
         match event.keysym {
             Keysym::Escape if self.ui.focus.is_some() => self.ui.focus = None,
-            Keysym::Escape if self.ui.editor.selected.is_some() => self.ui.editor.selected = None,
+            Keysym::Escape if self.ui.selected.is_some() => self.ui.selected = None,
             Keysym::Escape => self.exit = true,
             Keysym::Return | Keysym::KP_Enter => {
                 let e = self.ui.enter(w, h);
                 self.run(e);
             }
-            Keysym::BackSpace => {
-                if !self.ui.backspace() {
-                    self.ui.delete_selected();
-                }
+            Keysym::BackSpace if self.ui.focus.is_some() => {
+                self.ui.backspace();
             }
-            Keysym::Delete if self.ui.focus.is_none() => self.ui.delete_selected(),
+            Keysym::BackSpace | Keysym::Delete => {
+                let e = self.ui.delete_selected();
+                self.run(e);
+            }
             _ => match event.utf8.as_deref() {
                 Some(s) if self.ui.focus.is_some() && !self.chord && !s.chars().any(char::is_control) => self.ui.type_text(s),
                 _ => return,
@@ -100,8 +106,8 @@ impl Editor {
     fn poll(&mut self) {
         let now = self.live.lock().ok().and_then(|l| l.clone());
         if now != self.seen {
-            if let Some((stars, current)) = now.clone() {
-                self.ui.set_stars(stars, current);
+            if let Some(sky) = now.clone() {
+                self.ui.set_sky(sky);
                 self.dirty = true;
             }
             self.seen = now;
@@ -231,7 +237,8 @@ impl PointerHandler for Editor {
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
                     self.down = false;
-                    self.ui.release();
+                    let effect = self.ui.release();
+                    self.run(effect);
                     self.dirty = true;
                 }
                 _ => {}
@@ -273,12 +280,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new();
-        if let Some(name) = args.get(2) {
-            ui.load_figure(name);
-            ui.editor.selected = Some(2);
-        }
-        ui.set_stars(vec![("star 0".into(), 3), ("north".into(), 0), ("star 2".into(), 1), ("star 3".into(), 0)], "north".into());
-        ui.star_sel = 1;
+        let star = |name: &str, x: f64, y: f64, windows| Star { name: name.into(), x, y, windows };
+        ui.set_sky(Sky {
+            stars: vec![star("star 0", 960.0, 540.0, 3), star("north", 5760.0, 1300.0, 0), star("star 2", 9800.0, 540.0, 1), star("star 3", 7200.0, 4600.0, 0), star("star 4", 2400.0, 5200.0, 0)],
+            links: vec![(0, 1), (1, 2), (1, 3), (3, 4)],
+            current: "north".into(),
+        });
+        ui.selected = Some(1);
         ui.star_name = "north".into();
         let cv = ui.render(1920, 1080);
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
@@ -300,12 +308,12 @@ fn main() {
     layer.set_size(0, 0);
     layer.commit();
 
-    let live: Arc<Mutex<Option<Stars>>> = Arc::new(Mutex::new(None));
+    let live: Arc<Mutex<Option<Sky>>> = Arc::new(Mutex::new(None));
     let listen = live.clone();
     std::thread::spawn(move || {
         seiza_common::subscribe(|st| {
-            let stars = st.stars.iter().map(|s| (s.name.clone(), s.windows)).collect();
-            *listen.lock().unwrap() = Some((stars, st.current));
+            let stars = st.stars.iter().map(|s| Star { name: s.name.clone(), x: s.x, y: s.y, windows: s.windows }).collect();
+            *listen.lock().unwrap() = Some(Sky { stars, links: st.links, current: st.current });
             true
         });
     });

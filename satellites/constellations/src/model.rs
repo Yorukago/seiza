@@ -1,116 +1,103 @@
-//! The figure being drawn: points, threads, and which point is selected. No drawing
-//! or Wayland here, so the rules of drawing a constellation are plain tests.
+//! The sky the editor mirrors: Seiza's stars and threads, the window that fits them onto
+//! the canvas, and the rules that keep stars apart. No drawing and no Wayland here, so the
+//! rules are plain tests.
 
 use seiza_common::figure::Figure;
 
-/// The compositor's limits (FIG_POINTS_MAX, FIG_LINKS_MAX in figure.h); a figure over them would not load.
-pub const MAX_POINTS: usize = 24;
-pub const MAX_LINKS: usize = 40;
+/// A star's territory, as the compositor sees it (STAR_W, STAR_H in seiza.c): two stars
+/// may not be closer than this in both directions at once.
+pub const TERRITORY: (f64, f64) = (1920.0, 1080.0);
+/// Roughly the spacing the compositor lays figures out with (STAR_DX, STAR_DY).
+const SPACING: (f64, f64) = (2400.0, 1500.0);
 
-#[derive(Default)]
-pub struct Editor {
-    pub fig: Figure,
-    pub selected: Option<usize>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Star {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub windows: u64,
 }
 
-impl Editor {
-    pub fn from_figure(fig: Figure) -> Editor {
-        Editor { fig, selected: None }
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sky {
+    pub stars: Vec<Star>,
+    pub links: Vec<(usize, usize)>,
+    pub current: String,
+}
+
+/// The part of the world the canvas shows, in world units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl View {
+    /// A view of the whole sky with a star's room around the edge (and never smaller than a few
+    /// stars across), grown on one axis so it has the canvas's shape and nothing is squashed.
+    pub fn fit(stars: &[Star], canvas: (f64, f64)) -> View {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for s in stars {
+            (x0, y0, x1, y1) = (x0.min(s.x), y0.min(s.y), x1.max(s.x), y1.max(s.y));
+        }
+        if stars.is_empty() {
+            (x0, y0, x1, y1) = (960.0, 540.0, 960.0, 540.0);
+        }
+        let (mut w, mut h) = ((x1 - x0) + 2.0 * SPACING.0, (y1 - y0) + 2.0 * SPACING.1);
+        (w, h) = (w.max(3.0 * SPACING.0), h.max(3.0 * SPACING.1));
+        let aspect = canvas.0 / canvas.1;
+        if w / h < aspect { w = h * aspect } else { h = w / aspect }
+        View { x: (x0 + x1) / 2.0 - w / 2.0, y: (y0 + y1) / 2.0 - h / 2.0, w, h }
     }
 
-    /// Shrinks or grows the figure to sit centered in a `w` by `h` box (in figure units),
-    /// keeping its shape. The compositor rescales every figure to fit its stars anyway,
-    /// so only the shape matters.
-    pub fn fit(&mut self, w: f32, h: f32) {
-        let pts = &mut self.fig.points;
-        if pts.is_empty() {
-            return;
-        }
-        let (u0, u1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
-        let (v0, v1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
-        let (bw, bh) = (u1 - u0, v1 - v0);
-        let s = match (bw > 1e-6, bh > 1e-6) {
-            (true, true) => (w / bw).min(h / bh),
-            (true, false) => w / bw,
-            (false, true) => h / bh,
-            (false, false) => 1.0,
-        };
-        for p in pts.iter_mut() {
-            *p = ((p.0 - u0) * s + (w - bw * s) / 2.0, (p.1 - v0) * s + (h - bh * s) / 2.0);
-        }
+    pub fn scale(&self, canvas: (f64, f64)) -> f64 {
+        canvas.0 / self.w
     }
 
-    fn link_at(&self, a: usize, b: usize) -> Option<usize> {
-        self.fig.links.iter().position(|&(x, y)| (x, y) == (a, b) || (x, y) == (b, a))
+    pub fn to_canvas(&self, wx: f64, wy: f64, canvas: (f64, f64)) -> (f64, f64) {
+        ((wx - self.x) * self.scale(canvas), (wy - self.y) * self.scale(canvas))
     }
 
-    /// A new point; if one is selected, the new one is threaded to it and selected in its place,
-    /// so clicking along draws a chain. None when the figure is full.
-    pub fn add_point(&mut self, u: f32, v: f32) -> Option<usize> {
-        if self.fig.points.len() >= MAX_POINTS {
-            return None;
-        }
-        self.fig.points.push((u, v));
-        let i = self.fig.points.len() - 1;
-        if let Some(s) = self.selected {
-            if self.fig.links.len() < MAX_LINKS {
-                self.fig.links.push((s, i));
-            }
-        }
-        self.selected = Some(i);
-        Some(i)
+    pub fn to_world(&self, cx: f64, cy: f64, canvas: (f64, f64)) -> (f64, f64) {
+        (self.x + cx / self.scale(canvas), self.y + cy / self.scale(canvas))
     }
 
-    pub fn move_point(&mut self, i: usize, u: f32, v: f32) {
-        if let Some(p) = self.fig.points.get_mut(i) {
-            *p = (u, v);
-        }
+    pub fn holds(&self, wx: f64, wy: f64) -> bool {
+        wx >= self.x && wx <= self.x + self.w && wy >= self.y && wy <= self.y + self.h
+    }
+}
+
+impl Sky {
+    /// Would a star at (x, y) share a territory with a star other than `except`?
+    pub fn too_near(&self, except: Option<usize>, x: f64, y: f64) -> bool {
+        self.stars.iter().enumerate().any(|(i, s)| Some(i) != except && (s.x - x).abs() < TERRITORY.0 && (s.y - y).abs() < TERRITORY.1)
     }
 
-    /// A plain click on a point: select it; with another point already selected, join them
-    /// (or cut the thread that was there) and move the selection on; on the selected point, let go of it.
-    pub fn click_point(&mut self, i: usize) {
-        match self.selected {
-            Some(s) if s == i => self.selected = None,
-            Some(s) => {
-                match self.link_at(s, i) {
-                    Some(l) => {
-                        self.fig.links.remove(l);
-                    }
-                    None if self.fig.links.len() < MAX_LINKS => self.fig.links.push((s, i)),
-                    None => {}
-                }
-                self.selected = Some(i);
-            }
-            None => self.selected = Some(i),
-        }
-    }
-
-    /// Takes the point and its threads away; the points after it move up one.
-    pub fn remove_point(&mut self, i: usize) {
-        if i >= self.fig.points.len() {
-            return;
-        }
-        self.fig.points.remove(i);
-        let shift = |p: usize| if p > i { p - 1 } else { p };
-        self.fig.links = self.fig.links.iter().filter(|&&(a, b)| a != i && b != i).map(|&(a, b)| (shift(a), shift(b))).collect();
-        self.selected = match self.selected {
-            Some(s) if s == i => None,
-            Some(s) => Some(shift(s)),
-            None => None,
-        };
-    }
-
-    /// The point nearest to (u, v) within `reach`, if any.
-    pub fn point_near(&self, u: f32, v: f32, reach: f32) -> Option<usize> {
-        self.fig
-            .points
+    /// The star nearest to a world point within `reach`, if any.
+    pub fn star_near(&self, x: f64, y: f64, reach: f64) -> Option<usize> {
+        self.stars
             .iter()
             .enumerate()
-            .map(|(i, &(pu, pv))| (i, (pu - u).hypot(pv - v)))
+            .map(|(i, s)| (i, (s.x - x).hypot(s.y - y)))
             .filter(|&(_, d)| d <= reach)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i)
+    }
+
+    /// The sky as a figure to save: star positions on a 0..1 scale (the compositor rescales
+    /// figures to fit anyway), and the threads that join them.
+    pub fn to_figure(&self) -> Figure {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for s in &self.stars {
+            (x0, y0, x1, y1) = (x0.min(s.x), y0.min(s.y), x1.max(s.x), y1.max(s.y));
+        }
+        let span = (x1 - x0).max(y1 - y0).max(1.0);
+        Figure {
+            points: self.stars.iter().map(|s| (((s.x - x0) / span) as f32, ((s.y - y0) / span) as f32)).collect(),
+            links: self.links.iter().copied().filter(|&(a, b)| a != b && a < self.stars.len() && b < self.stars.len()).collect(),
+        }
     }
 }
 
@@ -118,81 +105,55 @@ impl Editor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn clicking_along_draws_a_chain() {
-        let mut e = Editor::default();
-        e.add_point(0.1, 0.1);
-        e.add_point(0.3, 0.2);
-        e.add_point(0.5, 0.1);
-        assert_eq!(e.fig.links, [(0, 1), (1, 2)]);
-        assert_eq!(e.selected, Some(2));
+    fn star(x: f64, y: f64) -> Star {
+        Star { name: "s".into(), x, y, windows: 0 }
     }
 
     #[test]
-    fn clicking_two_points_joins_and_cuts() {
-        let mut e = Editor::default();
-        for p in [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5)] {
-            e.selected = None;
-            e.add_point(p.0, p.1);
+    fn the_view_holds_every_star_and_has_the_canvas_shape() {
+        let canvas = (560.0, 410.0);
+        for stars in [vec![], vec![star(960.0, 540.0)], vec![star(960.0, 540.0), star(30000.0, 2000.0)], vec![star(0.0, 0.0), star(0.0, 40000.0)]] {
+            let v = View::fit(&stars, canvas);
+            assert!(stars.iter().all(|s| v.holds(s.x, s.y)));
+            assert!((v.w / v.h - canvas.0 / canvas.1).abs() < 1e-9);
+            assert!(v.w >= 3.0 * SPACING.0 - 1e-9);
         }
-        assert!(e.fig.links.is_empty());
-        e.selected = None; // adding a point selects it
-        e.click_point(0);
-        e.click_point(2);
-        assert_eq!((e.fig.links.clone(), e.selected), (vec![(0, 2)], Some(2)));
-        e.click_point(0); // 2 is selected: join 2-0 again means cut it
-        assert!(e.fig.links.is_empty());
-        e.click_point(0); // 0 is selected now: clicking it lets go
-        assert_eq!(e.selected, None);
     }
 
     #[test]
-    fn removing_a_point_renumbers_the_threads() {
-        let mut e = Editor::default();
-        for i in 0..4 {
-            e.add_point(i as f32 * 0.2, 0.0);
-        }
-        assert_eq!(e.fig.links, [(0, 1), (1, 2), (2, 3)]);
-        e.remove_point(1);
-        assert_eq!(e.fig.points.len(), 3);
-        assert_eq!(e.fig.links, [(1, 2)]); // 0-1 and 1-2 went with the point; 2-3 became 1-2
-        assert_eq!(e.selected, Some(2)); // the selected point (3) moved up to 2
-        e.remove_point(9); // not there: nothing happens
-        assert_eq!(e.fig.points.len(), 3);
+    fn canvas_and_world_map_back_and_forth() {
+        let (canvas, v) = ((560.0, 410.0), View::fit(&[star(960.0, 540.0), star(9000.0, 5000.0)], (560.0, 410.0)));
+        let (cx, cy) = v.to_canvas(4000.0, 3000.0, canvas);
+        let (wx, wy) = v.to_world(cx, cy, canvas);
+        assert!((wx - 4000.0).abs() < 1e-6 && (wy - 3000.0).abs() < 1e-6);
+        assert!(cx > 0.0 && cx < canvas.0 && cy > 0.0 && cy < canvas.1);
     }
 
     #[test]
-    fn a_figure_stops_at_what_the_compositor_can_load() {
-        let mut e = Editor::default();
-        for i in 0..MAX_POINTS + 5 {
-            e.add_point((i % 6) as f32 * 0.1, (i / 6) as f32 * 0.1);
-        }
-        assert_eq!(e.fig.points.len(), MAX_POINTS);
-        assert!(e.fig.links.len() <= MAX_LINKS);
-        assert!(Figure::parse(&e.fig.format()).is_some(), "what the editor makes must load");
+    fn territories_may_not_overlap_unless_it_is_the_star_itself() {
+        let sky = Sky { stars: vec![star(960.0, 540.0), star(5000.0, 540.0)], ..Default::default() };
+        assert!(sky.too_near(None, 1500.0, 900.0), "inside the first star's territory");
+        assert!(!sky.too_near(None, 960.0 + 1920.0, 540.0), "exactly a territory away is room enough");
+        assert!(!sky.too_near(None, 960.0, 540.0 + 1080.0));
+        assert!(!sky.too_near(Some(0), 1100.0, 600.0), "a star moving a little does not collide with itself");
+        assert!(sky.too_near(Some(1), 1100.0, 600.0), "but it does with the other one");
     }
 
     #[test]
-    fn fitting_keeps_the_shape_and_lands_inside_the_box() {
-        let mut e = Editor::from_figure(Figure { points: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 2.0)], links: vec![(0, 1), (1, 2)] });
-        e.fit(0.8, 0.5);
-        let p = &e.fig.points;
-        assert!(p.iter().all(|&(u, v)| (0.0..=0.8001).contains(&u) && (0.0..=0.5001).contains(&v)));
-        let ratio = (p[2].1 - p[1].1) / (p[1].0 - p[0].0);
-        assert!((ratio - 2.0).abs() < 1e-4, "a figure twice as tall as wide stays so: {ratio}");
-        assert_eq!(e.fig.links, [(0, 1), (1, 2)]);
-        Editor::default().fit(1.0, 1.0); // nothing to fit: nothing happens
-        let mut one = Editor::from_figure(Figure { points: vec![(5.0, 5.0)], links: vec![] });
-        one.fit(0.8, 0.5);
-        assert_eq!(one.fig.points[0], (0.4, 0.25));
+    fn finds_the_star_under_a_point() {
+        let sky = Sky { stars: vec![star(0.0, 0.0), star(100.0, 0.0)], ..Default::default() };
+        assert_eq!(sky.star_near(60.0, 0.0, 50.0), Some(1));
+        assert_eq!(sky.star_near(500.0, 0.0, 50.0), None);
     }
 
     #[test]
-    fn finds_the_nearest_point_within_reach() {
-        let mut e = Editor::default();
-        e.add_point(0.2, 0.2);
-        e.add_point(0.25, 0.2);
-        assert_eq!(e.point_near(0.24, 0.2, 0.05), Some(1));
-        assert_eq!(e.point_near(0.9, 0.9, 0.05), None);
+    fn a_sky_becomes_a_figure_that_loads() {
+        let sky = Sky { stars: vec![star(960.0, 540.0), star(3360.0, 540.0), star(3360.0, 2040.0)], links: vec![(0, 1), (1, 2), (2, 2), (0, 9)], current: String::new() };
+        let f = sky.to_figure();
+        assert_eq!(f.points.len(), 3);
+        assert_eq!(f.links, [(0, 1), (1, 2)], "threads to nothing, or to themselves, are left out");
+        assert!(f.points.iter().all(|&(u, v)| (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)));
+        assert_eq!(Figure::parse(&f.format()), Some(f));
+        assert_eq!(Sky::default().to_figure().points.len(), 0);
     }
 }

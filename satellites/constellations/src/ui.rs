@@ -1,14 +1,14 @@
-//! The constellation editor's screen: figures on the left, a canvas to draw on in the
-//! middle, the current constellation's stars on the right. No Wayland in here, so the
-//! tests and `--dump` can run it.
+//! The constellation editor's screen: templates on the left, the live sky in the middle (it
+//! IS the constellation: clicking it adds a star, dragging moves one, deleting removes it),
+//! the stars as a list on the right. No Wayland in here, so the tests and `--dump` can run it.
 
 use seiza_common::{
     draw::{load_font, Canvas, Text},
-    figure::{self, Figure},
+    figure,
     palette::{palette, rgba},
 };
 
-use crate::model::Editor;
+use crate::model::{Sky, Star, View, TERRITORY};
 
 pub const W: f32 = 1180.0;
 pub const H: f32 = 680.0;
@@ -23,20 +23,19 @@ impl R {
 }
 
 const CANVAS: R = R(250.0, 100.0, 560.0, 410.0);
-const FIG_NAME: R = R(250.0, 534.0, 250.0, 38.0);
-const SAVE: R = R(516.0, 534.0, 84.0, 38.0);
-const APPLY: R = R(608.0, 534.0, 84.0, 38.0);
-const DELETE: R = R(700.0, 534.0, 84.0, 38.0);
-const ADD_STAR: R = R(840.0, 424.0, 150.0, 38.0);
-const REMOVE_STAR: R = R(1006.0, 424.0, 150.0, 38.0);
+const CANVAS_SIZE: (f64, f64) = (560.0, 410.0);
+const TEMPLATE_NAME: R = R(250.0, 534.0, 250.0, 38.0);
+const SAVE: R = R(516.0, 534.0, 120.0, 38.0);
+const DELETE: R = R(644.0, 534.0, 120.0, 38.0);
+const REMOVE_STAR: R = R(840.0, 424.0, 316.0, 38.0);
 const STAR_NAME: R = R(840.0, 480.0, 230.0, 38.0);
 const RENAME: R = R(1078.0, 480.0, 78.0, 38.0);
-const FIG_ROWS: usize = 14;
+const TEMPLATE_ROWS: usize = 14;
 const STAR_ROWS: usize = 9;
-const POINT_REACH: f32 = 14.0;
+const REACH: f64 = 16.0; // how near a click must be to a star on the canvas, in pixels
 
-fn fig_row(i: usize) -> R {
-    R(24.0, 100.0 + 32.0 * i as f32, 196.0, 30.0) // row 0 is "+ new"
+fn template_row(i: usize) -> R {
+    R(24.0, 100.0 + 32.0 * i as f32, 196.0, 30.0)
 }
 
 fn star_row(i: usize) -> R {
@@ -45,42 +44,47 @@ fn star_row(i: usize) -> R {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Field {
-    Figure,
+    Template,
     Star,
 }
 
 pub enum Effect {
     None,
-    Run(Vec<String>), // commands for Seiza, in order
+    Run(Vec<String>), // commands for Seiza, in order; the first that fails stops the rest
 }
 
 #[derive(PartialEq)]
 enum Target {
-    Figure(usize),
-    NewFigure,
+    Template(usize),
     Canvas,
     Field(Field),
     Save,
-    Apply,
     Delete,
-    AddStar,
     RemoveStar,
     Rename,
     Star(usize),
     Nothing,
 }
 
+struct Drag {
+    star: usize,
+    moved: bool,
+    at: (f64, f64), // where it is now, in the world
+}
+
 pub struct Ui {
-    pub editor: Editor,
-    pub names: Vec<String>, // the figures there are
-    pub name: String,       // what the figure is called (the field under the canvas)
+    pub sky: Sky,
+    view: View,
+    fitted: bool,
+    pub names: Vec<String>, // the templates there are
+    pub name: String,       // what the template being saved is called
+    armed: Option<String>,  // a template picked once; picking it again lays the stars out on it
+    pub refit_after: bool,  // the next news of the sky should refit the view: the stars were just laid out somewhere else
     pub focus: Option<Field>,
-    pub stars: Vec<(String, u64)>, // the current constellation's stars: name, windows
-    pub current: String,
-    pub star_sel: usize,
+    pub selected: Option<usize>,
     pub star_name: String,
     pub msg: String,
-    drag: Option<(usize, bool)>, // the point being dragged, and whether it moved
+    drag: Option<Drag>,
     t22: Text,
     t17: Text,
     t13: Text,
@@ -94,15 +98,17 @@ impl Ui {
     pub fn new() -> Ui {
         let font = load_font();
         Ui {
-            editor: Editor::default(),
+            sky: Sky::default(),
+            view: View::fit(&[], CANVAS_SIZE),
+            fitted: false,
             names: figure::list(),
             name: String::new(),
+            armed: None,
+            refit_after: false,
             focus: None,
-            stars: vec![],
-            current: String::new(),
-            star_sel: 0,
+            selected: None,
             star_name: String::new(),
-            msg: "click the dark to place a star..".into(),
+            msg: "click the dark to add a star..".into(),
             drag: None,
             t22: Text::new(font.clone(), 24.0),
             t17: Text::new(font.clone(), 17.0),
@@ -110,10 +116,17 @@ impl Ui {
         }
     }
 
-    pub fn set_stars(&mut self, stars: Vec<(String, u64)>, current: String) {
-        self.star_sel = self.star_sel.min(stars.len().saturating_sub(1));
-        self.stars = stars;
-        self.current = current;
+    /// What Seiza says the sky is now. The canvas keeps its view unless a star would fall off it.
+    pub fn set_sky(&mut self, sky: Sky) {
+        let off = sky.stars.iter().any(|s| !self.view.holds(s.x, s.y));
+        self.sky = sky;
+        if !self.fitted || off || std::mem::take(&mut self.refit_after) {
+            self.view = View::fit(&self.sky.stars, CANVAS_SIZE);
+            self.fitted = !self.sky.stars.is_empty();
+        }
+        if self.selected.is_some_and(|s| s >= self.sky.stars.len()) {
+            self.selected = None;
+        }
     }
 
     fn origin(w: f32, h: f32) -> (f32, f32) {
@@ -121,17 +134,17 @@ impl Ui {
     }
 
     fn target(&self, x: f32, y: f32) -> Target {
-        for (i, r) in [(0usize, fig_row(0))].into_iter().chain((0..self.names.len().min(FIG_ROWS - 1)).map(|i| (i + 1, fig_row(i + 1)))) {
-            if r.has(x, y) {
-                return if i == 0 { Target::NewFigure } else { Target::Figure(i - 1) };
+        for i in 0..self.names.len().min(TEMPLATE_ROWS) {
+            if template_row(i).has(x, y) {
+                return Target::Template(i);
             }
         }
-        for i in 0..self.stars.len().min(STAR_ROWS) {
+        for i in 0..self.sky.stars.len().min(STAR_ROWS) {
             if star_row(i).has(x, y) {
                 return Target::Star(i);
             }
         }
-        for (r, t) in [(FIG_NAME, Target::Field(Field::Figure)), (STAR_NAME, Target::Field(Field::Star)), (SAVE, Target::Save), (APPLY, Target::Apply), (DELETE, Target::Delete), (ADD_STAR, Target::AddStar), (REMOVE_STAR, Target::RemoveStar), (RENAME, Target::Rename), (CANVAS, Target::Canvas)] {
+        for (r, t) in [(TEMPLATE_NAME, Target::Field(Field::Template)), (STAR_NAME, Target::Field(Field::Star)), (SAVE, Target::Save), (DELETE, Target::Delete), (REMOVE_STAR, Target::RemoveStar), (RENAME, Target::Rename), (CANVAS, Target::Canvas)] {
             if r.has(x, y) {
                 return t;
             }
@@ -139,44 +152,24 @@ impl Ui {
         Target::Nothing
     }
 
-    /// A screen point on the canvas as figure coordinates; both axes use the canvas width, so a shape keeps its shape.
-    fn to_uv(x: f32, y: f32) -> (f32, f32) {
-        ((x - CANVAS.0) / CANVAS.2, (y - CANVAS.1) / CANVAS.2)
+    fn canvas_xy(x: f32, y: f32) -> (f64, f64) {
+        ((x - CANVAS.0) as f64, (y - CANVAS.1) as f64)
     }
 
-    fn to_screen(u: f32, v: f32) -> (f32, f32) {
-        (CANVAS.0 + u * CANVAS.2, CANVAS.1 + v * CANVAS.2)
+    fn world(&self, x: f32, y: f32) -> (f64, f64) {
+        let (cx, cy) = Self::canvas_xy(x, y);
+        self.view.to_world(cx, cy, CANVAS_SIZE)
     }
 
-    fn point_near_screen(&self, x: f32, y: f32) -> Option<usize> {
-        let (u, v) = Self::to_uv(x, y);
-        self.editor.point_near(u, v, POINT_REACH / CANVAS.2)
+    fn star_at_canvas(&self, x: f32, y: f32) -> Option<usize> {
+        let (wx, wy) = self.world(x, y);
+        self.sky.star_near(wx, wy, REACH / self.view.scale(CANVAS_SIZE))
     }
 
-    pub fn load_figure(&mut self, name: &str) {
-        if let Some(f) = figure::load(name) {
-            self.editor = Editor::from_figure(f);
-            let margin = 56.0 / CANVAS.2; // keep the stars off the canvas edge
-            self.editor.fit((CANVAS.2 - 112.0) / CANVAS.2, (CANVAS.3 - 112.0) / CANVAS.2);
-            for p in &mut self.editor.fig.points {
-                *p = (p.0 + margin, p.1 + margin);
-            }
-            self.name = name.to_string();
-            self.msg = format!("{name}: drag the stars, click one then another to join them");
-        }
-    }
-
-    fn save(&mut self) -> bool {
-        match figure::save(&self.name, &self.editor.fig) {
-            Ok(()) => {
-                self.names = figure::list();
-                self.msg = format!("saved {}..", self.name);
-                true
-            }
-            Err(e) => {
-                self.msg = format!("can't save: {e}");
-                false
-            }
+    fn select(&mut self, i: usize) {
+        self.selected = Some(i);
+        if let Some(s) = self.sky.stars.get(i) {
+            self.star_name = s.name.clone();
         }
     }
 
@@ -188,86 +181,127 @@ impl Ui {
         if !matches!(target, Target::Field(_)) {
             self.focus = None;
         }
+        if !matches!(target, Target::Template(_)) {
+            self.armed = None;
+        }
         match target {
-            Target::Figure(i) => {
-                if let Some(n) = self.names.get(i).cloned() {
-                    self.load_figure(&n);
+            Target::Template(i) => {
+                let name = self.names[i].clone();
+                self.name = name.clone();
+                if self.armed.as_deref() == Some(&name) {
+                    self.armed = None;
+                    self.refit_after = true;
+                    return Effect::Run(vec![format!("seiza figure {name}")]);
                 }
+                self.msg = format!("{name}: click it again to lay your stars out on it (it makes stars for any it needs)");
+                self.armed = Some(name);
             }
-            Target::NewFigure => {
-                self.editor = Editor::default();
-                self.name.clear();
-                self.msg = "a new sky. click to place the first star..".into();
-            }
-            Target::Canvas => match (self.point_near_screen(x, y), right) {
-                (Some(i), true) => self.editor.remove_point(i),
-                (Some(i), false) => self.drag = Some((i, false)),
+            Target::Canvas => match (self.star_at_canvas(x, y), right) {
+                (Some(i), true) => return self.remove_star(i),
+                (Some(i), false) => {
+                    let at = (self.sky.stars[i].x, self.sky.stars[i].y);
+                    self.drag = Some(Drag { star: i, moved: false, at });
+                }
                 (None, false) => {
-                    let (u, v) = Self::to_uv(x, y);
-                    if self.editor.add_point(u, v).is_none() {
-                        self.msg = "that's as many stars as a figure can hold..".into();
+                    let (wx, wy) = self.world(x, y);
+                    if self.sky.too_near(None, wx, wy) {
+                        self.msg = "too close to another star: they each need their own room..".into();
+                    } else {
+                        let mut cmds = vec![format!("seiza add-star {wx:.0} {wy:.0}")];
+                        let new = self.sky.stars.len();
+                        if let Some(s) = self.selected {
+                            cmds.push(format!("seiza link {} {}", s + 1, new + 1)); // clicking along draws a chain
+                        }
+                        self.selected = Some(new);
+                        self.star_name = format!("star {new}");
+                        return Effect::Run(cmds);
                     }
                 }
-                (None, true) => self.editor.selected = None,
+                (None, true) => self.selected = None,
             },
             Target::Field(f) => self.focus = Some(f),
             Target::Save => {
-                self.save();
-            }
-            Target::Apply => {
-                if self.save() {
-                    return Effect::Run(vec![format!("seiza figure {}", self.name)]);
-                }
+                let f = self.sky.to_figure();
+                self.msg = match figure::save(&self.name, &f) {
+                    Ok(()) => {
+                        self.names = figure::list();
+                        format!("saved {} as a template..", self.name)
+                    }
+                    Err(e) => format!("can't save: {e}"),
+                };
             }
             Target::Delete => match figure::delete(&self.name) {
                 Ok(()) => {
                     self.names = figure::list();
                     self.msg = format!("{} is gone..", self.name);
                 }
-                Err(_) => self.msg = "only figures you saved can be deleted..".into(),
+                Err(_) => self.msg = "only templates you saved can be deleted..".into(),
             },
-            Target::AddStar => return Effect::Run(vec!["seiza new-star".into()]),
             Target::RemoveStar => {
-                if !self.stars.is_empty() {
-                    return Effect::Run(vec![format!("seiza delete-star {}", self.star_sel + 1)]);
+                if let Some(i) = self.selected {
+                    return self.remove_star(i);
                 }
+                self.msg = "pick a star first..".into();
             }
-            Target::Rename => {
-                if valid_star_name(self.star_name.trim()) && !self.stars.is_empty() {
-                    return Effect::Run(vec![format!("seiza rename-star {} {}", self.star_sel + 1, self.star_name.trim())]);
-                }
-                self.msg = "a star's name is 1 to 31 letters..".into();
-            }
-            Target::Star(i) => {
-                self.star_sel = i;
-                self.star_name = self.stars[i].0.clone();
-            }
+            Target::Rename => match self.selected {
+                Some(i) if valid_star_name(self.star_name.trim()) => return Effect::Run(vec![format!("seiza rename-star {} {}", i + 1, self.star_name.trim())]),
+                Some(_) => self.msg = "a star's name is 1 to 31 letters..".into(),
+                None => self.msg = "pick a star first..".into(),
+            },
+            Target::Star(i) => self.select(i),
             Target::Nothing => {}
         }
         Effect::None
     }
 
-    pub fn drag_to(&mut self, px: f32, py: f32, w: f32, h: f32) {
-        let Some((i, _)) = self.drag else { return };
-        let (ox, oy) = Self::origin(w, h);
-        let (x, y) = ((px - ox).clamp(CANVAS.0 + 8.0, CANVAS.0 + CANVAS.2 - 8.0), (py - oy).clamp(CANVAS.1 + 8.0, CANVAS.1 + CANVAS.3 - 8.0));
-        let (u, v) = Self::to_uv(x, y);
-        self.editor.move_point(i, u, v);
-        self.drag = Some((i, true));
+    fn remove_star(&mut self, i: usize) -> Effect {
+        if self.sky.stars.get(i).is_some_and(|s| s.windows > 0) {
+            self.msg = "that star has apps in it. close them or move them first..".into();
+            return Effect::None;
+        }
+        if self.sky.stars.len() <= 1 {
+            self.msg = "a constellation needs at least one star..".into();
+            return Effect::None;
+        }
+        self.selected = None;
+        Effect::Run(vec![format!("seiza delete-star {}", i + 1)])
     }
 
-    /// A drag that never moved was a click.
-    pub fn release(&mut self) {
-        if let Some((i, moved)) = self.drag.take() {
-            if !moved {
-                self.editor.click_point(i);
-            }
+    pub fn drag_to(&mut self, px: f32, py: f32, w: f32, h: f32) {
+        let (ox, oy) = Self::origin(w, h);
+        let (x, y) = ((px - ox).clamp(CANVAS.0 + 6.0, CANVAS.0 + CANVAS.2 - 6.0), (py - oy).clamp(CANVAS.1 + 6.0, CANVAS.1 + CANVAS.3 - 6.0));
+        let at = self.world(x, y);
+        if let Some(d) = &mut self.drag {
+            d.at = at;
+            d.moved = true;
         }
+    }
+
+    /// A drag that moved puts the star there (if there is room); one that never moved was a click.
+    pub fn release(&mut self) -> Effect {
+        let Some(d) = self.drag.take() else { return Effect::None };
+        if d.moved {
+            if self.sky.too_near(Some(d.star), d.at.0, d.at.1) {
+                self.msg = "no room there: stars keep their distance..".into();
+                return Effect::None;
+            }
+            self.select(d.star);
+            return Effect::Run(vec![format!("seiza move-star {} {:.0} {:.0}", d.star + 1, d.at.0, d.at.1)]);
+        }
+        match self.selected {
+            Some(s) if s == d.star => self.selected = None,
+            Some(s) => {
+                self.select(d.star);
+                return Effect::Run(vec![format!("seiza link {} {}", s + 1, d.star + 1)]); // joins them, or cuts the thread that was there
+            }
+            None => self.select(d.star),
+        }
+        Effect::None
     }
 
     pub fn type_text(&mut self, s: &str) {
         match self.focus {
-            Some(Field::Figure) => self.name.extend(s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').take(31usize.saturating_sub(self.name.len()))),
+            Some(Field::Template) => self.name.extend(s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').take(31usize.saturating_sub(self.name.len()))),
             Some(Field::Star) => {
                 if self.star_name.len() + s.len() < 32 {
                     self.star_name.push_str(s);
@@ -279,16 +313,17 @@ impl Ui {
 
     pub fn backspace(&mut self) -> bool {
         match self.focus {
-            Some(Field::Figure) => self.name.pop().is_some(),
+            Some(Field::Template) => self.name.pop().is_some(),
             Some(Field::Star) => self.star_name.pop().is_some(),
             None => false,
         }
     }
 
-    /// Delete with nothing being typed: the selected point goes.
-    pub fn delete_selected(&mut self) {
-        if let Some(s) = self.editor.selected {
-            self.editor.remove_point(s);
+    /// Delete with nothing being typed: the selected star goes.
+    pub fn delete_selected(&mut self) -> Effect {
+        match self.selected {
+            Some(i) => self.remove_star(i),
+            None => Effect::None,
         }
     }
 
@@ -296,7 +331,7 @@ impl Ui {
     pub fn enter(&mut self, w: f32, h: f32) -> Effect {
         let (ox, oy) = Self::origin(w, h);
         let r = match self.focus {
-            Some(Field::Figure) => SAVE,
+            Some(Field::Template) => SAVE,
             Some(Field::Star) => RENAME,
             None => return Effect::None,
         };
@@ -342,6 +377,17 @@ impl Ui {
         }
     }
 
+    /// Where star `i` is on the screen (the dragged one follows the pointer).
+    fn star_screen(&self, i: usize, ox: f32, oy: f32) -> (f32, f32) {
+        let s: &Star = &self.sky.stars[i];
+        let (wx, wy) = match &self.drag {
+            Some(d) if d.star == i && d.moved => d.at,
+            _ => (s.x, s.y),
+        };
+        let (cx, cy) = self.view.to_canvas(wx, wy, CANVAS_SIZE);
+        (ox + CANVAS.0 + cx as f32, oy + CANVAS.1 + cy as f32)
+    }
+
     pub fn render(&mut self, w: usize, h: usize) -> Canvas {
         let p = palette();
         let mut cv = Canvas { w, h, px: vec![0; w * h] };
@@ -353,35 +399,44 @@ impl Ui {
         cv.round_rect(ox, oy, W, H, 24.0, rgba(p.panel, 1.0));
 
         self.t22.draw(&mut cv, ox + 24.0, oy + 54.0, "constellations", rgba(p.text, 1.0));
-        self.t13.draw(&mut cv, ox + 250.0, oy + 80.0, "draw your own, then lay your stars out on it.", rgba(p.text, 0.5));
+        self.t13.draw(&mut cv, ox + 250.0, oy + 80.0, &format!("{}: click to add a star, drag to move it, click two to join them", self.view_name()), rgba(p.text, 0.5));
 
-        // the figures
-        let rows: Vec<String> = std::iter::once("+ new".to_string()).chain(self.names.iter().take(FIG_ROWS - 1).cloned()).collect();
-        for (i, name) in rows.iter().enumerate() {
-            let r = fig_row(i);
-            let on = i > 0 && *name == self.name;
-            if on {
+        // the templates
+        self.t17.draw(&mut cv, ox + 24.0, oy + 80.0, "templates", rgba(p.text, 0.7));
+        let names = self.names.clone();
+        for (i, name) in names.iter().take(TEMPLATE_ROWS).enumerate() {
+            let r = template_row(i);
+            let armed = self.armed.as_deref() == Some(name);
+            if armed {
                 cv.round_rect(ox + r.0, oy + r.1, r.2, r.3, 12.0, rgba(p.dust, 0.9));
+                cv.round_rect(ox + r.0, oy + r.1, r.2, r.3, 12.0, rgba(p.star, 0.12));
             }
-            let fit = if figure::is_built_in(name) { "" } else if i > 0 { "  *" } else { "" };
-            self.t17.draw(&mut cv, ox + r.0 + 14.0, oy + r.1 + 21.0, &format!("{name}{fit}"), rgba(p.text, if on || i == 0 { 1.0 } else { 0.7 }));
+            let mark = if figure::is_built_in(name) { "" } else { "  *" };
+            self.t17.draw(&mut cv, ox + r.0 + 14.0, oy + r.1 + 21.0, &format!("{name}{mark}"), rgba(p.text, if armed { 1.0 } else { 0.7 }));
         }
-        self.t13.draw(&mut cv, ox + 24.0, oy + 100.0 + 32.0 * FIG_ROWS as f32 + 18.0, "* drawn by you", rgba(p.text, 0.35));
+        self.t13.draw(&mut cv, ox + 24.0, oy + 100.0 + 32.0 * TEMPLATE_ROWS as f32 + 18.0, "* saved by you", rgba(p.text, 0.35));
 
-        // the canvas
+        // the sky
         cv.round_rect(ox + CANVAS.0 - 1.0, oy + CANVAS.1 - 1.0, CANVAS.2 + 2.0, CANVAS.3 + 2.0, 21.0, rgba(p.star, 0.18));
         cv.round_rect(ox + CANVAS.0, oy + CANVAS.1, CANVAS.2, CANVAS.3, 20.0, rgba(p.sky, 0.75));
-        let fig: Figure = self.editor.fig.clone();
-        let at = |i: usize| {
-            let (x, y) = Self::to_screen(fig.points[i].0, fig.points[i].1);
-            (ox + x, oy + y)
-        };
-        for (n, &(a, b)) in fig.links.iter().enumerate() {
-            Self::thread(&mut cv, at(a), at(b), n);
+        let n = self.sky.stars.len();
+        let scale = self.view.scale(CANVAS_SIZE) as f32;
+        let (tw, th) = (TERRITORY.0 as f32 * scale, TERRITORY.1 as f32 * scale);
+        let pos: Vec<(f32, f32)> = (0..n).map(|i| self.star_screen(i, ox, oy)).collect();
+        for &(x, y) in &pos { // the room each star keeps for itself
+            cv.round_rect(x - tw / 2.0, y - th / 2.0, tw, th, 5.0, rgba(p.star, 0.10));
+            cv.round_rect(x - tw / 2.0 + 1.0, y - th / 2.0 + 1.0, tw - 2.0, th - 2.0, 4.0, rgba(p.sky, 0.75));
         }
-        for i in 0..fig.points.len() {
-            let (x, y) = at(i);
-            let sel = self.editor.selected == Some(i);
+        let links = self.sky.links.clone();
+        for (k, &(a, b)) in links.iter().enumerate() {
+            if a < n && b < n {
+                Self::thread(&mut cv, pos[a], pos[b], k);
+            }
+        }
+        let names: Vec<String> = self.sky.stars.iter().map(|s| s.name.clone()).collect();
+        for i in 0..n {
+            let (x, y) = pos[i];
+            let sel = self.selected == Some(i);
             let col = if sel { p.ice } else { p.star };
             let r = if sel { 11.0 } else { 8.0 };
             for k in (1..8).rev() {
@@ -389,46 +444,44 @@ impl Ui {
                 cv.round_rect(x - rr, y - rr, rr * 2.0, rr * 2.0, rr, rgba(col, 0.05));
             }
             cv.sparkle(x, y, r, rgba(col, 1.0));
-            self.t13.draw(&mut cv, x + 12.0, y - 10.0, &(i + 1).to_string(), rgba(p.text, 0.45));
+            let label: String = names[i].chars().take(14).collect();
+            let lw = self.t13.width(&label);
+            self.t13.draw(&mut cv, x - lw / 2.0, y + r + 16.0, &label, rgba(p.text, if sel { 0.9 } else { 0.5 }));
         }
-        if fig.points.is_empty() {
-            let s = "click anywhere to place a star";
-            let sw = self.t17.width(s);
-            self.t17.draw(&mut cv, ox + CANVAS.0 + CANVAS.2 / 2.0 - sw / 2.0, oy + CANVAS.1 + CANVAS.3 / 2.0, s, rgba(p.text, 0.3));
+        if n == 0 {
+            self.t17.draw(&mut cv, ox + CANVAS.0 + 150.0, oy + CANVAS.1 + CANVAS.3 / 2.0, "waiting for seiza..", rgba(p.text, 0.3));
         }
 
-        // name, save, apply, delete
+        // saving the sky as a template
         let (name, focus) = (self.name.clone(), self.focus);
-        self.field(&mut cv, FIG_NAME, ox, oy, &name, "name this figure", focus == Some(Field::Figure));
-        let ready = figure::name_ok(&self.name) && !self.editor.fig.points.is_empty();
-        self.button(&mut cv, SAVE, ox, oy, "save", ready);
-        self.button(&mut cv, APPLY, ox, oy, "apply", false);
-        self.button(&mut cv, DELETE, ox, oy, "delete", false);
+        self.field(&mut cv, TEMPLATE_NAME, ox, oy, &name, "name this layout", focus == Some(Field::Template));
+        let ready = figure::name_ok(&self.name) && n > 0;
+        self.button(&mut cv, SAVE, ox, oy, "save template", ready);
+        self.button(&mut cv, DELETE, ox, oy, "delete it", false);
 
-        // the stars of the constellation
+        // the stars as a list
         self.t17.draw(&mut cv, ox + 840.0, oy + 80.0, "stars", rgba(p.text, 0.7));
-        let stars = self.stars.clone();
-        for (i, (name, windows)) in stars.iter().take(STAR_ROWS).enumerate() {
+        let stars = self.sky.stars.clone();
+        for (i, s) in stars.iter().take(STAR_ROWS).enumerate() {
             let r = star_row(i);
-            if i == self.star_sel {
+            if self.selected == Some(i) {
                 cv.round_rect(ox + r.0, oy + r.1, r.2, r.3, 12.0, rgba(p.dust, 0.9));
             }
-            if *name == self.current {
+            if s.name == self.sky.current {
                 cv.sparkle(ox + r.0 + 18.0, oy + r.1 + 16.0, 6.0, rgba(p.star, 1.0));
             }
-            let shown = if name.len() > 20 { format!("{}..", &name[..18]) } else { name.clone() };
+            let shown = if s.name.len() > 20 { format!("{}..", &s.name[..18]) } else { s.name.clone() };
             self.t17.draw(&mut cv, ox + r.0 + 36.0, oy + r.1 + 22.0, &shown, rgba(p.text, 1.0));
-            if *windows > 0 {
-                let s = format!("{windows} app{}", if *windows == 1 { "" } else { "s" });
-                let sw = self.t13.width(&s);
-                self.t13.draw(&mut cv, ox + r.0 + r.2 - 14.0 - sw, oy + r.1 + 21.0, &s, rgba(p.text, 0.5));
+            if s.windows > 0 {
+                let t = format!("{} app{}", s.windows, if s.windows == 1 { "" } else { "s" });
+                let tw = self.t13.width(&t);
+                self.t13.draw(&mut cv, ox + r.0 + r.2 - 14.0 - tw, oy + r.1 + 21.0, &t, rgba(p.text, 0.5));
             }
         }
-        if stars.is_empty() {
-            self.t13.draw(&mut cv, ox + 840.0, oy + 124.0, "waiting for seiza..", rgba(p.text, 0.4));
+        if stars.len() > STAR_ROWS {
+            self.t13.draw(&mut cv, ox + 840.0, oy + 100.0 + 34.0 * STAR_ROWS as f32 + 12.0, &format!("and {} more on the sky..", stars.len() - STAR_ROWS), rgba(p.text, 0.4));
         }
-        self.button(&mut cv, ADD_STAR, ox, oy, "add a star", true);
-        self.button(&mut cv, REMOVE_STAR, ox, oy, "remove it", false);
+        self.button(&mut cv, REMOVE_STAR, ox, oy, "remove the selected star", false);
         let (sn, focus) = (self.star_name.clone(), self.focus);
         self.field(&mut cv, STAR_NAME, ox, oy, &sn, "rename this star", focus == Some(Field::Star));
         self.button(&mut cv, RENAME, ox, oy, "ok", false);
@@ -438,16 +491,46 @@ impl Ui {
         self.t13.draw(&mut cv, ox + W - 32.0 - ew, oy + H - 30.0, "esc to close", rgba(p.text, 0.35));
         cv
     }
+
+    fn view_name(&self) -> String {
+        if self.sky.stars.is_empty() { "the sky".into() } else { "your sky".into() }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Press at a point given in panel coordinates, on a 1920x1080 screen.
+    const SCREEN: (f32, f32) = (1920.0, 1080.0);
+
+    fn star(name: &str, x: f64, y: f64, windows: u64) -> Star {
+        Star { name: name.into(), x, y, windows }
+    }
+
+    /// Press at a point given in panel coordinates.
     fn press(ui: &mut Ui, x: f32, y: f32, right: bool) -> Effect {
-        let (ox, oy) = Ui::origin(1920.0, 1080.0);
-        ui.press(ox + x, oy + y, 1920.0, 1080.0, right)
+        let (ox, oy) = Ui::origin(SCREEN.0, SCREEN.1);
+        ui.press(ox + x, oy + y, SCREEN.0, SCREEN.1, right)
+    }
+
+    fn drag(ui: &mut Ui, x: f32, y: f32) {
+        let (ox, oy) = Ui::origin(SCREEN.0, SCREEN.1);
+        ui.drag_to(ox + x, oy + y, SCREEN.0, SCREEN.1);
+    }
+
+    fn cmds(e: Effect) -> Vec<String> {
+        match e {
+            Effect::Run(c) => c,
+            Effect::None => vec![],
+        }
+    }
+
+    /// A sky of three stars in a row, and the panel position of each.
+    fn sky3() -> (Ui, Vec<(f32, f32)>) {
+        let mut ui = Ui::new();
+        ui.set_sky(Sky { stars: vec![star("a", 960.0, 540.0, 0), star("b", 4800.0, 540.0, 2), star("c", 8640.0, 540.0, 0)], links: vec![(0, 1)], current: "a".into() });
+        let at = (0..3).map(|i| ui.star_screen(i, 0.0, 0.0)).collect();
+        (ui, at)
     }
 
     fn at_config<R>(f: impl FnOnce() -> R) -> R {
@@ -462,79 +545,115 @@ mod tests {
     }
 
     #[test]
-    fn drawing_a_figure_saving_it_and_applying_it() {
+    fn clicking_the_dark_adds_a_star_there_and_clicking_along_chains_them() {
         at_config(|| {
-            let mut ui = Ui::new();
-            // three clicks on the canvas make a chain
-            for (x, y) in [(300.0, 150.0), (420.0, 260.0), (560.0, 180.0)] {
-                press(&mut ui, x, y, false);
-            }
-            assert_eq!((ui.editor.fig.points.len(), ui.editor.fig.links.len()), (3, 2));
-            // no name yet: saving says no, and applying does not ask Seiza for anything
-            assert!(matches!(press(&mut ui, 560.0, 550.0, false), Effect::None));
-            assert!(ui.msg.starts_with("can't save"));
-            // type a name in its field, then apply
+            let (mut ui, _) = sky3();
+            // an empty spot: a star is added, with nothing to join it to yet
+            let c = cmds(press(&mut ui, 400.0, 400.0, false));
+            assert_eq!(c.len(), 1);
+            let nums: Vec<f64> = c[0].strip_prefix("seiza add-star ").unwrap().split(' ').map(|n| n.parse().unwrap()).collect();
+            let want = ui.world(400.0, 400.0);
+            assert!((nums[0] - want.0).abs() < 1.0 && (nums[1] - want.1).abs() < 1.0, "{nums:?} vs {want:?}");
+            assert_eq!(ui.selected, Some(3), "the new star is selected");
+            // the sky has not changed yet (Seiza has not answered): a second click along joins the new star to the selected one
+            let mut sky = ui.sky.clone();
+            sky.stars.push(star("star 3", nums[0], nums[1], 0));
+            ui.set_sky(sky);
+            let c = cmds(press(&mut ui, 500.0, 470.0, false));
+            assert_eq!(c.len(), 2);
+            assert!(c[0].starts_with("seiza add-star ") && c[1] == "seiza link 4 5", "{c:?}");
+        });
+    }
+
+    #[test]
+    fn a_star_cannot_be_added_on_top_of_another() {
+        at_config(|| {
+            let (mut ui, at) = sky3();
+            // a click a little beside star c (on the canvas, but inside its territory, and not on the star itself)
+            let c = cmds(press(&mut ui, at[2].0 + 22.0, at[2].1 + 8.0, false));
+            assert!(c.is_empty(), "{c:?}");
+            assert!(ui.msg.contains("too close"));
+        });
+    }
+
+    #[test]
+    fn clicking_two_stars_links_them_and_dragging_moves_one() {
+        at_config(|| {
+            let (mut ui, at) = sky3();
+            press(&mut ui, at[0].0, at[0].1, false);
+            assert!(cmds(ui.release()).is_empty() && ui.selected == Some(0), "a click selects");
+            press(&mut ui, at[2].0, at[2].1, false);
+            assert_eq!(cmds(ui.release()), ["seiza link 1 3"]);
+            assert_eq!(ui.selected, Some(2));
+            // dragging star 3 up and a little left (room enough): one move command, on release
+            press(&mut ui, at[2].0, at[2].1, false);
+            drag(&mut ui, at[2].0 - 10.0, at[2].1 - 40.0);
+            let want = ui.drag.as_ref().unwrap().at;
+            let c = cmds(ui.release());
+            assert_eq!(c, [format!("seiza move-star 3 {:.0} {:.0}", want.0, want.1)]);
+            // dropping it on star 1 is refused, with nothing sent
+            press(&mut ui, at[2].0, at[2].1, false);
+            drag(&mut ui, at[0].0 + 3.0, at[0].1 + 3.0);
+            assert!(cmds(ui.release()).is_empty() && ui.msg.contains("no room"));
+        });
+    }
+
+    #[test]
+    fn removing_a_star_works_from_the_canvas_and_the_list_but_not_for_one_with_apps() {
+        at_config(|| {
+            let (mut ui, at) = sky3();
+            assert_eq!(cmds(press(&mut ui, at[2].0, at[2].1, true)), ["seiza delete-star 3"], "right-click on the canvas");
+            assert!(cmds(press(&mut ui, at[1].0, at[1].1, true)).is_empty() && ui.msg.contains("apps"), "star b has two apps");
+            press(&mut ui, 900.0, 100.0 + 10.0, false); // star a, in the list
+            assert_eq!(ui.selected, Some(0));
+            assert_eq!(cmds(press(&mut ui, 1000.0, 440.0, false)), ["seiza delete-star 1"]);
+            let (mut ui, _) = sky3();
+            ui.set_sky(Sky { stars: vec![star("only", 960.0, 540.0, 0)], ..Default::default() });
+            ui.selected = Some(0);
+            assert!(cmds(ui.delete_selected()).is_empty() && ui.msg.contains("at least one"));
+        });
+    }
+
+    #[test]
+    fn a_template_needs_two_clicks_and_saving_stores_the_sky_as_one() {
+        at_config(|| {
+            let (mut ui, _) = sky3();
+            assert!(cmds(press(&mut ui, 60.0, 100.0 + 32.0 * 1.0 + 10.0, false)).is_empty(), "the first click only picks it");
+            assert_eq!(ui.name, "dipper");
+            assert_eq!(cmds(press(&mut ui, 60.0, 100.0 + 32.0 * 1.0 + 10.0, false)), ["seiza figure dipper"]);
+            // saving: name it, press save
             press(&mut ui, 300.0, 550.0, false);
-            ui.type_text("my sky!");
-            assert_eq!(ui.name, "mysky", "only letters, digits, _ and - go in a figure's name");
-            let Effect::Run(cmds) = press(&mut ui, 650.0, 550.0, false) else { panic!("apply should ask Seiza to lay the stars out") };
-            assert_eq!(cmds, ["seiza figure mysky"]);
-            assert_eq!(figure::load("mysky").unwrap().points.len(), 3);
-            assert!(figure::list().contains(&"mysky".to_string()));
-            // delete takes the file away again
-            press(&mut ui, 740.0, 550.0, false);
-            assert!(figure::load("mysky").is_none());
+            ui.name.clear();
+            ui.type_text("my row!");
+            press(&mut ui, 560.0, 550.0, false);
+            let f = figure::load("myrow").expect("saved");
+            assert_eq!((f.points.len(), f.links.clone()), (3, vec![(0, 1)]));
+            assert!(ui.names.contains(&"myrow".to_string()));
+            press(&mut ui, 700.0, 550.0, false); // delete it again
+            assert!(figure::load("myrow").is_none());
         });
     }
 
     #[test]
-    fn dragging_moves_a_point_and_a_plain_click_selects_it() {
+    fn renaming_sends_the_selected_stars_number() {
         at_config(|| {
-            let mut ui = Ui::new();
-            press(&mut ui, 400.0, 300.0, false);
-            ui.editor.selected = None;
-            press(&mut ui, 400.0, 300.0, false); // on the point: starts a drag
-            ui.drag_to(1920.0 / 2.0 - W / 2.0 + 500.0, 1080.0 / 2.0 - H / 2.0 + 350.0, 1920.0, 1080.0);
-            ui.release();
-            let (x, y) = Ui::to_screen(ui.editor.fig.points[0].0, ui.editor.fig.points[0].1);
-            assert!((x - 500.0).abs() < 1.0 && (y - 350.0).abs() < 1.0);
-            assert_eq!(ui.editor.selected, None, "a drag is not a click");
-            press(&mut ui, 500.0, 350.0, false);
-            ui.release();
-            assert_eq!(ui.editor.selected, Some(0));
-            // right-click removes
-            press(&mut ui, 500.0, 350.0, true);
-            assert!(ui.editor.fig.points.is_empty());
-        });
-    }
-
-    #[test]
-    fn star_buttons_send_the_commands_for_the_chosen_star() {
-        at_config(|| {
-            let mut ui = Ui::new();
-            ui.set_stars(vec![("star 0".into(), 2), ("star 1".into(), 0), ("star 2".into(), 0)], "star 0".into());
-            press(&mut ui, 900.0, 100.0 + 34.0 + 10.0, false); // the second star
-            assert_eq!((ui.star_sel, ui.star_name.as_str()), (1, "star 1"));
-            let Effect::Run(c) = press(&mut ui, 1080.0, 440.0, false) else { panic!() };
-            assert_eq!(c, ["seiza delete-star 2"]);
+            let (mut ui, _) = sky3();
+            press(&mut ui, 900.0, 100.0 + 34.0 + 10.0, false);
+            assert_eq!(ui.star_name, "b");
             press(&mut ui, 900.0, 500.0, false);
             ui.star_name.clear();
             ui.type_text("north");
-            let Effect::Run(c) = press(&mut ui, 1110.0, 500.0, false) else { panic!() };
-            assert_eq!(c, ["seiza rename-star 2 north"]);
-            let Effect::Run(c) = press(&mut ui, 900.0, 440.0, false) else { panic!() };
-            assert_eq!(c, ["seiza new-star"]);
+            assert_eq!(cmds(press(&mut ui, 1110.0, 500.0, false)), ["seiza rename-star 2 north"]);
         });
     }
 
     #[test]
-    fn it_draws_without_a_figure_and_with_one() {
+    fn it_draws_empty_and_with_a_sky() {
         at_config(|| {
             let mut ui = Ui::new();
             let empty = ui.render(1920, 1080);
-            ui.load_figure("dipper");
-            let drawn = ui.render(1920, 1080);
-            assert_ne!(empty.px, drawn.px);
+            let (mut ui, _) = sky3();
+            assert_ne!(empty.px, ui.render(1920, 1080).px);
         });
     }
 }
