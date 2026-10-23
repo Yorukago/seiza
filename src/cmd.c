@@ -1,5 +1,6 @@
 /* SEIZA: command dispatch. See cmd.h. */
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,17 @@ static int parse_int(const char *s, int *out) {
 		return -1;
 	}
 	*out = (int)v;
+	return 0;
+}
+
+/* A coordinate: a finite number, nothing after it. */
+static int parse_num(const char *s, double *out) {
+	char *end;
+	double v = strtod(s, &end);
+	if (end == s || *end != '\0' || !isfinite(v) || fabs(v) > 1e7) {
+		return -1;
+	}
+	*out = v;
 	return 0;
 }
 
@@ -91,6 +103,22 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 			return reply(out, outn, -1, "delete-star takes an optional star number");
 		}
 		return reply(out, outn, ops->delete_star(ud, which), "cannot delete (no such star, it has windows, or it is the last one)");
+	}
+	if (IS("add-star") || IS("move-star")) {
+		int which = 0, base = IS("move-star") ? 1 : 0;
+		double x, y;
+		if (args != 2 + base || (base && (parse_int(w[2], &which) != 0 || which < 1)) ||
+				parse_num(w[2 + base], &x) != 0 || parse_num(w[3 + base], &y) != 0) {
+			return reply(out, outn, -1, base ? "move-star needs a star number and x y" : "add-star needs x y");
+		}
+		return reply(out, outn, base ? ops->move_star(ud, which, x, y) : ops->add_star_at(ud, x, y), "no room there, or no such star");
+	}
+	if (IS("link")) {
+		int a, b;
+		if (args != 2 || parse_int(w[2], &a) != 0 || parse_int(w[3], &b) != 0) {
+			return reply(out, outn, -1, "link needs two star numbers");
+		}
+		return reply(out, outn, ops->toggle_link(ud, a, b), "no such stars");
 	}
 	if (IS("rename-star")) {
 		int which;

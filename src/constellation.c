@@ -57,15 +57,12 @@ int constellation_format(const struct constellation *c, char *buf, size_t n) {
 	for (int i = 0; i < c->nstars; i++) {
 		const struct cstar *s = &c->stars[i];
 		PUT("star %.17g %.17g %s\n", s->x, s->y, s->name);
-		if (s->fig_point > 0) {
-			PUT("point %d\n", s->fig_point);
-		}
 		for (int j = 0; j < s->napps; j++) {
 			PUT("app %s\n", s->apps[j]);
 		}
 	}
-	if (c->figure[0]) {
-		PUT("figure %s\n", c->figure);
+	for (int i = 0; i < c->nlinks; i++) {
+		PUT("link %d %d\n", c->links[i][0], c->links[i][1]);
 	}
 	PUT("end\n");
 	#undef PUT
@@ -106,6 +103,11 @@ int constellation_parse(const char *text, struct constellation *out) {
 			int n;
 			if (sscanf(line + 6, "%d", &n) != 1 || n < 1 || n > 255) { ok = 0; break; }
 			out->stars[out->nstars - 1].fig_point = n;
+		} else if (strncmp(line, "link ", 5) == 0 && have_header) {
+			int a, b;
+			if (out->nlinks >= CONST_LINKS_MAX || sscanf(line + 5, "%d %d", &a, &b) != 2 || a < 0 || b < 0 || a == b) { ok = 0; break; }
+			out->links[out->nlinks][0] = a;
+			out->links[out->nlinks++][1] = b;
 		} else if (strncmp(line, "figure ", 7) == 0 && have_header) {
 			if (!constellation_name_ok(line + 7)) { ok = 0; break; }
 			snprintf(out->figure, sizeof(out->figure), "%s", line + 7);
@@ -118,6 +120,14 @@ int constellation_parse(const char *text, struct constellation *out) {
 		}
 	}
 	free(copy);
+	int kept = 0; /* a thread to a star that is not there is dropped, not a reason to lose the file */
+	for (int i = 0; i < out->nlinks; i++) {
+		if (out->links[i][0] < out->nstars && out->links[i][1] < out->nstars) {
+			out->links[kept][0] = out->links[i][0];
+			out->links[kept++][1] = out->links[i][1];
+		}
+	}
+	out->nlinks = kept;
 	return (ok && have_header && have_end && out->nstars > 0) ? 0 : -1;
 }
 

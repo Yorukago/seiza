@@ -29,6 +29,9 @@ struct cmd_ops {
 	void (*toggle_maximize)(void *ud);               /* focused window */
 	int  (*set_figure)(void *ud, const char *name);  /* lay the stars out on a figure; "none" lets go; -1 if unknown */
 	int  (*rename_star)(void *ud, int n, const char *name); /* star n, 1-based; -1 if there is no such star or the name will not do */
+	int  (*add_star_at)(void *ud, double x, double y); /* a star centered there; -1 if there is no room */
+	int  (*move_star)(void *ud, int n, double x, double y); /* star n (1-based) to there; -1 if no such star or no room */
+	int  (*toggle_link)(void *ud, int a, int b);     /* a thread between stars a and b (1-based), or none if there was one; -1 if no such stars */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other

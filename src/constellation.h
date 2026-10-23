@@ -6,8 +6,8 @@
  *     constellation <name>
  *     star <x> <y> <star name, rest of the line>
  *     app <command line, rest of the line>       (belongs to the star above)
- *     point <n>                                  (the figure point the star above holds; 1-based)
- *     figure <name>                              (the figure the stars started from, if any)
+ *     link <a> <b>                               (a thread between stars a and b, counting from 0 in file order)
+ *     point <n>, figure <name>                   (older files: read, and turned into links by the compositor; never written)
  *     end                                        (a file without it was cut short)
  */
 #ifndef SEIZA_CONSTELLATION_H
@@ -17,18 +17,21 @@
 
 #define CSTAR_APPS_MAX 8
 #define CONST_STARS_MAX 64
+#define CONST_LINKS_MAX 128
 
 struct cstar {
 	char name[32];
 	double x, y; /* center of the star's territory, world coordinates */
 	char apps[CSTAR_APPS_MAX][256];
 	int napps;
-	int fig_point; /* 1-based point of the constellation's figure this star holds; 0 = none */
+	int fig_point; /* legacy: 1-based point of the old figure this star held; 0 = none */
 };
 
 struct constellation {
 	char name[32];
-	char figure[32]; /* "" = no figure */
+	char figure[32]; /* legacy: the figure older files recorded; "" = none */
+	int links[CONST_LINKS_MAX][2]; /* threads, as indexes into stars */
+	int nlinks;
 	struct cstar stars[CONST_STARS_MAX];
 	int nstars;
 };
