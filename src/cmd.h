@@ -31,6 +31,8 @@ struct cmd_ops {
 	int  (*rename_star)(void *ud, int n, const char *name); /* star n, 1-based; -1 if there is no such star or the name will not do */
 	int  (*add_star_at)(void *ud, double x, double y); /* a star centered there; -1 if there is no room */
 	int  (*move_star)(void *ud, int n, double x, double y); /* star n (1-based) to there; -1 if no such star or no room */
+	void (*debug_windows)(void *ud);                 /* log every window Seiza knows of: where, how big, what kind */
+	int  (*debug_pointer)(void *ud, double x, double y, int act); /* tests only: move the pointer, then 1 = click, 2 = zoom out a step; -1 unless SEIZA_DEBUG_INPUT is set */
 	int  (*toggle_link)(void *ud, int a, int b);     /* a thread between stars a and b (1-based), or none if there was one; -1 if no such stars */
 };
 

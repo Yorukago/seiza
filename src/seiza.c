@@ -195,7 +195,7 @@ struct tinywl_toplevel {
 	struct wlr_xwayland_surface *xsurface; /* ...or an X11 one (then xdg_toplevel is NULL) */
 	struct wlr_scene_surface *x_scene;     /* the X11 window's surface in the scene, while it is mapped */
 	bool x_attached;                       /* map/unmap/commit are listened to on the X11 window's surface */
-	struct wl_listener associate, dissociate, request_configure; /* X11 only */
+	struct wl_listener associate, dissociate, request_configure, request_activate; /* X11 only */
 	struct wlr_scene_tree *scene_tree;
 	double wx, wy; /* SEIZA: window origin in world coordinates */
 	struct star *star; /* SEIZA: the workspace this window belongs to */
@@ -876,6 +876,9 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Activate the new surface */
 	tl_activate(toplevel, true);
+	if (toplevel->xsurface) { /* X keeps its own stacking order: keep it the same as ours */
+		wlr_xwayland_surface_restack(toplevel->xsurface, NULL, XCB_STACK_MODE_ABOVE);
+	}
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -1112,6 +1115,75 @@ static int op_move_star(void *ud, int n, double x, double y) {
 	}
 	star_move(server, s, x - s->cx, y - s->cy);
 	persist_save(server);
+	return 0;
+}
+
+/* Say, in the log, what Seiza thinks every window is: for working out why a program misbehaves. */
+static void op_debug_windows(void *ud) {
+	struct tinywl_server *server = ud;
+	struct tinywl_toplevel *tl;
+	int i = 0;
+	wlr_log(WLR_INFO, "seiza windows: zoom %.2f, camera (%.0f,%.0f), pointer focus %p, keyboard focus %p",
+		server->zoom, server->cam_x, server->cam_y, (void *)server->seat->pointer_state.focused_surface, (void *)server->seat->keyboard_state.focused_surface);
+	wl_list_for_each(tl, &server->toplevels, link) { /* front to back: the first one gets the click */
+		struct wlr_box g = tl_geometry(tl);
+		int star = 0;
+		struct star *s;
+		wl_list_for_each(s, &server->stars, link) {
+			if (s == tl->star) {
+				break;
+			}
+			star++;
+		}
+		wlr_log(WLR_INFO, "seiza windows: #%d %s star %d at (%.0f,%.0f) %dx%d mode %d surface %p class '%s' title '%s'", i++,
+			tl->xsurface ? "x11" : "wayland", star, tl->wx, tl->wy, g.width, g.height, tl->mode, (void *)tl_surface(tl),
+			tl->xsurface && tl->xsurface->class ? tl->xsurface->class : (tl->xdg_toplevel && tl->xdg_toplevel->app_id ? tl->xdg_toplevel->app_id : ""),
+			tl->xsurface && tl->xsurface->title ? tl->xsurface->title : (tl->xdg_toplevel && tl->xdg_toplevel->title ? tl->xdg_toplevel->title : ""));
+	}
+	struct xunmanaged *um;
+	wl_list_for_each(um, &server->unmanaged, link) {
+		wlr_log(WLR_INFO, "seiza windows: x11 menu/tooltip at (%d,%d) %dx%d %s class '%s'", um->xs->x, um->xs->y, um->xs->width, um->xs->height,
+			um->surf ? "shown" : "hidden", um->xs->class ? um->xs->class : "");
+	}
+}
+
+/* For tests on a machine with no mouse: put the pointer there and click, through the same code a
+ * real pointer goes through. Off unless SEIZA_DEBUG_INPUT is set. */
+static void server_cursor_button(struct wl_listener *listener, void *data);
+static void process_cursor_motion(struct tinywl_server *server, uint32_t time);
+static struct tinywl_toplevel *desktop_toplevel_at(struct tinywl_server *server, double lx, double ly, struct wlr_surface **surface, double *sx, double *sy);
+static int op_debug_pointer(void *ud, double x, double y, int act) {
+	struct tinywl_server *server = ud;
+	if (!getenv("SEIZA_DEBUG_INPUT")) {
+		return -1;
+	}
+	wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+	static uint32_t now_ms = 1000; /* real events carry rising times, and X programs drop ones that do not */
+	now_ms += 50;
+	wlr_cursor_warp(server->cursor, NULL, x, y);
+	process_cursor_motion(server, now_ms);
+	wlr_seat_pointer_notify_frame(server->seat); /* a real device ends each event with a frame */
+	{
+		double sx = 0, sy = 0;
+		struct wlr_surface *surf = NULL;
+		struct tinywl_toplevel *t = desktop_toplevel_at(server, server->cursor->x, server->cursor->y, &surf, &sx, &sy);
+		wlr_log(WLR_INFO, "seiza debug: asked (%.0f,%.0f) cursor (%.1f,%.1f) cam (%.0f,%.0f) zoom %.2f -> window %p surface %p local (%.1f,%.1f)",
+			x, y, server->cursor->x, server->cursor->y, server->cam_x, server->cam_y, server->zoom, (void *)t, (void *)surf, sx, sy);
+	}
+	if (act == 2) {
+		zoom_at(server, 1 / 1.1); /* one wheel notch out, like Alt+scroll */
+		process_cursor_motion(server, now_ms += 50);
+		wlr_seat_pointer_notify_frame(server->seat);
+	}
+	if (act == 1) {
+		struct wlr_pointer_button_event ev = {.time_msec = now_ms, .button = BTN_LEFT, .state = WL_POINTER_BUTTON_STATE_PRESSED};
+		server_cursor_button(&server->cursor_button, &ev);
+		wlr_seat_pointer_notify_frame(server->seat);
+		ev.state = WL_POINTER_BUTTON_STATE_RELEASED;
+		ev.time_msec = now_ms += 50;
+		server_cursor_button(&server->cursor_button, &ev);
+		wlr_seat_pointer_notify_frame(server->seat);
+	}
 	return 0;
 }
 
@@ -1459,7 +1531,7 @@ static const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
-	op_toggle_maximize, op_set_figure, op_rename_star, op_add_star_at, op_move_star, op_toggle_link,
+	op_toggle_maximize, op_set_figure, op_rename_star, op_add_star_at, op_move_star, op_debug_windows, op_debug_pointer, op_toggle_link,
 };
 
 /* Run the binding for this key combo, if there is one. True if it was one. */
@@ -2301,6 +2373,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 		wl_list_remove(&toplevel->associate.link);
 		wl_list_remove(&toplevel->dissociate.link);
 		wl_list_remove(&toplevel->request_configure.link);
+		wl_list_remove(&toplevel->request_activate.link);
 	}
 	wl_list_remove(&toplevel->destroy.link);
 	wl_list_remove(&toplevel->request_move.link);
@@ -2511,6 +2584,13 @@ static void xwl_request_maximize(struct wl_listener *listener, void *data) {
 	toplevel_set_mode(tl, tl->xsurface->maximized_horz && tl->xsurface->maximized_vert ? 1 : 0);
 }
 
+static void xwl_request_activate(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_activate);
+	if (tl_ready(tl) && tl->star == tl->server->current_star) { /* a program in another star does not pull you there */
+		focus_toplevel(tl);
+	}
+}
+
 static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
 	/* No fullscreen in Seiza: the program is simply told it stays as it is. */
 }
@@ -2540,6 +2620,8 @@ static void server_new_xwayland_toplevel(struct tinywl_server *server, struct wl
 	wl_signal_add(&xs->events.request_maximize, &toplevel->request_maximize);
 	toplevel->request_fullscreen.notify = xwl_request_fullscreen;
 	wl_signal_add(&xs->events.request_fullscreen, &toplevel->request_fullscreen);
+	toplevel->request_activate.notify = xwl_request_activate;
+	wl_signal_add(&xs->events.request_activate, &toplevel->request_activate);
 	if (xs->surface) { /* it was associated before we heard of it */
 		xwl_associate(&toplevel->associate, NULL);
 	}

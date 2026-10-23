@@ -113,6 +113,14 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 		}
 		return reply(out, outn, base ? ops->move_star(ud, which, x, y) : ops->add_star_at(ud, x, y), "no room there, or no such star");
 	}
+	if (IS("debug-windows")) { NEED(0); ops->debug_windows(ud); return reply(out, outn, 0, ""); }
+	if (IS("debug-pointer")) {
+		double x, y;
+		if (args < 2 || args > 3 || parse_num(w[2], &x) != 0 || parse_num(w[3], &y) != 0 || (args == 3 && strcmp(w[4], "click") != 0 && strcmp(w[4], "zoom") != 0)) {
+			return reply(out, outn, -1, "debug-pointer needs x y [click|zoom]");
+		}
+		return reply(out, outn, ops->debug_pointer(ud, x, y, args == 3 ? (strcmp(w[4], "click") == 0 ? 1 : 2) : 0), "debug input is off (set SEIZA_DEBUG_INPUT)");
+	}
 	if (IS("link")) {
 		int a, b;
 		if (args != 2 || parse_int(w[2], &a) != 0 || parse_int(w[3], &b) != 0) {
