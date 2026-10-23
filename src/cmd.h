@@ -10,7 +10,7 @@
 struct cmd_ops {
 	void (*overview)(void *ud);
 	int  (*new_star)(void *ud);
-	int  (*delete_star)(void *ud);   /* -1 if the star has windows, or is the last one */
+	int  (*delete_star)(void *ud, int n); /* star n (1-based; 0 = the current one); -1 if it has windows, is the last one, or is not there */
 	int  (*save)(void *ud, const char *name);
 	int  (*load)(void *ud, const char *name);
 	int  (*relaunch)(void *ud);
@@ -28,6 +28,7 @@ struct cmd_ops {
 	void (*focus_dir)(void *ud, int dx, int dy);     /* nearest window that way (signs only) */
 	void (*toggle_maximize)(void *ud);               /* focused window */
 	int  (*set_figure)(void *ud, const char *name);  /* lay the stars out on a figure; "none" lets go; -1 if unknown */
+	int  (*rename_star)(void *ud, int n, const char *name); /* star n, 1-based; -1 if there is no such star or the name will not do */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other

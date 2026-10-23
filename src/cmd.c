@@ -86,8 +86,22 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	if (IS("cycle-window")) { NEED(0); ops->cycle_window(ud); return reply(out, outn, 0, ""); }
 	if (IS("new-star")) { NEED(0); return reply(out, outn, ops->new_star(ud), "could not create star"); }
 	if (IS("delete-star")) {
-		NEED(0);
-		return reply(out, outn, ops->delete_star(ud), "cannot delete (star has windows, or it is the last one)");
+		int which = 0; /* no number: the current star */
+		if (args > 1 || (args == 1 && (parse_int(w[2], &which) != 0 || which < 1))) {
+			return reply(out, outn, -1, "delete-star takes an optional star number");
+		}
+		return reply(out, outn, ops->delete_star(ud, which), "cannot delete (no such star, it has windows, or it is the last one)");
+	}
+	if (IS("rename-star")) {
+		int which;
+		if (args < 2 || parse_int(w[2], &which) != 0 || which < 1) {
+			return reply(out, outn, -1, "rename-star needs a star number and a name");
+		}
+		char name[128] = ""; /* the rest of the words, one space apart */
+		for (int i = 3; i < n; i++) {
+			snprintf(name + strlen(name), sizeof(name) - strlen(name), "%s%s", i > 3 ? " " : "", w[i]);
+		}
+		return reply(out, outn, ops->rename_star(ud, which, name), "no such star, or a name that will not do");
 	}
 	if (IS("relaunch")) { NEED(0); return reply(out, outn, ops->relaunch(ud), "relaunch failed"); }
 	if (IS("reload-config")) { NEED(0); return reply(out, outn, ops->reload_config(ud), "reload failed"); }

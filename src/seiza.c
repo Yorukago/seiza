@@ -880,12 +880,26 @@ static void stars_clear(struct tinywl_server *server) {
 	server->hover_star = NULL;
 }
 
+/* Star n of the constellation, counting from 1 in creation order; 0 is the current one. */
+static struct star *star_nth(struct tinywl_server *server, int n) {
+	if (n == 0) {
+		return server->current_star;
+	}
+	struct star *s;
+	wl_list_for_each(s, &server->stars, link) {
+		if (--n == 0) {
+			return s;
+		}
+	}
+	return NULL;
+}
+
 /* Only an empty star can go, and there is always at least one. */
-static int op_delete_star(void *ud) {
+static int op_delete_star(void *ud, int n) {
 	struct tinywl_server *server = ud;
-	struct star *s = server->current_star;
+	struct star *s = star_nth(server, n);
 	struct tinywl_toplevel *tl;
-	if (wl_list_length(&server->stars) <= 1) {
+	if (!s || wl_list_length(&server->stars) <= 1) {
 		return -1;
 	}
 	wl_list_for_each(tl, &server->all_toplevels, all_link) { /* unmapped windows count too */
@@ -895,12 +909,36 @@ static int op_delete_star(void *ud) {
 	}
 	struct star *next = wl_container_of(s->link.next == &server->stars ?
 		server->stars.next : s->link.next, next, link);
+	bool was_current = s == server->current_star;
 	wl_list_remove(&s->link);
 	wlr_scene_node_destroy(&s->marker->node);
 	free(s);
 	server->hover_star = NULL;
-	fly_to_star(server, next);
+	if (was_current) {
+		fly_to_star(server, next);
+	} else {
+		relayout_all(server); /* the camera stays where it is */
+	}
 	persist_save(server);
+	return 0;
+}
+
+/* A star's name is a line in the constellation file: printable, one line, and short. */
+static int op_rename_star(void *ud, int n, const char *name) {
+	struct tinywl_server *server = ud;
+	struct star *s = star_nth(server, n);
+	size_t len = strlen(name);
+	if (!s || len == 0 || len >= sizeof(s->name)) {
+		return -1;
+	}
+	for (size_t i = 0; i < len; i++) {
+		if ((unsigned char)name[i] < 0x20 || name[i] == 0x7f) {
+			return -1;
+		}
+	}
+	snprintf(s->name, sizeof(s->name), "%s", name);
+	persist_save(server);
+	relayout_all(server);
 	return 0;
 }
 
@@ -1222,7 +1260,7 @@ static const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
-	op_toggle_maximize, op_set_figure,
+	op_toggle_maximize, op_set_figure, op_rename_star,
 };
 
 /* Run the binding for this key combo, if there is one. True if it was one. */
