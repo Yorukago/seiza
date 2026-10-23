@@ -161,6 +161,7 @@ pub fn composite(dst: &mut Canvas, src: &Canvas, c: (f32, f32), s: f32, dy: f32,
     }
 }
 
+#[derive(Clone)]
 pub struct Text {
     font: Font,
     px: f32,

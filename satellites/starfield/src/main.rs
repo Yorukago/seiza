@@ -83,7 +83,9 @@ fn thread(px: &mut [u32], w: usize, h: usize, a: (f32, f32), b: (f32, f32), seed
             let x = u * a.0 + v * ctrl.0 + t * t * b.0 - dy / len * wob;
             let y = u * a.1 + v * ctrl.1 + t * t * b.1 + dx / len * wob;
             let alpha = if pass == 0 { 1.0 } else { 0.45 };
-            glow(px, w, h, x, y, 3.2, color, 0.06 * alpha, false); // soft halo
+            if s % 3 == 0 {
+                glow(px, w, h, x, y, 3.2, color, 0.18 * alpha, false); // soft halo: every third dot is enough, they overlap
+            }
             glow(px, w, h, x, y, 1.0, [1.0, 0.97, 0.85], 0.4 * alpha, false); // thin bright core
         }
     }
@@ -212,6 +214,8 @@ struct Starfield {
     rng: u64,
     nebula_gain: f32, // SEIZA_STARFIELD_NEBULA or `nebula=` in ~/.config/seiza/sky: default 0.4; 1 = full colour, 0 = black sky
     bg: Vec<u32>,
+    spent: Duration, // SEIZA_STARFIELD_TIMING: time spent drawing, over `frames` frames
+    frames: u32,
     bg_origin: (f32, f32), // the parallax offset the nebula was made for
     bg_size: (usize, usize),
     frame: Vec<u32>,
@@ -427,6 +431,7 @@ impl Starfield {
             return;
         }
         let (w, h) = (self.width as usize, self.height as usize);
+        let drawing = Instant::now();
         let (wcx, wcy) = ((self.cur.x + self.cur.screen.0 / 2.0) / self.cur.zoom, (self.cur.y + self.cur.screen.1 / 2.0) / self.cur.zoom);
         let (dx, dy) = self.nebula(wcx, wcy);
         self.frame.clear();
@@ -444,6 +449,14 @@ impl Starfield {
             self.constellation_view(t);
         }
         self.shooting_stars(dt as f32);
+        if std::env::var_os("SEIZA_STARFIELD_TIMING").is_some() { // how long a frame takes to draw, averaged over 120
+            self.spent += drawing.elapsed();
+            self.frames += 1;
+            if self.frames == 120 {
+                eprintln!("seiza-starfield: {:?} to draw a frame ({}x{}, overview {})", self.spent / 120, w, h, self.overview);
+                (self.spent, self.frames) = (Duration::ZERO, 0);
+            }
+        }
 
         if let Ok(path) = std::env::var("SEIZA_STARFIELD_DUMP") { // debugging aid: write a frame as PPM and quit
             if self.start.elapsed() > Duration::from_millis(1400) {
@@ -558,6 +571,8 @@ fn main() {
         rng: 0x5E12A,
         nebula_gain: std::env::var("SEIZA_STARFIELD_NEBULA").ok().or_else(|| seiza_common::config::get("sky", "nebula")).and_then(|v| v.parse().ok()).unwrap_or(0.4),
         bg: Vec::new(),
+        spent: Duration::ZERO,
+        frames: 0,
         bg_origin: (0.0, 0.0),
         bg_size: (0, 0),
         frame: Vec::new(),
