@@ -73,9 +73,10 @@ struct star {
 	int napps;
 };
 
-/* An X11 override-redirect window: a menu, a tooltip, a drop-down. The program places it
- * itself, in X coordinates, which are our world coordinates (managed windows are configured
- * at their world position), so it is drawn there and nobody manages it. */
+/* An X11 override-redirect window: a menu, a tooltip, a drop-down. The program places it itself,
+ * in X coordinates, which are relative to its window's origin (every managed window sits at X
+ * (0,0)); so it is drawn at that window's place on the canvas plus those coordinates, and nobody
+ * manages it. */
 struct xunmanaged {
 	struct wl_list link;
 	struct tinywl_server *server;
@@ -84,6 +85,7 @@ struct xunmanaged {
 	struct wlr_scene_surface *surf; /* while mapped */
 	bool attached;                  /* map/unmap are listened to on the X11 surface */
 	bool committing;                /* so is commit, while it is shown */
+	double ax, ay;                  /* the world place of the window it belongs to, taken when it was shown */
 	struct wl_listener associate, dissociate, destroy, map, unmap, set_geometry, request_configure, commit;
 };
 
@@ -273,7 +275,7 @@ static void tl_set_size(struct tinywl_toplevel *tl, int w, int h) {
 	if (!tl->xsurface) {
 		wlr_xdg_toplevel_set_size(tl->xdg_toplevel, w, h);
 	} else if (w > 0 && h > 0) {
-		wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), w, h);
+		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, w, h);
 	}
 }
 
@@ -647,17 +649,22 @@ static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data
 #define WIN_MARGIN 100
 static void layout_toplevel(struct tinywl_toplevel *tl) {
 	double z = tl->server->zoom;
-	wlr_scene_node_set_enabled(&tl->scene_tree->node, !tl->server->overview); /* the constellation view shows no windows */
+	/* The constellation view shows no windows, and a window that is not on screen (an X11 program's
+	 * helper windows exist long before, or without ever, being shown) gets no frame either. */
+	struct wlr_surface *surface = tl_surface(tl);
+	wlr_scene_node_set_enabled(&tl->scene_tree->node, surface && surface->mapped && !tl->server->overview);
 	if (tl->star) {
 		tl->wx = fmin(fmax(tl->wx, tl->star->cx - STAR_W / 2.0 - WIN_MARGIN), tl->star->cx + STAR_W / 2.0 + WIN_MARGIN);
 		/* the top edge also stays below the bar (usable.y is 0 until a bar exists) */
 		tl->wy = fmin(fmax(tl->wy, tl->star->cy - STAR_H / 2.0 + (tl->mode ? 0 : tl->server->usable.y - tl->server->full.y)), tl->star->cy + STAR_H / 2.0 + WIN_MARGIN);
 	}
 	wlr_scene_node_set_position(&tl->scene_tree->node, lround(tl->wx * z), lround(tl->wy * z));
-	if (tl->xsurface && tl->xsurface->width && tl->xsurface->height &&
-			(tl->xsurface->x != lround(tl->wx) || tl->xsurface->y != lround(tl->wy))) {
-		/* An X11 program needs to know where it is (it places its menus from it). */
-		wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), tl->xsurface->width, tl->xsurface->height);
+	if (tl->xsurface && surface && surface->mapped && tl->xsurface->width && tl->xsurface->height &&
+			(tl->xsurface->x != 0 || tl->xsurface->y != 0)) {
+		/* Every X11 window sits at X position (0,0), whatever its place on our canvas: X only delivers
+		 * the pointer to a window inside its own screen (the size of the output), and the canvas is far
+		 * bigger than that. Which window gets the pointer follows Wayland pointer focus, not X geometry. */
+		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, tl->xsurface->width, tl->xsurface->height);
 	}
 	struct scale_arg arg = {z, tl->mode ? 0 : lround(WIN_RADIUS * z)}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
@@ -666,7 +673,7 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 
 static void layout_unmanaged(struct xunmanaged *u) {
 	double z = u->server->zoom;
-	wlr_scene_node_set_position(&u->tree->node, lround(u->xs->x * z), lround(u->xs->y * z));
+	wlr_scene_node_set_position(&u->tree->node, lround((u->ax + u->xs->x) * z), lround((u->ay + u->xs->y) * z));
 	struct scale_arg arg = {z, 0};
 	wlr_scene_node_for_each_buffer(&u->tree->node, scale_buffer, &arg);
 }
@@ -1126,7 +1133,7 @@ static void op_debug_windows(void *ud) {
 	int i = 0;
 	wlr_log(WLR_INFO, "seiza windows: zoom %.2f, camera (%.0f,%.0f), pointer focus %p, keyboard focus %p",
 		server->zoom, server->cam_x, server->cam_y, (void *)server->seat->pointer_state.focused_surface, (void *)server->seat->keyboard_state.focused_surface);
-	wl_list_for_each(tl, &server->toplevels, link) { /* front to back: the first one gets the click */
+	wl_list_for_each(tl, &server->all_toplevels, all_link) { /* mapped ones, and ones that exist but are not shown */
 		struct wlr_box g = tl_geometry(tl);
 		int star = 0;
 		struct star *s;
@@ -1136,15 +1143,15 @@ static void op_debug_windows(void *ud) {
 			}
 			star++;
 		}
-		wlr_log(WLR_INFO, "seiza windows: #%d %s star %d at (%.0f,%.0f) %dx%d (drawn %dx%d) mode %d surface %p class '%s' title '%s'", i++,
-			tl->xsurface ? "x11" : "wayland", star, tl->wx, tl->wy, g.width, g.height,
+		wlr_log(WLR_INFO, "seiza windows: #%d %s %s star %d at (%.0f,%.0f) %dx%d (drawn %dx%d) mode %d surface %p class '%s' title '%s'", i++,
+			tl->xsurface ? "x11" : "wayland", tl->scene_tree->node.enabled ? "shown" : "NOT SHOWN", star, tl->wx, tl->wy, g.width, g.height,
 			tl->x_scene ? tl->x_scene->buffer->dst_width : -1, tl->x_scene ? tl->x_scene->buffer->dst_height : -1, tl->mode, (void *)tl_surface(tl),
 			tl->xsurface && tl->xsurface->class ? tl->xsurface->class : (tl->xdg_toplevel && tl->xdg_toplevel->app_id ? tl->xdg_toplevel->app_id : ""),
 			tl->xsurface && tl->xsurface->title ? tl->xsurface->title : (tl->xdg_toplevel && tl->xdg_toplevel->title ? tl->xdg_toplevel->title : ""));
 	}
 	struct xunmanaged *um;
 	wl_list_for_each(um, &server->unmanaged, link) {
-		wlr_log(WLR_INFO, "seiza windows: x11 menu/tooltip at (%d,%d) %dx%d %s class '%s'", um->xs->x, um->xs->y, um->xs->width, um->xs->height,
+		wlr_log(WLR_INFO, "seiza windows: x11 menu/tooltip at (%d,%d) in window at (%.0f,%.0f) %dx%d %s class '%s'", um->xs->x, um->xs->y, um->ax, um->ay, um->xs->width, um->xs->height,
 			um->surf ? "shown" : "hidden", um->xs->class ? um->xs->class : "");
 	}
 }
@@ -1757,7 +1764,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	struct xunmanaged *um;
 	wl_list_for_each_reverse(um, &server->unmanaged, link) { /* menus and tooltips: a surface, but no window */
 		if (um->surf) {
-			struct wlr_surface *s = wlr_surface_surface_at(um->xs->surface, wxc - um->xs->x, wyc - um->xs->y, sx, sy);
+			struct wlr_surface *s = wlr_surface_surface_at(um->xs->surface, wxc - um->ax - um->xs->x, wyc - um->ay - um->xs->y, sx, sy);
 			if (s) {
 				*surface = s;
 				return NULL;
@@ -2326,6 +2333,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		layout_toplevel(toplevel);
 	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+	layout_toplevel(toplevel); /* it is on screen from now on: show it, frame and all */
 	remember_app(toplevel);
 
 	focus_toplevel(toplevel);
@@ -2346,6 +2354,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		toplevel->x_scene = NULL;
 	}
 	wl_list_remove(&toplevel->link);
+	layout_toplevel(toplevel); /* ...and not any more: take the frame away with it */
 	publish_state(toplevel->server);
 }
 
@@ -2572,7 +2581,7 @@ static void xwl_dissociate(struct wl_listener *listener, void *data) {
 static void xwl_request_configure(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_configure);
 	struct wlr_xwayland_surface_configure_event *e = data;
-	wlr_xwayland_surface_configure(tl->xsurface, lround(tl->wx), lround(tl->wy), e->width, e->height);
+	wlr_xwayland_surface_configure(tl->xsurface, 0, 0, e->width, e->height);
 }
 
 static void xwl_request_move(struct wl_listener *listener, void *data) {
@@ -2644,6 +2653,20 @@ static void um_commit(struct wl_listener *listener, void *data) {
 static void um_map(struct wl_listener *listener, void *data) {
 	struct xunmanaged *u = wl_container_of(listener, u, map);
 	u->surf = wlr_scene_surface_create(u->tree, u->xs->surface);
+	/* It belongs to the window under the pointer (a tooltip, a menu just clicked), else the focused one. */
+	struct tinywl_toplevel *owner = NULL, *t;
+	struct wlr_surface *under = u->server->seat->pointer_state.focused_surface;
+	wl_list_for_each(t, &u->server->toplevels, link) {
+		if (under && tl_surface(t) == under) {
+			owner = t;
+			break;
+		}
+		if (!owner) {
+			owner = t; /* the list starts with the focused window */
+		}
+	}
+	u->ax = owner ? owner->wx : 0;
+	u->ay = owner ? owner->wy : 0;
 	u->commit.notify = um_commit;
 	wl_signal_add(&u->xs->surface->events.commit, &u->commit); /* after the scene's own */
 	u->committing = true;
