@@ -64,7 +64,8 @@ impl Settings {
             }
             Effect::ApplyColors => {
                 let path = self.ui.values["look/wallpaper"].trim().replace('~', &std::env::var("HOME").unwrap_or_default());
-                self.ui.msg = match Command::new("seiza-wallpaper").arg(&path).output() {
+                self.ui.load_thumb();
+                self.ui.msg = match Command::new("seiza-wallpaper").args(["-p", ui::style_palette(&self.ui.values["look/style"])]).arg(&path).output() {
                     Ok(o) if o.status.success() => {
                         for p in ["seiza-starfield", "seiza-bar", "seiza-widgets"] {
                             if !self.ui.restart.contains(&p) {

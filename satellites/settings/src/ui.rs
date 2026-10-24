@@ -45,10 +45,11 @@ pub fn pages() -> Vec<Page> {
     vec![
         Page { name: "look", blurb: "seiza reads a picture and borrows its colors.", rows: vec![
             row("look/swatches", "the sky now", "the colors every program draws with", Ctl::Swatches, ""),
-            row("look/wallpaper", "colors from picture", "a path to an image; wallust does the reading", Ctl::Path, ""),
+            row("look/wallpaper", "colors from picture", "wallust reads it", Ctl::Path, ""),
+            row("look/random", "surprise me", "one from the same folder", Ctl::Button("random"), ""),
+            row("look/style", "palette style", "how boldly the picture colors the sky", Ctl::Choice(&["soft", "hard", "comp", "salient"]), "soft"),
             row("look/apply", "borrow the colors", "restarts the bar, the sky and the widgets", Ctl::Button("apply"), ""),
             tog("look/contrast_guard", "keep text readable", "swaps in cream text if a picture is too dim", "1"),
-            row("look/clock", "clock", "24 hours or 12", Ctl::Choice(&["24", "12"]), "24"),
         ]},
         Page { name: "window", blurb: "the frame around every window.", rows: vec![
             row("frame/radius", "corner roundness", "in pixels", Ctl::Slider(0.0, 32.0, 1.0), "14"),
@@ -56,6 +57,7 @@ pub fn pages() -> Vec<Page> {
             row("frame/glow", "glow", "the bloom behind a window", Ctl::Choice(&["off", "soft", "bright"]), "soft"),
         ]},
         Page { name: "bar", blurb: "what the bar says.", rows: vec![
+            row("look/clock", "clock", "24 hours or 12", Ctl::Choice(&["24", "12"]), "24"),
             tog("bar/date", "date", "next to the clock", "1"),
             tog("bar/stats", "system stats", "cpu and ram", "1"),
             tog("bar/volume", "volume", "the speaker level", "1"),
@@ -98,6 +100,45 @@ pub fn widgets_file(on: impl Fn(&str) -> bool) -> String {
     WIDGET_NAMES.iter().filter(|n| on(n)).map(|n| format!("{n}\n")).collect()
 }
 
+/// wallust's palette for the style chips.
+pub fn style_palette(style: &str) -> &'static str {
+    match style {
+        "hard" => "harddark",
+        "comp" => "darkcomp",
+        "salient" => "saliencedark",
+        _ => "dark",
+    }
+}
+
+fn seed() -> usize {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize)
+}
+
+/// A picture from the folder `path` is in (or is), chosen by `seed`; ~/Pictures if `path` is empty.
+pub fn random_picture(path: &str, seed: usize) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = if path.trim().is_empty() { format!("{home}/Pictures") } else { path.trim().replace('~', &home) };
+    let p = std::path::Path::new(&path);
+    let dir = if p.is_dir() { p } else { p.parent()? };
+    let mut pics: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|f| f.extension().and_then(|x| x.to_str()).is_some_and(|x| ["jpg", "jpeg", "png", "webp"].contains(&x.to_lowercase().as_str())))
+        .collect();
+    pics.sort();
+    pics.get(seed.checked_rem(pics.len())?).map(|f| f.to_string_lossy().into_owned())
+}
+
+/// A small preview of the picture at `path`, via ImageMagick if it is there; None if not.
+fn thumbnail(path: &str) -> Option<(usize, usize, Vec<u32>)> {
+    let path = path.trim().replace('~', &std::env::var("HOME").unwrap_or_default());
+    let out = std::process::Command::new("magick").args([&format!("{path}[0]"), "-resize", "96x54^", "-gravity", "center", "-extent", "96x54", "ppm:-"]).output().ok()?;
+    let nl = out.stdout.iter().enumerate().filter(|(_, b)| **b == b'\n').nth(2)?.0 + 1; // "P6\n96 54\n255\n"
+    let (w, h) = (96, 54);
+    let px = out.stdout.get(nl..nl + w * h * 3)?;
+    Some((w, h, px.chunks(3).map(|c| 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect()))
+}
+
 pub struct Ui {
     pages: Vec<Page>,
     pub page: usize,
@@ -105,6 +146,7 @@ pub struct Ui {
     pub focus: Option<&'static str>, // the text field being typed into
     pub msg: String,
     pub restart: Vec<&'static str>, // programs to restart when the page closes
+    thumb: Option<(usize, usize, Vec<u32>)>,
     t22: Text,
     t17: Text,
     t13: Text,
@@ -132,7 +174,13 @@ impl Ui {
             };
             values.insert(r.id, v);
         }
-        Ui { pages, page: 0, values, focus: None, msg: "that's all for now..".into(), restart: vec![], t22: Text::new(load_font(), 24.0), t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0) }
+        let mut ui = Ui { pages, page: 0, values, focus: None, msg: "that's all for now..".into(), restart: vec![], thumb: None, t22: Text::new(load_font(), 24.0), t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0) };
+        ui.load_thumb();
+        ui
+    }
+
+    pub fn load_thumb(&mut self) {
+        self.thumb = Some(self.values["look/wallpaper"].as_str()).filter(|p| !p.trim().is_empty()).and_then(thumbnail);
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -170,7 +218,7 @@ impl Ui {
                 let text = widgets_file(|n| self.values.get(format!("widgets/{n}").as_str()).is_some_and(|v| v == "1"));
                 std::fs::create_dir_all(config::path("widgets").parent().unwrap()).and_then(|_| std::fs::write(config::path("widgets"), text))
             }
-            "look" if key == "apply" => Ok(()),
+            "look" if matches!(key, "apply" | "random") => Ok(()),
             "keys" => Ok(()),
             _ => config::set(file, key, &val),
         };
@@ -182,7 +230,7 @@ impl Ui {
             "sky" => &["seiza-starfield"],
             "widgets" => &["seiza-widgets"],
             "bar" => &["seiza-bar"],
-            "look" if key != "apply" => &["seiza-bar", "seiza-widgets", "seiza-starfield"],
+            "look" if matches!(key, "clock" | "contrast_guard") => &["seiza-bar", "seiza-widgets", "seiza-starfield"],
             _ => &[],
         };
         for p in restart {
@@ -191,6 +239,16 @@ impl Ui {
             }
         }
         match file {
+            "look" if key == "random" => match random_picture(&self.values["look/wallpaper"], seed()) {
+                Some(p) => {
+                    self.values.insert("look/wallpaper", p);
+                    Effect::ApplyColors
+                }
+                None => {
+                    self.msg = "no pictures in that folder..".into();
+                    Effect::None
+                }
+            },
             "motion" | "frame" => Effect::ReloadConfig,
             "keys" if key == "help" => Effect::Run("seiza help"),
             "keys" => Effect::ReloadConfig,
@@ -334,6 +392,13 @@ impl Ui {
                     let focused = self.focus == Some(id);
                     cv.round_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, ch / 2.0 + 1.0, rgba(p.star, if focused { 0.7 } else { 0.2 }));
                     cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.sky, 0.8));
+                    if let (Some((tw, th, px)), true) = (&self.thumb, id == "look/wallpaper") {
+                        let (tx, ty) = ((cx - 110.0) as usize, (cy + ch / 2.0) as usize - th / 2);
+                        cv.round_rect(tx as f32 - 1.0, ty as f32 - 1.0, *tw as f32 + 2.0, *th as f32 + 2.0, 3.0, rgba(p.star, 0.3));
+                        for y in 0..*th {
+                            cv.px[(ty + y) * w + tx..(ty + y) * w + tx + tw].copy_from_slice(&px[y * tw..(y + 1) * tw]);
+                        }
+                    }
                     let shown = if val.is_empty() && !focused { (if id == "look/wallpaper" { "~/pictures/sky.jpg" } else { "kitty" }).to_string() } else { val.clone() };
                     // keep the tail of a long path in view
                     let tail: String = shown.chars().rev().scan(0.0, |acc, c| { *acc += self.t13.glyph(c).0.advance_width; (*acc < cw - 36.0).then_some(c) }).collect::<Vec<_>>().into_iter().rev().collect();
@@ -427,6 +492,20 @@ mod tests {
             assert!(matches!(ui.set("keys/help", "1".into()), Effect::Run("seiza help")));
             assert!(!config::path("keys").exists());
         });
+    }
+
+    #[test]
+    fn random_picks_a_picture_next_to_the_current_one() {
+        let dir = std::env::temp_dir().join(format!("seiza-pics-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(random_picture(dir.to_str().unwrap(), 0).is_none(), "an empty folder has none");
+        for n in ["a.jpg", "b.PNG", "notes.txt"] {
+            std::fs::write(dir.join(n), "").unwrap();
+        }
+        let from = dir.join("a.jpg");
+        assert!(random_picture(from.to_str().unwrap(), 1).unwrap().ends_with("b.PNG"));
+        assert!(random_picture(dir.to_str().unwrap(), 2).unwrap().ends_with("a.jpg"), "the seed wraps");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
