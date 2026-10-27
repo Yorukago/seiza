@@ -1187,12 +1187,13 @@ static int op_debug_pointer(void *ud, double x, double y, int act) {
 		process_cursor_motion(server, now_ms += 50);
 		wlr_seat_pointer_notify_frame(server->seat);
 	}
-	if (act == 1) {
+	if (act == 1 || act == 3) { /* click, or just the press */
 		struct wlr_pointer_button_event ev = {.time_msec = now_ms, .button = BTN_LEFT, .state = WL_POINTER_BUTTON_STATE_PRESSED};
 		server_cursor_button(&server->cursor_button, &ev);
 		wlr_seat_pointer_notify_frame(server->seat);
-		ev.state = WL_POINTER_BUTTON_STATE_RELEASED;
-		ev.time_msec = now_ms += 50;
+	}
+	if (act == 1 || act == 4) { /* click, or just the release */
+		struct wlr_pointer_button_event ev = {.time_msec = now_ms += 50, .button = BTN_LEFT, .state = WL_POINTER_BUTTON_STATE_RELEASED};
 		server_cursor_button(&server->cursor_button, &ev);
 		wlr_seat_pointer_notify_frame(server->seat);
 	}

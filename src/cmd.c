@@ -116,10 +116,19 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	if (IS("debug-windows")) { NEED(0); ops->debug_windows(ud); return reply(out, outn, 0, ""); }
 	if (IS("debug-pointer")) {
 		double x, y;
-		if (args < 2 || args > 3 || parse_num(w[2], &x) != 0 || parse_num(w[3], &y) != 0 || (args == 3 && strcmp(w[4], "click") != 0 && strcmp(w[4], "zoom") != 0)) {
-			return reply(out, outn, -1, "debug-pointer needs x y [click|zoom]");
+		int act = 0; /* none, click, zoom, button down, button up */
+		if (args == 3) {
+			const char *what[] = {"", "click", "zoom", "down", "up"};
+			for (int i = 1; i < 5; i++) {
+				if (strcmp(w[4], what[i]) == 0) {
+					act = i;
+				}
+			}
 		}
-		return reply(out, outn, ops->debug_pointer(ud, x, y, args == 3 ? (strcmp(w[4], "click") == 0 ? 1 : 2) : 0), "debug input is off (set SEIZA_DEBUG_INPUT)");
+		if (args < 2 || args > 3 || parse_num(w[2], &x) != 0 || parse_num(w[3], &y) != 0 || (args == 3 && act == 0)) {
+			return reply(out, outn, -1, "debug-pointer needs x y [click|zoom|down|up]");
+		}
+		return reply(out, outn, ops->debug_pointer(ud, x, y, act), "debug input is off (set SEIZA_DEBUG_INPUT)");
 	}
 	if (IS("link")) {
 		int a, b;

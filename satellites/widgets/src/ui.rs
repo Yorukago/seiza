@@ -1,14 +1,16 @@
 //! The widgets' state and drawing: a clock with the moon's phase, a calendar and
 //! the machine's pulse, as cards in a row. No Wayland here, so `--dump` can render it.
 
+use std::collections::HashMap;
+
 use seiza_common::{
     draw::{load_font, Canvas, Text},
     local_time,
     palette::{palette, rgba},
 };
 
-pub const STRIP_H: u32 = 330;
 const GAP: f32 = 22.0;
+const TOP: f32 = 56.0; // where the row starts until a card is dragged: under the bar
 const HISTORY: usize = 60;
 const CARDS: [&str; 4] = ["clock", "calendar", "system", "media"];
 
@@ -46,14 +48,68 @@ pub fn parse_media(out: &str) -> Option<Media> {
     players.iter().find(|m| m.playing).or(players.first()).cloned()
 }
 
+/// Where a card lives: `dx`,`dy` from the center of one star, in world units, so it is there
+/// when that star is in view and out of sight when it is not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub constellation: String,
+    pub star: String,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+/// What the compositor says of the camera. A world point is on screen at `world * zoom - cam`.
+#[derive(Clone, Default)]
+pub struct View {
+    pub constellation: String,
+    pub current: String,
+    pub stars: Vec<(String, f32, f32)>, // name, center x, center y
+    pub zoom: f32,
+    pub cam: (f32, f32),
+}
+
+struct Drag {
+    name: String,
+    grab: (f32, f32), // where in the card the pointer took hold
+    at: (f32, f32),   // top-left on screen now
+}
+
 pub struct Ui {
     pub cards: Vec<String>, // "clock", "calendar", "system", "media", in the order drawn
     pub pulse: Pulse,
     pub media: Option<Media>,
+    pub pin: HashMap<String, Pin>, // cards the user has dragged: each lives on one star
+    pub view: Option<View>,        // the camera and the stars, from the compositor's state stream
+    drag: Option<Drag>,
+    cache_key: String,
+    cache: HashMap<String, Canvas>, // each card drawn once per change, so a drag only copies pixels
     cpu_history: Vec<u32>,
     t64: Text,
     t18: Text,
     t14: Text,
+}
+
+const CARD_PAD: usize = 2;
+
+/// `src` over `dst` with its top-left at (ox, oy); both are premultiplied ARGB.
+fn blit(dst: &mut Canvas, src: &Canvas, ox: i32, oy: i32) {
+    for sy in 0..src.h {
+        let dy = oy + sy as i32;
+        if dy < 0 || dy as usize >= dst.h {
+            continue;
+        }
+        for sx in 0..src.w {
+            let dx = ox + sx as i32;
+            let s = src.px[sy * src.w + sx];
+            if s == 0 || dx < 0 || dx as usize >= dst.w {
+                continue;
+            }
+            let d = &mut dst.px[dy as usize * dst.w + dx as usize];
+            let inv = 255 - (s >> 24);
+            let ch = |shift: u32| ((s >> shift & 0xFF) + (*d >> shift & 0xFF) * inv / 255).min(255);
+            *d = ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
+        }
+    }
 }
 
 /// `s` cut to fit `max` pixels, with ".." when it was cut.
@@ -122,7 +178,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), media: None, cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -148,27 +204,116 @@ impl Ui {
         }
     }
 
+    fn visible(&self) -> Vec<String> {
+        self.cards.iter().filter(|c| CARDS.contains(&c.as_str())).cloned().collect()
+    }
+
     pub fn width(&self) -> u32 {
-        let cards: Vec<_> = self.cards.iter().filter(|c| CARDS.contains(&c.as_str())).collect();
-        (cards.iter().map(|c| Self::card_size(c).0 + GAP).sum::<f32>() - GAP).max(1.0) as u32
+        (self.visible().iter().map(|c| Self::card_size(c).0 + GAP).sum::<f32>() - GAP).max(1.0) as u32
+    }
+
+    pub fn set_view(&mut self, st: &seiza_common::State) {
+        let stars = st.stars.iter().map(|s| (s.name.clone(), s.x as f32, s.y as f32)).collect();
+        self.view = Some(View { constellation: st.constellation.clone(), current: st.current.clone(), stars, zoom: st.zoom as f32, cam: (st.cam.0 as f32, st.cam.1 as f32) });
+    }
+
+    /// A card's place on a `w` x `h` screen: (x, y, width, height), or None while it is not in view.
+    /// Every card lives on a star. Ones never dragged sit in a centered row on the first star; held ones stay on the screen.
+    pub fn rect(&self, name: &str, w: f32, h: f32) -> Option<(f32, f32, f32, f32)> {
+        let (cw, ch) = Self::card_size(name);
+        let on_screen = |x: f32, y: f32| (x.clamp(0.0, (w - cw).max(0.0)), y.clamp(0.0, (h - ch).max(0.0)), cw, ch);
+        if let Some(d) = self.drag.as_ref().filter(|d| d.name == name) {
+            return Some(on_screen(d.at.0, d.at.1));
+        }
+        let Some(pin) = self.pin.get(name) else {
+            let row: Vec<String> = self.visible().into_iter().filter(|c| !self.pin.contains_key(c)).collect();
+            let total = row.iter().map(|c| Self::card_size(c).0 + GAP).sum::<f32>() - GAP;
+            let before: f32 = row.iter().take_while(|c| *c != name).map(|c| Self::card_size(c).0 + GAP).sum();
+            let (x, y, ..) = on_screen((w - total) / 2.0 + before, TOP);
+            let Some(v) = &self.view else { return Some((x, y, cw, ch)) }; // before the first state: where it will be
+            let &(_, sx, sy) = v.stars.first()?;
+            // the spot that is (x, y) when the first star is centered, as an offset from that star
+            let (cx, cy) = (sx + x - w / 2.0, sy + y - h / 2.0);
+            return Self::in_view(v, (cx, cy), cw, ch, w, h);
+        };
+        let v = self.view.as_ref().filter(|v| v.constellation == pin.constellation)?;
+        let &(_, sx, sy) = v.stars.iter().find(|(n, _, _)| *n == pin.star)?;
+        Self::in_view(v, (sx + pin.dx, sy + pin.dy), cw, ch, w, h)
+    }
+
+    /// A card at a world point, as a screen rect, if any of it is on screen.
+    fn in_view(v: &View, world: (f32, f32), cw: f32, ch: f32, w: f32, h: f32) -> Option<(f32, f32, f32, f32)> {
+        let (x, y) = (world.0 * v.zoom - v.cam.0, world.1 * v.zoom - v.cam.1);
+        (x < w && y < h && x + cw > 0.0 && y + ch > 0.0).then_some((x, y, cw, ch))
+    }
+
+    pub fn rects(&self, w: f32, h: f32) -> Vec<(f32, f32, f32, f32)> {
+        self.visible().iter().filter_map(|c| self.rect(c, w, h)).collect()
+    }
+
+    /// Pick up the topmost card under the pointer and raise it. True if there was one.
+    pub fn press(&mut self, px: f32, py: f32, w: f32, h: f32) -> bool {
+        let hit = self.visible().into_iter().rev().find_map(|c| {
+            let (x, y, cw, ch) = self.rect(&c, w, h)?;
+            ((x..x + cw).contains(&px) && (y..y + ch).contains(&py)).then_some((c, x, y))
+        });
+        let Some((name, x, y)) = hit else { return false };
+        self.drag = Some(Drag { name: name.clone(), grab: (px - x, py - y), at: (x, y) });
+        self.cards.retain(|c| *c != name);
+        self.cards.push(name);
+        true
+    }
+
+    /// Move the held card with the pointer. True if a card is held.
+    pub fn motion(&mut self, px: f32, py: f32) -> bool {
+        let Some(d) = &mut self.drag else { return false };
+        d.at = (px - d.grab.0, py - d.grab.1);
+        true
+    }
+
+    /// Let go: the card is pinned to the star the camera is on, and returned to be remembered.
+    /// With no star to pin to (no state from the compositor yet) it goes back where it was.
+    pub fn release(&mut self, w: f32, h: f32) -> Option<(String, Pin)> {
+        let d = self.drag.take()?;
+        let (cw, ch) = Self::card_size(&d.name);
+        let (x, y) = (d.at.0.clamp(0.0, (w - cw).max(0.0)), d.at.1.clamp(0.0, (h - ch).max(0.0)));
+        let v = self.view.as_ref()?;
+        let &(_, sx, sy) = v.stars.iter().find(|(n, _, _)| *n == v.current)?;
+        let pin = Pin { constellation: v.constellation.clone(), star: v.current.clone(), dx: (x + v.cam.0) / v.zoom - sx, dy: (y + v.cam.1) / v.zoom - sy };
+        self.pin.insert(d.name.clone(), pin.clone());
+        Some((d.name, pin))
     }
 
     pub fn render(&mut self, w: usize, h: usize) -> Canvas {
         let mut cv = Canvas { w, h, px: vec![0; w * h] };
-        let cards: Vec<String> = self.cards.iter().filter(|c| CARDS.contains(&c.as_str())).cloned().collect();
-        let mut x = (w as f32 - self.width() as f32) / 2.0;
-        for name in cards {
-            let (cw, ch) = Self::card_size(&name);
-            let p = palette();
-            cv.round_rect(x - 1.0, 0.0, cw + 2.0, ch + 1.0, 23.0, rgba(p.star, 0.16));
-            cv.round_rect(x, 1.0, cw, ch - 1.0, 22.0, rgba(p.panel, 0.80));
-            match name.as_str() {
-                "clock" => self.clock(&mut cv, x, cw, ch),
-                "calendar" => self.calendar(&mut cv, x, cw),
-                "media" => self.media(&mut cv, x, cw),
-                _ => self.system(&mut cv, x, cw),
+        let key = self.key();
+        if key != self.cache_key {
+            self.cache.clear();
+            self.cache_key = key;
+        }
+        for name in self.visible() {
+            let Some((x, y, _, _)) = self.rect(&name, w as f32, h as f32) else { continue };
+            if !self.cache.contains_key(&name) {
+                let card = self.render_card(&name);
+                self.cache.insert(name.clone(), card);
             }
-            x += cw + GAP;
+            blit(&mut cv, &self.cache[&name], x as i32 - CARD_PAD as i32, y as i32);
+        }
+        cv
+    }
+
+    /// One card on its own canvas, CARD_PAD wide on the left and right for its outline.
+    fn render_card(&mut self, name: &str) -> Canvas {
+        let (cw, ch) = Self::card_size(name);
+        let mut cv = Canvas { w: cw as usize + 2 * CARD_PAD, h: ch as usize + 2, px: vec![0; (cw as usize + 2 * CARD_PAD) * (ch as usize + 2)] };
+        let (x, p) = (CARD_PAD as f32, palette());
+        cv.round_rect(x - 1.0, 0.0, cw + 2.0, ch + 1.0, 23.0, rgba(p.star, 0.16));
+        cv.round_rect(x, 1.0, cw, ch - 1.0, 22.0, rgba(p.panel, 0.80));
+        match name {
+            "clock" => self.clock(&mut cv, x, cw, ch),
+            "calendar" => self.calendar(&mut cv, x, cw),
+            "media" => self.media(&mut cv, x, cw),
+            _ => self.system(&mut cv, x, cw),
         }
         cv
     }
@@ -308,6 +453,87 @@ mod tests {
         assert_eq!(month_grid(2024, 2, 3).iter().flatten().copied().max(), Some(29));
         assert_eq!(month_grid(2026, 2, 0).iter().flatten().copied().max(), Some(28));
         assert_eq!(month_grid(1900, 2, 0).iter().flatten().copied().max(), Some(28));
+    }
+
+    fn view(current: &str, cam: (f32, f32)) -> View {
+        // two stars 2000 apart; with a star centered on a 1920x1080 screen the camera is its center minus (960, 540)
+        View { constellation: "default".into(), current: current.into(), stars: vec![("a".into(), 960.0, 540.0), ("b".into(), 2960.0, 540.0)], zoom: 1.0, cam }
+    }
+
+    #[test]
+    fn cards_start_in_a_row_and_a_dragged_one_is_pinned_to_its_star() {
+        let mut ui = Ui::new(["clock", "calendar"].map(String::from).to_vec());
+        let (w, h) = (1920.0, 1080.0);
+        let total = 330.0 + GAP + 340.0;
+        assert_eq!(ui.rect("clock", w, h), Some(((w - total) / 2.0, TOP, 330.0, 150.0)));
+        assert_eq!(ui.rect("calendar", w, h).unwrap().0, (w - total) / 2.0 + 330.0 + GAP);
+        assert!(!ui.press(5.0, 5.0, w, h), "empty sky is not a card");
+        ui.view = Some(view("a", (0.0, 0.0)));
+        let (cx, cy, _, _) = ui.rect("clock", w, h).unwrap();
+        assert!(ui.press(cx + 10.0, cy + 20.0, w, h));
+        assert_eq!(ui.cards.last().unwrap(), "clock", "the held card is raised");
+        assert!(ui.motion(cx + 110.0, cy + 120.0));
+        assert_eq!(ui.rect("clock", w, h).unwrap().0, cx + 100.0, "it follows the pointer while held");
+        let (name, pin) = ui.release(w, h).unwrap();
+        assert_eq!((name.as_str(), pin.star.as_str()), ("clock", "a"));
+        assert_eq!((pin.dx, pin.dy), (cx + 100.0 - 960.0, cy + 100.0 - 540.0), "an offset from the star's center");
+        assert_eq!(ui.rect("clock", w, h).unwrap().0, cx + 100.0);
+        assert_eq!(ui.rect("calendar", w, h).unwrap().0, (w - 340.0) / 2.0, "the row closes up around the one that left");
+        assert!(!ui.motion(1.0, 1.0), "nothing is held any more");
+    }
+
+    #[test]
+    fn a_pinned_card_follows_the_camera_and_is_gone_on_other_stars() {
+        let mut ui = Ui::new(vec!["clock".into()]);
+        let (w, h) = (1920.0, 1080.0);
+        ui.view = Some(view("a", (0.0, 0.0)));
+        ui.pin.insert("clock".into(), Pin { constellation: "default".into(), star: "a".into(), dx: -500.0, dy: -300.0 });
+        assert_eq!(ui.rect("clock", w, h).map(|r| (r.0, r.1)), Some((460.0, 240.0)));
+        ui.view.as_mut().unwrap().cam = (100.0, 40.0); // the camera pans: the card slides the other way
+        assert_eq!(ui.rect("clock", w, h).map(|r| (r.0, r.1)), Some((360.0, 200.0)));
+        ui.view = Some(view("b", (2000.0, 0.0))); // the camera is on star b: star a's cards are off to the left
+        assert_eq!(ui.rect("clock", w, h), None);
+        ui.view.as_mut().unwrap().constellation = "other".into();
+        assert_eq!(ui.rect("clock", w, h), None, "and another constellation has none of them");
+        assert!(ui.rects(w, h).is_empty());
+        assert!(!ui.press(500.0, 300.0, w, h), "a card that is not there cannot be grabbed");
+    }
+
+    #[test]
+    fn cards_never_dragged_are_on_the_first_star_only() {
+        let mut ui = Ui::new(vec!["clock".into()]);
+        let (w, h) = (1920.0, 1080.0);
+        ui.view = Some(view("a", (0.0, 0.0)));
+        assert_eq!(ui.rect("clock", w, h).map(|r| (r.0, r.1)), Some((795.0, TOP)));
+        ui.view = Some(view("b", (2000.0, 0.0))); // star 2: a clean screen
+        assert_eq!(ui.rect("clock", w, h), None);
+        assert!(ui.rects(w, h).is_empty());
+    }
+
+    #[test]
+    fn letting_go_with_no_star_to_pin_to_changes_nothing() {
+        let mut ui = Ui::new(vec!["clock".into()]);
+        assert!(ui.press(800.0, 80.0, 1920.0, 1080.0));
+        ui.motion(900.0, 400.0);
+        assert!(ui.release(1920.0, 1080.0).is_none());
+        assert!(ui.pin.is_empty());
+    }
+
+    /// cargo test --release -p seiza-widgets how_long -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn how_long_a_dragged_frame_takes() {
+        let mut ui = Ui::new(CARDS.map(String::from).to_vec());
+        ui.render(1920, 1080); // the first frame draws every card
+        let t = std::time::Instant::now();
+        for i in 0..100 {
+            ui.view = Some(view("a", (0.0, 0.0)));
+            ui.press(700.0, 100.0, 1920.0, 1080.0);
+            ui.motion(700.0 + i as f32, 100.0 + i as f32);
+            ui.render(1920, 1080);
+            ui.release(1920.0, 1080.0);
+        }
+        println!("a dragged frame at 1080p: {:?}", t.elapsed() / 100);
     }
 
     #[test]
