@@ -328,6 +328,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-osd"
+version = "0.1.0"
+dependencies = [
+ "seiza-common",
+ "smithay-client-toolkit",
+]
+
+[[package]]
 name = "seiza-session"
 version = "0.1.0"
 dependencies = [

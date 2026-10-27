@@ -67,7 +67,7 @@ impl Settings {
                 self.ui.load_thumb();
                 self.ui.msg = match Command::new("seiza-wallpaper").args(["-p", ui::style_palette(&self.ui.values["look/style"])]).arg(&path).output() {
                     Ok(o) if o.status.success() => {
-                        for p in ["seiza-starfield", "seiza-bar", "seiza-widgets"] {
+                        for p in ["seiza-starfield", "seiza-bar", "seiza-widgets", "seiza-osd"] {
                             if !self.ui.restart.contains(&p) {
                                 self.ui.restart.push(p);
                             }

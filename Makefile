@@ -65,6 +65,7 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-launcher $(PREFIX)/bin/seiza-launcher
 	install -Dm755 satellites/target/release/seiza-lock $(PREFIX)/bin/seiza-lock
 	install -Dm755 satellites/target/release/seiza-widgets $(PREFIX)/bin/seiza-widgets
+	install -Dm755 satellites/target/release/seiza-osd $(PREFIX)/bin/seiza-osd
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel

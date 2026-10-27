@@ -230,7 +230,7 @@ impl Ui {
             "sky" => &["seiza-starfield"],
             "widgets" => &["seiza-widgets"],
             "bar" => &["seiza-bar"],
-            "look" if matches!(key, "clock" | "contrast_guard") => &["seiza-bar", "seiza-widgets", "seiza-starfield"],
+            "look" if matches!(key, "clock" | "contrast_guard") => &["seiza-bar", "seiza-widgets", "seiza-starfield", "seiza-osd"],
             _ => &[],
         };
         for p in restart {

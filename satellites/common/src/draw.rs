@@ -215,6 +215,46 @@ impl Canvas {
         self.shape((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0).max(y1 - y0) / 2.0 + 1.0, c, |x, y| x >= x0 && x <= x1 && y >= y0 && y <= y1);
     }
 
+    /// A sun: a disc with eight rays, turned by `angle` radians.
+    pub fn icon_sun(&mut self, cx: f32, cy: f32, r: f32, angle: f32, c: Rgba) {
+        let (w, sector) = ((r * 0.11).max(0.9), std::f32::consts::FRAC_PI_4);
+        self.shape(cx, cy, r + 1.0, c, |x, y| {
+            let (dx, dy) = (x - cx, y - cy);
+            let d = dx.hypot(dy);
+            if d <= r * 0.42 {
+                return true;
+            }
+            let off = (dy.atan2(dx) - angle + sector / 2.0).rem_euclid(sector) - sector / 2.0; // from the nearest ray's axis
+            d >= r * 0.64 && d <= r && d * off.sin().abs() <= w
+        });
+    }
+
+    /// A speaker with three sound lines. `lines` is 0..=3 and fades them in one by one; `muted` swaps them for a cross.
+    pub fn icon_speaker(&mut self, cx: f32, cy: f32, r: f32, lines: f32, muted: bool, c: Rgba) {
+        let t = (r * 0.17).max(1.4);
+        let (bx, tip) = (cx - r * 0.85, cx - r * 0.1); // the box starts at bx, the cone opens up to tip
+        self.shape(cx, cy, r * 1.3, c, |x, y| {
+            let dy = (y - cy).abs();
+            let box_ = x >= bx && x <= bx + r * 0.35 && dy <= r * 0.3;
+            let cone = x >= bx + r * 0.35 && x <= tip && dy <= r * 0.3 + (x - bx - r * 0.35) / (tip - bx - r * 0.35) * r * 0.45;
+            box_ || cone
+        });
+        if muted {
+            let (mx, a) = (cx + r * 0.55, r * 0.38);
+            self.shape(mx, cy, a + t, c, |x, y| {
+                let (dx, dy) = (x - mx, y - cy);
+                dx.abs() <= a && dy.abs() <= a && ((dx - dy).abs() <= t * 0.7 || (dx + dy).abs() <= t * 0.7)
+            });
+            return;
+        }
+        for i in 0..3 {
+            let a = ((lines - i as f32) * 2.0).clamp(0.0, 1.0);
+            if a > 0.0 {
+                self.ring(tip, cy, r * (0.55 + 0.45 * i as f32), t, [c[0], c[1], c[2], c[3] * a], |d| d.abs() > 42.0);
+            }
+        }
+    }
+
     /// A ring open at the top, with a bar through the gap.
     pub fn icon_power(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
         let t = (r * 0.2).max(1.6);

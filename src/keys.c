@@ -48,7 +48,12 @@ const char KEYS_DEFAULT[] =
 	"Alt+q       = seiza close-window\n"
 	"Alt+m       = seiza maximize\n"
 	"Alt+F1      = seiza cycle-window\n"
-	"Alt+Return  = kitty\n";
+	"Alt+Return  = kitty\n"
+	"XF86AudioRaiseVolume = wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+\n"
+	"XF86AudioLowerVolume = wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\n"
+	"XF86AudioMute        = wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\n"
+	"XF86MonBrightnessUp   = brightnessctl set 5%+\n"
+	"XF86MonBrightnessDown = brightnessctl set 5%-\n";
 
 static char *trim(char *s) {
 	while (isspace((unsigned char)*s)) {
