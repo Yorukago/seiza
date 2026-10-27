@@ -41,6 +41,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include <sys/inotify.h>
 #include "cmd.h"
 #include "constellation.h"
 #include "ipc.h"
@@ -1374,6 +1375,45 @@ static int op_reload_config(void *ud) {
 		update_border(tl);
 	}
 	return 0;
+}
+
+/* Hot-reload: watch the config dir and run reload-config ~200 ms after the last write to a file
+ * it reads. The dir is watched, not the files, because editors save by rename. */
+static struct wl_event_source *g_reload_timer;
+
+static int reload_timer_fired(void *ud) {
+	wlr_log(WLR_INFO, "seiza: config changed, reloading");
+	op_reload_config(ud);
+	return 0;
+}
+
+static int config_changed(int fd, uint32_t mask, void *ud) {
+	static const char *const watched[] = {"seiza.kdl", "keys", "palette", "frame", "motion"};
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	ssize_t n = read(fd, buf, sizeof(buf));
+	for (char *p = buf; n > 0 && p < buf + n; p += sizeof(struct inotify_event) + ((struct inotify_event *)p)->len) {
+		struct inotify_event *ev = (struct inotify_event *)p;
+		for (size_t i = 0; ev->len && i < sizeof(watched) / sizeof(*watched); i++) {
+			if (strcmp(ev->name, watched[i]) == 0) {
+				wl_event_source_timer_update(g_reload_timer, 200);
+			}
+		}
+	}
+	return 0;
+}
+
+static void watch_config(struct tinywl_server *server) {
+	struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
+	int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (fd < 0 || inotify_add_watch(fd, server->cfg_dir, IN_CLOSE_WRITE | IN_MOVED_TO) < 0) {
+		wlr_log(WLR_ERROR, "seiza: no config hot-reload (inotify failed)");
+		if (fd >= 0) {
+			close(fd);
+		}
+		return;
+	}
+	g_reload_timer = wl_event_loop_add_timer(loop, reload_timer_fired, server);
+	wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE, config_changed, server);
 }
 
 static void op_quit(void *ud) {
@@ -3262,6 +3302,7 @@ int main(int argc, char *argv[]) {
 	wl_event_loop_add_signal(wl_display_get_event_loop(server.wl_display), SIGCHLD, reap_children, NULL);
 	ipc_serve(wl_display_get_event_loop(server.wl_display), &seiza_ops, &server);
 	autostart(&server);
+	watch_config(&server);
 	wl_display_run(server.wl_display);
 	ipc_close();
 
