@@ -53,7 +53,10 @@ const char KEYS_DEFAULT[] =
 	"XF86AudioLowerVolume = wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\n"
 	"XF86AudioMute        = wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\n"
 	"XF86MonBrightnessUp   = brightnessctl set 5%+\n"
-	"XF86MonBrightnessDown = brightnessctl set 5%-\n";
+	"XF86MonBrightnessDown = brightnessctl set 5%-\n"
+	"XF86AudioPlay  = playerctl play-pause\n"
+	"XF86AudioNext  = playerctl next\n"
+	"XF86AudioPrev  = playerctl previous\n";
 
 static char *trim(char *s) {
 	while (isspace((unsigned char)*s)) {

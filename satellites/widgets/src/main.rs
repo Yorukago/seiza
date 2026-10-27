@@ -1,7 +1,7 @@
-//! seiza-widgets: a clock with the moon's phase, a calendar and the machine's pulse,
+//! seiza-widgets: a clock with the moon's phase, a calendar, the machine's pulse and what is playing,
 //! as cards on the sky, under your windows. Which ones, and in what order, is
-//! `~/.config/seiza/widgets`: one of clock / calendar / system per line (an empty
-//! file shows nothing; no file shows all three).
+//! `~/.config/seiza/widgets`: one of clock / calendar / system / media per line
+//! (an empty file shows nothing; no file shows all four).
 //! `seiza-widgets --dump out.ppm` draws one frame to a file.
 mod ui;
 
@@ -25,14 +25,20 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
-use ui::{Pulse, Ui, STRIP_H};
+use ui::{parse_media, Media, Pulse, Ui, MEDIA_FORMAT, STRIP_H};
 
 fn config_cards() -> Vec<String> {
     let dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
     match std::fs::read_to_string(format!("{dir}/seiza/widgets")) {
         Ok(text) => text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect(),
-        Err(_) => ["clock", "calendar", "system"].map(String::from).to_vec(),
+        Err(_) => ["clock", "calendar", "system", "media"].map(String::from).to_vec(),
     }
+}
+
+// shortcut: one playerctl spawn a second; switch to `playerctl --follow` if it ever shows in a profile.
+fn read_media() -> Option<Media> {
+    let out = std::process::Command::new("playerctl").args(["-a", "metadata", "--format", MEDIA_FORMAT]).output().ok()?;
+    parse_media(&String::from_utf8_lossy(&out.stdout))
 }
 
 struct Widgets {
@@ -75,6 +81,9 @@ impl Widgets {
         };
         self.cpu_prev = counters;
         self.ui.set_pulse(Pulse { cpu, ram: read_ram_pct(), temp: read_temp(), load: read_load() });
+        if self.ui.cards.iter().any(|c| c == "media") {
+            self.ui.media = read_media();
+        }
         if self.ui.key() != self.shown {
             self.draw();
         }
@@ -146,6 +155,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new(config_cards());
         ui.set_pulse(Pulse { cpu: read_cpu_counters().map(|_| 23), ram: read_ram_pct(), temp: read_temp(), load: read_load() });
+        ui.media = read_media();
         let cv = ui.render(1920, STRIP_H as usize);
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
@@ -205,7 +215,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("seiza-widgets-test-{}", std::process::id()));
         // SAFETY: tests in this crate do not run in parallel with other readers of this variable.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
-        assert_eq!(super::config_cards(), ["clock", "calendar", "system"]);
+        assert_eq!(super::config_cards(), ["clock", "calendar", "system", "media"]);
         std::fs::create_dir_all(dir.join("seiza")).unwrap();
         std::fs::write(dir.join("seiza/widgets"), "# mine\ncalendar\n\nclock\n").unwrap();
         assert_eq!(super::config_cards(), ["calendar", "clock"]);

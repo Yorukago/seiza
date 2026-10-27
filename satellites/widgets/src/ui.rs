@@ -10,6 +10,7 @@ use seiza_common::{
 pub const STRIP_H: u32 = 330;
 const GAP: f32 = 22.0;
 const HISTORY: usize = 60;
+const CARDS: [&str; 4] = ["clock", "calendar", "system", "media"];
 
 /// What the system card shows; filled by the main loop once a second.
 #[derive(Default, Clone, PartialEq)]
@@ -20,13 +21,56 @@ pub struct Pulse {
     pub load: Option<f32>,
 }
 
+/// What the media card shows: the first playing MPRIS player, else the first one there is.
+#[derive(Default, Clone, PartialEq)]
+pub struct Media {
+    pub playing: bool,
+    pub title: String,
+    pub artist: String,
+    pub pos: u64, // seconds
+    pub len: u64,
+}
+
+/// One line per player from `playerctl -a metadata --format <FORMAT>`.
+pub const MEDIA_FORMAT: &str = "{{status}}\u{1f}{{title}}\u{1f}{{artist}}\u{1f}{{position}}\u{1f}{{mpris:length}}";
+
+pub fn parse_media(out: &str) -> Option<Media> {
+    let players: Vec<Media> = out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\u{1f}').collect();
+            let secs = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1_000_000;
+            (f.len() == 5 && f[0] != "Stopped").then(|| Media { playing: f[0] == "Playing", title: f[1].into(), artist: f[2].into(), pos: secs(3), len: secs(4) })
+        })
+        .collect();
+    players.iter().find(|m| m.playing).or(players.first()).cloned()
+}
+
 pub struct Ui {
-    pub cards: Vec<String>, // "clock", "calendar", "system", in the order drawn
+    pub cards: Vec<String>, // "clock", "calendar", "system", "media", in the order drawn
     pub pulse: Pulse,
+    pub media: Option<Media>,
     cpu_history: Vec<u32>,
     t64: Text,
     t18: Text,
     t14: Text,
+}
+
+/// `s` cut to fit `max` pixels, with ".." when it was cut.
+fn fit(t: &mut Text, s: &str, max: f32) -> String {
+    if t.width(s) <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.to_string();
+    while !out.is_empty() && t.width(&format!("{out}..")) > max {
+        out.pop();
+    }
+    format!("{out}..")
+}
+
+/// 83 -> "1:23"
+fn clock(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// Days since the first of the month's weekday (Monday = 0), for the month grid.
@@ -78,7 +122,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -91,25 +135,27 @@ impl Ui {
 
     /// Redraw when this changes.
     pub fn key(&self) -> String {
-        format!("{}|{}|{}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0))
+        let m = self.media.as_ref().map(|m| format!("{}{}{}{}", m.playing, m.title, m.artist, m.pos));
+        format!("{}|{}|{}|{m:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0))
     }
 
     fn card_size(name: &str) -> (f32, f32) {
         match name {
             "clock" => (330.0, 150.0),
             "calendar" => (340.0, 300.0),
+            "media" => (340.0, 170.0),
             _ => (340.0, 236.0),
         }
     }
 
     pub fn width(&self) -> u32 {
-        let cards: Vec<_> = self.cards.iter().filter(|c| ["clock", "calendar", "system"].contains(&c.as_str())).collect();
+        let cards: Vec<_> = self.cards.iter().filter(|c| CARDS.contains(&c.as_str())).collect();
         (cards.iter().map(|c| Self::card_size(c).0 + GAP).sum::<f32>() - GAP).max(1.0) as u32
     }
 
     pub fn render(&mut self, w: usize, h: usize) -> Canvas {
         let mut cv = Canvas { w, h, px: vec![0; w * h] };
-        let cards: Vec<String> = self.cards.iter().filter(|c| ["clock", "calendar", "system"].contains(&c.as_str())).cloned().collect();
+        let cards: Vec<String> = self.cards.iter().filter(|c| CARDS.contains(&c.as_str())).cloned().collect();
         let mut x = (w as f32 - self.width() as f32) / 2.0;
         for name in cards {
             let (cw, ch) = Self::card_size(&name);
@@ -119,6 +165,7 @@ impl Ui {
             match name.as_str() {
                 "clock" => self.clock(&mut cv, x, cw, ch),
                 "calendar" => self.calendar(&mut cv, x, cw),
+                "media" => self.media(&mut cv, x, cw),
                 _ => self.system(&mut cv, x, cw),
             }
             x += cw + GAP;
@@ -172,6 +219,33 @@ impl Ui {
                     self.t14.draw(cv, cx - sw / 2.0, cy + 5.0, &s, rgba(p.text, if c >= 5 { 0.55 } else { 0.85 }));
                 }
             }
+        }
+    }
+
+    fn media(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
+        let p = palette();
+        self.t14.draw(cv, x + 24.0, 38.0, "now playing", rgba(p.text, 0.5));
+        let Some(m) = self.media.clone() else {
+            self.t18.draw(cv, x + 24.0, 84.0, "nothing playing", rgba(p.text, 0.4));
+            return;
+        };
+        let state = if m.playing { "playing" } else { "paused" };
+        let sw = self.t14.width(state);
+        self.t14.draw(cv, x + cw - 24.0 - sw, 38.0, state, rgba(p.text, 0.4));
+        let room = cw - 48.0;
+        let title = fit(&mut self.t18, &m.title, room);
+        self.t18.draw(cv, x + 24.0, 78.0, &title, rgba(p.text, if m.playing { 1.0 } else { 0.7 }));
+        let artist = fit(&mut self.t14, &m.artist, room);
+        self.t14.draw(cv, x + 24.0, 102.0, &artist, rgba(p.text, 0.6));
+        if m.len > 0 {
+            // browsers often report no length and a stuck position, so there is no bar without a length
+            cv.round_rect(x + 24.0, 125.0, room, 6.0, 3.0, rgba(p.dust, 0.9));
+            let f = (m.pos as f32 / m.len as f32).clamp(0.0, 1.0);
+            cv.round_rect(x + 24.0, 125.0, (room * f).max(6.0), 6.0, 3.0, rgba(p.star, if m.playing { 0.9 } else { 0.5 }));
+            let total = clock(m.len);
+            let tw = self.t14.width(&total);
+            self.t14.draw(cv, x + cw - 24.0 - tw, 154.0, &total, rgba(p.text, 0.45));
+            self.t14.draw(cv, x + 24.0, 154.0, &clock(m.pos), rgba(p.text, 0.45));
         }
     }
 
@@ -234,6 +308,17 @@ mod tests {
         assert_eq!(month_grid(2024, 2, 3).iter().flatten().copied().max(), Some(29));
         assert_eq!(month_grid(2026, 2, 0).iter().flatten().copied().max(), Some(28));
         assert_eq!(month_grid(1900, 2, 0).iter().flatten().copied().max(), Some(28));
+    }
+
+    #[test]
+    fn media_prefers_the_playing_player_and_skips_stopped_ones() {
+        let line = |st: &str, t: &str| format!("{st}\u{1f}{t}\u{1f}Art\u{1f}83000000\u{1f}240000000\n");
+        let m = parse_media(&(line("Paused", "a") + &line("Playing", "b"))).unwrap();
+        assert_eq!((m.title.as_str(), m.playing, m.pos, m.len), ("b", true, 83, 240));
+        assert_eq!(parse_media(&line("Paused", "a")).unwrap().title, "a");
+        assert!(parse_media(&line("Stopped", "a")).is_none());
+        assert!(parse_media("").is_none());
+        assert_eq!(clock(83), "1:23");
     }
 
     #[test]

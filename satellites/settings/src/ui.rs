@@ -85,6 +85,7 @@ pub fn pages() -> Vec<Page> {
             tog("widgets/clock", "clock", "the time, and the moon's phase", "1"),
             tog("widgets/calendar", "calendar", "this month", "1"),
             tog("widgets/system", "system", "cpu, ram and temperature", "1"),
+            tog("widgets/media", "media", "what is playing, from any MPRIS player", "1"),
         ]},
         Page { name: "keys", blurb: "keys are written in ~/.config/seiza/keys.", rows: vec![
             row("keys/help", "show all bindings", "asks seiza to list them", Ctl::Button("show"), ""),
@@ -93,7 +94,7 @@ pub fn pages() -> Vec<Page> {
     ]
 }
 
-const WIDGET_NAMES: [&str; 3] = ["clock", "calendar", "system"];
+const WIDGET_NAMES: [&str; 4] = ["clock", "calendar", "system", "media"];
 
 /// The widgets file for the cards that are switched on, in the fixed order.
 pub fn widgets_file(on: impl Fn(&str) -> bool) -> String {
@@ -467,7 +468,7 @@ mod tests {
             ui.page = 6;
             let (cx, cy, cw, ch) = ui.control(1); // calendar off
             ui.press(ox + cx + cw / 2.0, oy + cy + ch / 2.0, w, h, false);
-            assert_eq!(std::fs::read_to_string(config::path("widgets")).unwrap(), "clock\nsystem\n");
+            assert_eq!(std::fs::read_to_string(config::path("widgets")).unwrap(), "clock\nsystem\nmedia\n");
             assert_eq!(ui.restart, ["seiza-widgets"]);
             // a fresh run reads it all back
             assert_eq!(Ui::new().values["widgets/calendar"], "0");
