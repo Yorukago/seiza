@@ -20,6 +20,7 @@ pub enum Kind {
     App(Group),
     Command,
     Web,
+    Answer, // a sum, a conversion or an emoji: Enter copies it
 }
 
 pub struct Item {
@@ -45,6 +46,7 @@ pub struct Ui {
     pub w: f32,
     pub h: f32,
     pub error: Option<String>,
+    pub picker: bool, // clipboard history or open windows instead of apps: no run-it-as-a-command or web rows
     apps: Vec<App>,
     items: Vec<Item>,
     t17: Text,
@@ -89,7 +91,7 @@ fn fit(t: &mut Text, s: &str, max: f32) -> String {
 
 impl Ui {
     pub fn new(apps: Vec<App>, style: Style, w: f32, h: f32) -> Ui {
-        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, apps, items: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None, lines: seiza_common::config::flag("yoru", "lines", true), glide: None, born: Instant::now() };
+        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, picker: false, apps, items: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None, lines: seiza_common::config::flag("yoru", "lines", true), glide: None, born: Instant::now() };
         ui.refresh();
         ui
     }
@@ -105,10 +107,11 @@ impl Ui {
         self.items.clear();
         match self.style {
             Style::List => {
+                self.quick_answers(&q);
                 for (pos, &i) in ranked.iter().enumerate() {
-                    self.items.push(Item { kind: Kind::App(self.apps[i].group), label: self.apps[i].name.clone(), line: self.apps[i].exec.clone(), pos });
+                    self.items.push(Item { kind: Kind::App(self.apps[i].group), label: self.apps[i].name.clone(), line: self.apps[i].exec.clone(), pos: if q.starts_with(':') { usize::MAX } else { pos } });
                 }
-                if !q.is_empty() {
+                if !q.is_empty() && !self.picker {
                     self.items.push(Item { kind: Kind::Command, label: q.clone(), line: q.clone(), pos: usize::MAX });
                     self.items.push(Item { kind: Kind::Web, label: q.clone(), line: format!("xdg-open {}{}", search_url(), url_encode(&q)), pos: usize::MAX });
                 }
@@ -124,7 +127,7 @@ impl Ui {
                         }
                     }
                 }
-                if self.items.is_empty() && !q.is_empty() {
+                if self.items.is_empty() && !q.is_empty() && !self.picker {
                     self.items.push(Item { kind: Kind::Command, label: q.clone(), line: q.clone(), pos: 0 });
                 }
             }
@@ -133,6 +136,21 @@ impl Ui {
         self.glide = None; // a new result list snaps
         self.scroll = 0;
         self.keep_visible();
+    }
+
+    /// Rows that copy a result: a sum or conversion, or emoji after a colon. They come first and win the selection.
+    fn quick_answers(&mut self, q: &str) {
+        if self.picker {
+            return;
+        }
+        let copy = |s: &str| format!("wl-copy -- '{}'", s.replace('\'', "'\\''"));
+        if let Some(rest) = q.strip_prefix(':') {
+            for (e, name) in crate::emoji::find(rest, 8) {
+                self.items.push(Item { kind: Kind::Answer, label: format!("{} ({})", name.split(' ').next().unwrap_or(name), e), line: copy(e), pos: 0 });
+            }
+        } else if let Some(a) = crate::calc::answer(q) {
+            self.items.push(Item { kind: Kind::Answer, label: a.clone(), line: copy(&a), pos: 0 });
+        }
     }
 
     pub fn toggle_style(&mut self) {
@@ -332,6 +350,10 @@ impl Ui {
             match kind {
                 Kind::App(_) => cv.sparkle(px + 34.0, cy, 8.0, rgba(p.star, 1.0)),
                 Kind::Command => cv.crescent(px + 34.0, cy, 9.0, rgba(p.text, 0.9)),
+                Kind::Answer => {
+                    cv.round_rect(px + 26.0, cy - 6.0, 16.0, 3.0, 1.5, rgba(p.star, 1.0));
+                    cv.round_rect(px + 26.0, cy + 3.0, 16.0, 3.0, 1.5, rgba(p.star, 1.0));
+                }
                 Kind::Web => {
                     cv.round_rect(px + 25.0, cy - 9.0, 18.0, 18.0, 9.0, rgba(p.text, 0.8));
                     cv.round_rect(px + 26.5, cy - 7.5, 15.0, 15.0, 7.5, rgba(p.sky, 1.0));
@@ -346,13 +368,14 @@ impl Ui {
                 }
                 _ => {
                     let s = fit(&mut self.t17, &label, max);
-                    self.put(cv, px + 66.0, cy - 11.0, if kind == Kind::Web { "web search" } else { "command" }, false, dim);
+                    self.put(cv, px + 66.0, cy - 11.0, match kind { Kind::Web => "web search", Kind::Answer => "answer, enter copies it", _ => "command" }, false, dim);
                     self.put(cv, px + 66.0, cy + 8.0, &s, true, text);
                 }
             }
             if sel {
-                let tw = self.t13.width("open  enter");
-                self.put(cv, px + pw - 22.0 - tw, cy, "open  enter", false, dim);
+                let hint = if kind == Kind::Answer { "copy  enter" } else { "open  enter" };
+                let tw = self.t13.width(hint);
+                self.put(cv, px + pw - 22.0 - tw, cy, hint, false, dim);
             }
         }
 

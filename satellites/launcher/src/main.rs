@@ -5,6 +5,8 @@
 //! Starting goes through Seiza's socket, so the app gets Seiza's environment and
 //! opens in the current star. SEIZA_LAUNCHER_DRY=1 prints the command instead.
 //! `seiza-launcher --dump out.ppm [list|stars] [query]` draws one frame to a file.
+mod calc;
+mod emoji;
 mod ui;
 
 use seiza_common::{apps::load_apps, draw::Canvas};
@@ -79,6 +81,7 @@ struct Launcher {
     dirty: bool,
     exit: bool,
     chord: bool, // ctrl or alt held: not typing
+    windows: bool, // the window switcher: Tab steps on, letting go of Alt picks
     opened: Option<Instant>,
     closing: Option<Instant>,
     shown: f32, // the visibility last drawn
@@ -126,6 +129,8 @@ impl Launcher {
                 let i = self.ui.sel;
                 self.launch(i);
             }
+            Keysym::Tab if self.windows => self.ui.step(1),
+            Keysym::ISO_Left_Tab if self.windows => self.ui.step(-1),
             Keysym::Tab => self.ui.toggle_style(),
             Keysym::BackSpace => {
                 self.ui.query.pop();
@@ -254,6 +259,10 @@ impl KeyboardHandler for Launcher {
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
+        if self.windows && self.chord && !m.alt && !m.ctrl && self.closing.is_none() {
+            let i = self.ui.sel;
+            self.launch(i);
+        }
         self.chord = m.ctrl || m.alt;
     }
 }
@@ -317,6 +326,46 @@ impl ProvidesRegistryState for Launcher {
 
 smithay_client_toolkit::delegate_dispatch2!(Launcher);
 
+/// The clipboard history that scripts/seiza-clip-store keeps in $XDG_RUNTIME_DIR/seiza-clip, newest first, as
+/// "apps" whose command puts the entry back on the clipboard.
+fn load_clip(dir: &std::path::Path) -> Vec<seiza_common::apps::App> {
+    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    files.sort_by(|a, b| b.cmp(a)); // names are millisecond stamps
+    files
+        .into_iter()
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let first = text.lines().find(|l| !l.trim().is_empty())?.trim();
+            let name: String = first.chars().take(90).collect();
+            let more = if text.trim().lines().count() > 1 || first.chars().count() > 90 { "…" } else { "" };
+            Some(seiza_common::apps::App { name: format!("{name}{more}"), exec: format!("wl-copy < '{}'", p.display()), extra: String::new(), group: seiza_common::apps::Group::System })
+        })
+        .collect()
+}
+
+/// The window list `seiza switch` writes, most recent first: `star<TAB>app<TAB>title` a line.
+fn load_windows(file: &std::path::Path) -> Vec<seiza_common::apps::App> {
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut f = l.splitn(3, '\t');
+            let (star, app, title) = (f.next().unwrap_or("?"), f.next().unwrap_or(""), f.next().unwrap_or(""));
+            let name = if title.is_empty() { app } else { title };
+            seiza_common::apps::App { name: format!("{name}  ·  star {star}"), exec: format!("seiza focus-window {}", i + 1), extra: app.to_lowercase(), group: seiza_common::apps::Group::System }
+        })
+        .collect()
+}
+
+fn windows_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("seiza-windows")
+}
+
+fn clip_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("seiza-clip")
+}
+
 fn dump(path: &str, args: &[String]) {
     let style = args.first().and_then(|a| style_arg(a)).unwrap_or(Style::List);
     let mut ui = Ui::new(load_apps(), style, 1920.0, 1080.0);
@@ -336,7 +385,9 @@ fn main() {
     if !claim_singleton() {
         return;
     }
-    let style = args.first().and_then(|a| style_arg(a)).unwrap_or_else(config_style);
+    let clip = args.iter().any(|a| a == "--clip");
+    let windows = args.iter().any(|a| a == "--windows");
+    let style = args.first().and_then(|a| style_arg(a)).unwrap_or(if clip || windows { Style::List } else { config_style() });
 
     let conn = Connection::connect_to_env().expect("no Wayland compositor to connect to");
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
@@ -374,14 +425,46 @@ fn main() {
         dirty: true,
         exit: false,
         chord: false,
+        windows,
         opened: None,
         closing: None,
         shown: 0.0,
-        ui: Ui::new(load_apps(), style, 1.0, 1.0),
+        ui: Ui::new(if clip { load_clip(&clip_dir()) } else if windows { load_windows(&windows_file()) } else { load_apps() }, style, 1.0, 1.0),
     };
+    app.ui.picker = clip || windows;
+    app.ui.refresh();
+    if windows && app.ui.item(1).is_some() {
+        app.ui.select(1); // the window before this one: Alt+Tab flips back and forth
+    }
 
     while !app.exit {
         event_queue.blocking_dispatch(&mut app).unwrap();
     }
     let _ = std::fs::remove_file(format!("{}/seiza-launcher.pid", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_list_keeps_recency_numbers() {
+        let f = std::env::temp_dir().join(format!("seiza-win-test-{}", std::process::id()));
+        std::fs::write(&f, "1\tkitty\tfish\n2\tFirefox\t\n").unwrap();
+        let apps = super::load_windows(&f);
+        assert_eq!((apps[0].name.as_str(), apps[0].exec.as_str()), ("fish  ·  star 1", "seiza focus-window 1"));
+        assert_eq!((apps[1].name.as_str(), apps[1].extra.as_str()), ("Firefox  ·  star 2", "firefox"));
+        std::fs::remove_file(f).unwrap();
+    }
+
+    #[test]
+    fn clip_history_is_newest_first_and_puts_the_text_back() {
+        let d = std::env::temp_dir().join(format!("seiza-clip-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("1000.txt"), "old").unwrap();
+        std::fs::write(d.join("2000.txt"), "\nnew line\nsecond").unwrap();
+        let apps = super::load_clip(&d);
+        assert_eq!(apps[0].name, "new line…");
+        assert_eq!(apps[1].name, "old");
+        assert_eq!(apps[1].exec, format!("wl-copy < '{}'", d.join("1000.txt").display()));
+        std::fs::remove_dir_all(d).unwrap();
+    }
 }
