@@ -86,15 +86,17 @@ pub fn pages() -> Vec<Page> {
             tog("widgets/calendar", "calendar", "this month", "1"),
             tog("widgets/system", "system", "cpu, ram and temperature", "1"),
             tog("widgets/media", "media", "what is playing, from any MPRIS player", "1"),
+            tog("widgets/weather", "weather", "from wttr.in; set weather.place in seiza.kdl", "0"),
+            tog("widgets/agenda", "agenda", "next events; set calendar.source in seiza.kdl", "0"),
         ]},
-        Page { name: "keys", blurb: "keys are written in ~/.config/seiza/keys.", rows: vec![
+        Page { name: "keys", blurb: "keys are written in ~/.config/seiza/seiza.kdl.", rows: vec![
             row("keys/help", "show all bindings", "asks seiza to list them", Ctl::Button("show"), ""),
             row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
         ]},
     ]
 }
 
-const WIDGET_NAMES: [&str; 4] = ["clock", "calendar", "system", "media"];
+const WIDGET_NAMES: [&str; 6] = ["clock", "calendar", "system", "media", "weather", "agenda"];
 
 /// The widgets file for the cards that are switched on, in the fixed order.
 pub fn widgets_file(on: impl Fn(&str) -> bool) -> String {
