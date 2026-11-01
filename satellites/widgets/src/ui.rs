@@ -1,6 +1,7 @@
 //! The widgets' state and drawing: a clock with the moon's phase, a calendar and
 //! the machine's pulse, as cards in a row. No Wayland here, so `--dump` can render it.
 
+use crate::feeds::Weather;
 use std::collections::HashMap;
 
 use seiza_common::{
@@ -12,7 +13,9 @@ use seiza_common::{
 const GAP: f32 = 22.0;
 const TOP: f32 = 56.0; // where the row starts until a card is dragged: under the bar
 const HISTORY: usize = 60;
-const CARDS: [&str; 4] = ["clock", "calendar", "system", "media"];
+const MEDIA_BTN_Y: f32 = 146.0;
+const BUTTONS: [(f32, &str); 3] = [(-44.0, "previous"), (0.0, "play-pause"), (44.0, "next")];
+const CARDS: [&str; 6] = ["clock", "calendar", "system", "media", "weather", "agenda"];
 
 /// What the system card shows; filled by the main loop once a second.
 #[derive(Default, Clone, PartialEq)]
@@ -31,10 +34,11 @@ pub struct Media {
     pub artist: String,
     pub pos: u64, // seconds
     pub len: u64,
+    pub art: String, // path of a local cover picture, else empty
 }
 
 /// One line per player from `playerctl -a metadata --format <FORMAT>`.
-pub const MEDIA_FORMAT: &str = "{{status}}\u{1f}{{title}}\u{1f}{{artist}}\u{1f}{{position}}\u{1f}{{mpris:length}}";
+pub const MEDIA_FORMAT: &str = "{{status}}\u{1f}{{title}}\u{1f}{{artist}}\u{1f}{{position}}\u{1f}{{mpris:length}}\u{1f}{{mpris:artUrl}}";
 
 pub fn parse_media(out: &str) -> Option<Media> {
     let players: Vec<Media> = out
@@ -42,7 +46,7 @@ pub fn parse_media(out: &str) -> Option<Media> {
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\u{1f}').collect();
             let secs = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1_000_000;
-            (f.len() == 5 && f[0] != "Stopped").then(|| Media { playing: f[0] == "Playing", title: f[1].into(), artist: f[2].into(), pos: secs(3), len: secs(4) })
+            (f.len() == 6 && f[0] != "Stopped").then(|| Media { playing: f[0] == "Playing", title: f[1].into(), artist: f[2].into(), pos: secs(3), len: secs(4), art: f[5].strip_prefix("file://").unwrap_or("").replace("%20", " ") })
         })
         .collect();
     players.iter().find(|m| m.playing).or(players.first()).cloned()
@@ -72,12 +76,16 @@ struct Drag {
     name: String,
     grab: (f32, f32), // where in the card the pointer took hold
     at: (f32, f32),   // top-left on screen now
+    from: (f32, f32), // top-left when it was picked up
 }
 
 pub struct Ui {
     pub cards: Vec<String>, // "clock", "calendar", "system", "media", in the order drawn
     pub pulse: Pulse,
     pub media: Option<Media>,
+    pub weather: Option<Weather>,
+    pub agenda: Option<Vec<(String, String)>>, // (when, what); None = no calendar set
+    art: (String, Option<Canvas>), // the picture for the path last asked for
     pub pin: HashMap<String, Pin>, // cards the user has dragged: each lives on one star
     pub view: Option<View>,        // the camera and the stars, from the compositor's state stream
     drag: Option<Drag>,
@@ -125,6 +133,23 @@ fn fit(t: &mut Text, s: &str, max: f32) -> String {
 }
 
 /// 83 -> "1:23"
+const ART: usize = 64;
+
+/// The picture at `path` as a square of ART px with rounded corners; None without ImageMagick or if it can't be read.
+fn cover(path: &str) -> Option<Canvas> {
+    let sz = format!("{ART}x{ART}");
+    let out = std::process::Command::new("magick").args([&format!("{path}[0]"), "-resize", &format!("{sz}^"), "-gravity", "center", "-extent", &sz, "ppm:-"]).output().ok()?;
+    let nl = out.stdout.iter().enumerate().filter(|(_, b)| **b == b'\n').nth(2)?.0 + 1;
+    let rgb = out.stdout.get(nl..nl + ART * ART * 3)?;
+    let r = 10.0f32;
+    let px = rgb.chunks(3).enumerate().map(|(i, c)| {
+        let (x, y) = ((i % ART) as f32 + 0.5, (i / ART) as f32 + 0.5);
+        let (dx, dy) = ((r - x).max(x - (ART as f32 - r)).max(0.0), (r - y).max(y - (ART as f32 - r)).max(0.0));
+        if dx * dx + dy * dy > r * r { 0 } else { 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32 }
+    });
+    Some(Canvas { w: ART, h: ART, px: px.collect() })
+}
+
 fn clock(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
@@ -178,7 +203,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), media: None, pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -190,9 +215,18 @@ impl Ui {
     }
 
     /// Redraw when this changes.
+    /// Take the player's state; the cover is decoded once per picture (ImageMagick, like settings thumbnails).
+    pub fn set_media(&mut self, m: Option<Media>) {
+        let path = m.as_ref().map(|m| m.art.clone()).unwrap_or_default();
+        if path != self.art.0 {
+            self.art = (path.clone(), if path.is_empty() { None } else { cover(&path) });
+        }
+        self.media = m;
+    }
+
     pub fn key(&self) -> String {
-        let m = self.media.as_ref().map(|m| format!("{}{}{}{}", m.playing, m.title, m.artist, m.pos));
-        format!("{}|{}|{}|{m:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0))
+        let m = self.media.as_ref().map(|m| format!("{}{}{}{}{}", m.playing, m.title, m.artist, m.pos, m.art));
+        format!("{}|{}|{}|{m:?}|{:?}|{:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0), self.weather, self.agenda)
     }
 
     fn card_size(name: &str) -> (f32, f32) {
@@ -200,6 +234,8 @@ impl Ui {
             "clock" => (330.0, 150.0),
             "calendar" => (340.0, 300.0),
             "media" => (340.0, 170.0),
+            "weather" => (340.0, 150.0),
+            "agenda" => (340.0, 200.0),
             _ => (340.0, 236.0),
         }
     }
@@ -258,10 +294,42 @@ impl Ui {
             ((x..x + cw).contains(&px) && (y..y + ch).contains(&py)).then_some((c, x, y))
         });
         let Some((name, x, y)) = hit else { return false };
-        self.drag = Some(Drag { name: name.clone(), grab: (px - x, py - y), at: (x, y) });
+        self.drag = Some(Drag { name: name.clone(), grab: (px - x, py - y), at: (x, y), from: (x, y) });
         self.cards.retain(|c| *c != name);
         self.cards.push(name);
         true
+    }
+
+    /// Right-click on a card: its pin moves to the next star (same offset there), so the card leaves this one.
+    pub fn send_next(&mut self, px: f32, py: f32, w: f32, h: f32) -> Option<(String, Pin)> {
+        let name = self.visible().into_iter().rev().find(|c| self.rect(c, w, h).is_some_and(|(x, y, cw, ch)| (x..x + cw).contains(&px) && (y..y + ch).contains(&py)))?;
+        let v = self.view.as_ref()?;
+        let at = self.pin.get(&name).map_or(0, |p| v.stars.iter().position(|(n, ..)| *n == p.star).unwrap_or(0));
+        let (_, sx, sy) = v.stars.get(at)?;
+        let (dx, dy) = match self.pin.get(&name) {
+            Some(p) => (p.dx, p.dy),
+            None => {
+                let (x, y, ..) = self.rect(&name, w, h)?;
+                ((x + v.cam.0) / v.zoom - sx, (y + v.cam.1) / v.zoom - sy)
+            }
+        };
+        let next = v.stars.get((at + 1) % v.stars.len()).filter(|_| v.stars.len() > 1)?.0.clone();
+        let pin = Pin { constellation: v.constellation.clone(), star: next, dx, dy };
+        self.pin.insert(name.clone(), pin.clone());
+        Some((name, pin))
+    }
+
+    /// A press and release on one of the media card's buttons without moving: the playerctl command to run.
+    /// The card is let go of, so it is not pinned.
+    pub fn tap(&mut self) -> Option<&'static str> {
+        let d = self.drag.as_ref()?;
+        let moved = (d.at.0 - d.from.0).abs() + (d.at.1 - d.from.1).abs();
+        let (gx, gy) = d.grab;
+        let hit = d.name == "media" && moved < 4.0 && (gy - MEDIA_BTN_Y).abs() < 16.0 && self.media.is_some();
+        let (cw, _) = Self::card_size("media");
+        let cmd = hit.then(|| BUTTONS.iter().find(|(dx, _)| (gx - (cw / 2.0 + dx)).abs() < 20.0).map(|b| b.1)).flatten()?;
+        self.drag = None;
+        Some(cmd)
     }
 
     /// Move the held card with the pointer. True if a card is held.
@@ -313,6 +381,8 @@ impl Ui {
             "clock" => self.clock(&mut cv, x, cw, ch),
             "calendar" => self.calendar(&mut cv, x, cw),
             "media" => self.media(&mut cv, x, cw),
+            "weather" => self.weather_card(&mut cv, x, cw),
+            "agenda" => self.agenda_card(&mut cv, x, cw),
             _ => self.system(&mut cv, x, cw),
         }
         cv
@@ -377,11 +447,24 @@ impl Ui {
         let state = if m.playing { "playing" } else { "paused" };
         let sw = self.t14.width(state);
         self.t14.draw(cv, x + cw - 24.0 - sw, 38.0, state, rgba(p.text, 0.4));
-        let room = cw - 48.0;
+        let art = self.art.1.is_some();
+        if let Some(a) = &self.art.1 {
+            blit(cv, a, (x + 24.0) as i32, 52);
+        }
+        let (tx, room) = if art { (x + 24.0 + ART as f32 + 12.0, cw - 48.0 - ART as f32 - 12.0) } else { (x + 24.0, cw - 48.0) };
         let title = fit(&mut self.t18, &m.title, room);
-        self.t18.draw(cv, x + 24.0, 78.0, &title, rgba(p.text, if m.playing { 1.0 } else { 0.7 }));
+        self.t18.draw(cv, tx, 78.0, &title, rgba(p.text, if m.playing { 1.0 } else { 0.7 }));
         let artist = fit(&mut self.t14, &m.artist, room);
-        self.t14.draw(cv, x + 24.0, 102.0, &artist, rgba(p.text, 0.6));
+        self.t14.draw(cv, tx, 102.0, &artist, rgba(p.text, 0.6));
+        let (bx, by, ink) = (x + cw / 2.0, MEDIA_BTN_Y, rgba(p.text, 0.8));
+        cv.shape(bx - 44.0, by, 8.0, ink, |px, py| { let u = px - (bx - 44.0); (u >= -8.0 && u <= -5.0) || (u > -5.0 && (py - by).abs() <= (u + 5.0) * 0.6) });
+        if m.playing {
+            cv.round_rect(bx - 7.0, by - 8.0, 5.0, 16.0, 1.5, ink);
+            cv.round_rect(bx + 2.0, by - 8.0, 5.0, 16.0, 1.5, ink);
+        } else {
+            cv.shape(bx, by, 9.0, ink, |px, py| px - bx >= -6.0 && px - bx <= 8.0 && (py - by).abs() <= (8.0 - (px - bx)) * 0.57);
+        }
+        cv.shape(bx + 44.0, by, 8.0, ink, |px, py| { let u = px - (bx + 44.0); (u >= 5.0 && u <= 8.0) || (u <= 5.0 && u >= -8.0 && (py - by).abs() <= (5.0 - u) * 0.6) });
         if m.len > 0 {
             // browsers often report no length and a stuck position, so there is no bar without a length
             cv.round_rect(x + 24.0, 125.0, room, 6.0, 3.0, rgba(p.dust, 0.9));
@@ -392,6 +475,42 @@ impl Ui {
             self.t14.draw(cv, x + cw - 24.0 - tw, 154.0, &total, rgba(p.text, 0.45));
             self.t14.draw(cv, x + 24.0, 154.0, &clock(m.pos), rgba(p.text, 0.45));
         }
+    }
+
+    fn weather_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
+        let p = palette();
+        self.t14.draw(cv, x + 24.0, 38.0, "weather", rgba(p.text, 0.5));
+        let Some(w) = self.weather.clone() else {
+            self.t18.draw(cv, x + 24.0, 84.0, "no weather yet", rgba(p.text, 0.4));
+            return;
+        };
+        self.t64.draw(cv, x + 24.0, 102.0, &w.temp, rgba(p.text, 1.0));
+        let sky = fit(&mut self.t18, &w.sky, cw - 48.0 - 130.0);
+        let sw = self.t18.width(&sky);
+        self.t18.draw(cv, x + cw - 24.0 - sw, 90.0, &sky, rgba(p.text, 0.85));
+        let place = fit(&mut self.t14, &w.place, cw - 48.0);
+        self.t14.draw(cv, x + 24.0, 126.0, &place, rgba(p.text, 0.6));
+        let extra = fit(&mut self.t14, &w.extra, cw - 48.0);
+        let ew = self.t14.width(&extra);
+        self.t14.draw(cv, x + cw - 24.0 - ew, 38.0, &extra, rgba(p.text, 0.4));
+    }
+
+    fn agenda_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
+        let p = palette();
+        self.t14.draw(cv, x + 24.0, 38.0, "coming up", rgba(p.text, 0.5));
+        match self.agenda.clone() {
+            None => self.t14.draw(cv, x + 24.0, 84.0, "set calendar.source in seiza.kdl", rgba(p.text, 0.4)),
+            Some(rows) if rows.is_empty() => self.t18.draw(cv, x + 24.0, 84.0, "nothing coming up", rgba(p.text, 0.4)),
+            Some(rows) => {
+                for (i, (when, what)) in rows.iter().enumerate() {
+                    let y = 72.0 + i as f32 * 32.0;
+                    self.t14.draw(cv, x + 24.0, y, when, rgba(p.star, 0.9));
+                    let what = fit(&mut self.t18, what, cw - 48.0 - 110.0);
+                    self.t18.draw(cv, x + 24.0 + 110.0, y + 1.0, &what, rgba(p.text, 0.95));
+                }
+                0.0
+            }
+        };
     }
 
     fn system(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
@@ -537,13 +656,42 @@ mod tests {
     }
 
     #[test]
+    fn right_click_sends_a_card_to_the_next_star() {
+        let (w, h) = (1920.0, 1080.0);
+        let mut ui = Ui::new(vec!["clock".into()]);
+        let v = view("a", (0.0, 0.0));
+        ui.view = Some(v);
+        let (x, y, cw, _) = ui.rect("clock", w, h).unwrap();
+        let (name, pin) = ui.send_next(x + cw / 2.0, y + 5.0, w, h).unwrap();
+        assert_eq!((name.as_str(), pin.star.as_str()), ("clock", "b"));
+        assert!(ui.rect("clock", w, h).is_none(), "gone from this star");
+        assert!(ui.send_next(x, y, w, h).is_none(), "nothing under the pointer now");
+    }
+
+    #[test]
+    fn tapping_a_media_button_runs_it_and_dragging_does_not() {
+        let (w, h) = (1920.0, 1080.0);
+        let mut ui = Ui::new(vec!["media".into()]);
+        ui.media = Some(Media { playing: true, title: "t".into(), artist: "a".into(), pos: 1, len: 10, art: String::new() });
+        let (x, y, cw, _) = ui.rect("media", w, h).unwrap();
+        assert!(ui.press(x + cw / 2.0 + 44.0, y + MEDIA_BTN_Y, w, h));
+        assert_eq!(ui.tap(), Some("next"));
+        assert!(ui.press(x + 10.0, y + MEDIA_BTN_Y, w, h), "off the buttons it is a drag");
+        assert_eq!(ui.tap(), None);
+        assert!(ui.press(x + cw / 2.0, y + MEDIA_BTN_Y, w, h));
+        ui.motion(x + cw / 2.0 + 30.0, y + MEDIA_BTN_Y);
+        assert_eq!(ui.tap(), None, "moved: a drag");
+    }
+
+    #[test]
     fn media_prefers_the_playing_player_and_skips_stopped_ones() {
-        let line = |st: &str, t: &str| format!("{st}\u{1f}{t}\u{1f}Art\u{1f}83000000\u{1f}240000000\n");
+        let line = |st: &str, t: &str| format!("{st}\u{1f}{t}\u{1f}Art\u{1f}83000000\u{1f}240000000\u{1f}file:///tmp/a%20b.png\n");
         let m = parse_media(&(line("Paused", "a") + &line("Playing", "b"))).unwrap();
         assert_eq!((m.title.as_str(), m.playing, m.pos, m.len), ("b", true, 83, 240));
         assert_eq!(parse_media(&line("Paused", "a")).unwrap().title, "a");
         assert!(parse_media(&line("Stopped", "a")).is_none());
         assert!(parse_media("").is_none());
+        assert_eq!(parse_media(&line("Playing", "a")).unwrap().art, "/tmp/a b.png");
         assert_eq!(clock(83), "1:23");
     }
 

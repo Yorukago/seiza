@@ -1,10 +1,11 @@
 //! seiza-widgets: a clock with the moon's phase, a calendar, the machine's pulse and what is playing,
 //! as cards on the sky, under your windows. Which ones, and in what order, is
-//! `~/.config/seiza/widgets`: one of clock / calendar / system / media per line
+//! `~/.config/seiza/widgets`: one of clock / calendar / system / media / weather / agenda per line (weather and agenda are only shown when listed)
 //! (an empty file shows nothing; no file shows all four). Drag a card to move it: it is then pinned
 //! to the star you dropped it on and only shows there; cards never dragged sit in a row on the first star.
-//! Pins are kept in `~/.config/seiza/widgetpos`; delete that file to put the cards back.
+//! Right-click a card to send it to the next star. Pins are kept in `~/.config/seiza/widgetpos`; delete that file to put the cards back.
 //! `seiza-widgets --dump out.ppm` draws one frame to a file.
+mod feeds;
 mod ui;
 
 use std::{sync::mpsc::{channel, Receiver}, time::Duration};
@@ -34,12 +35,55 @@ use smithay_client_toolkit::{
 use ui::{parse_media, Media, Pin, Pulse, Ui, MEDIA_FORMAT};
 
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 fn config_cards() -> Vec<String> {
     let dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
     match std::fs::read_to_string(format!("{dir}/seiza/widgets")) {
         Ok(text) => text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect(),
         Err(_) => ["clock", "calendar", "system", "media"].map(String::from).to_vec(),
+    }
+}
+
+/// What the network and the calendar file have said last; the card threads write it, the tick reads it.
+#[derive(Default)]
+struct Feeds {
+    weather: Option<feeds::Weather>,
+    agenda: Option<Vec<(String, String)>>,
+}
+
+const FEED_EVERY: Duration = Duration::from_secs(30 * 60);
+
+/// One thread per card that needs the outside world: fetch, wait half an hour, fetch again.
+// shortcut: settings are read once at start, so a new place or calendar needs the widgets restarted.
+fn start_feeds(cards: &[String], feeds: std::sync::Arc<std::sync::Mutex<Feeds>>) {
+    if cards.iter().any(|c| c == "weather") {
+        let feeds = feeds.clone();
+        std::thread::spawn(move || {
+            let place = seiza_common::config::get("weather", "place").unwrap_or_default();
+            let imperial = seiza_common::config::get("weather", "units").as_deref() == Some("imperial");
+            loop {
+                if let Some(w) = feeds::fetch_weather(&place, imperial) {
+                    feeds.lock().unwrap().weather = Some(w);
+                }
+                std::thread::sleep(FEED_EVERY);
+            }
+        });
+    }
+    if cards.iter().any(|c| c == "agenda") {
+        std::thread::spawn(move || {
+            let src = seiza_common::config::get("calendar", "source").unwrap_or_default();
+            loop {
+                if !src.trim().is_empty() {
+                    if let Some(text) = feeds::read_calendar(&src) {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+                        let rows = feeds::upcoming(feeds::parse_ics(&text), now, 4).iter().map(|e| (feeds::when_text(e), e.what.clone())).collect();
+                        feeds.lock().unwrap().agenda = Some(rows);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(5 * 60)); // a file is cheap; a calendar address is fetched again after this
+            }
+        });
     }
 }
 
@@ -78,6 +122,7 @@ struct Widgets {
     shown: String,
     cpu_prev: Option<(u64, u64)>,
     states: Receiver<seiza_common::State>,
+    feeds: std::sync::Arc<std::sync::Mutex<Feeds>>,
     ui: Ui,
 }
 
@@ -132,7 +177,13 @@ impl Widgets {
         self.cpu_prev = counters;
         self.ui.set_pulse(Pulse { cpu, ram: read_ram_pct(), temp: read_temp(), load: read_load() });
         if self.ui.cards.iter().any(|c| c == "media") {
-            self.ui.media = read_media();
+            self.ui.set_media(read_media());
+        }
+        {
+            let f = self.feeds.lock().unwrap();
+            if f.weather != self.ui.weather || f.agenda != self.ui.agenda {
+                (self.ui.weather, self.ui.agenda) = (f.weather.clone(), f.agenda.clone());
+            }
         }
         if self.ui.key() != self.shown {
             self.request_draw(qh);
@@ -226,12 +277,21 @@ impl PointerHandler for Widgets {
                         self.request_draw(qh); // it is raised above the others
                     }
                 }
+                PointerEventKind::Press { button: BTN_RIGHT, .. } => {
+                    if let Some((name, pin)) = self.ui.send_next(px, py, w, h) {
+                        let _ = seiza_common::config::set("widgetpos", &name, &format!("{:.0},{:.0},{},{}", pin.dx, pin.dy, pin.constellation, pin.star));
+                        self.request_draw(qh);
+                    }
+                }
                 PointerEventKind::Motion { .. } => {
                     if self.ui.motion(px, py) {
                         self.request_draw(qh);
                     }
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
+                    if let Some(cmd) = self.ui.tap() {
+                        std::thread::spawn(move || std::process::Command::new("playerctl").arg(cmd).status()); // the thread reaps it
+                    }
                     if let Some((name, pin)) = self.ui.release(w, h) {
                         let _ = seiza_common::config::set("widgetpos", &name, &format!("{:.0},{:.0},{},{}", pin.dx, pin.dy, pin.constellation, pin.star));
                     }
@@ -267,14 +327,21 @@ fn main() {
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new(config_cards());
         ui.set_pulse(Pulse { cpu: read_cpu_counters().map(|_| 23), ram: read_ram_pct(), temp: read_temp(), load: read_load() });
-        ui.media = read_media();
+        ui.set_media(read_media());
+        let feeds = std::sync::Arc::new(std::sync::Mutex::new(Feeds::default()));
+        start_feeds(&ui.cards, feeds.clone());
+        std::thread::sleep(Duration::from_secs(3)); // the dump waits a moment for the cards that fetch
+        let f = feeds.lock().unwrap();
+        (ui.weather, ui.agenda) = (f.weather.clone(), f.agenda.clone());
+        drop(f);
         let cv = ui.render(1920, 420);
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
         return;
     }
-    let mut ui = Ui::new(config_cards());
+    let app_cards = config_cards();
+    let mut ui = Ui::new(app_cards.clone());
     load_pins(&mut ui);
     if ui.width() <= 1 {
         return; // no widgets asked for: nothing to show
@@ -315,6 +382,8 @@ fn main() {
         })
     });
 
+    let feeds = std::sync::Arc::new(std::sync::Mutex::new(Feeds::default()));
+    start_feeds(&app_cards, feeds.clone());
     let mut app = Widgets {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -331,6 +400,7 @@ fn main() {
         shown: String::new(),
         cpu_prev: read_cpu_counters(),
         states,
+        feeds,
         ui,
     };
     loop {
