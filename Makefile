@@ -69,7 +69,13 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel
+	install -Dm755 satellites/target/release/seiza-conf $(PREFIX)/bin/seiza-conf
+	install -Dm755 satellites/target/release/seiza-help $(PREFIX)/bin/seiza-help
+	install -Dm644 portals/seiza-portals.conf $(HOME)/.config/xdg-desktop-portal/seiza-portals.conf
+	test -e $(HOME)/.config/xdg-desktop-portal-wlr/config || install -Dm644 portals/xdpw.conf $(HOME)/.config/xdg-desktop-portal-wlr/config
+	install -Dm755 scripts/seiza-shot $(PREFIX)/bin/seiza-shot
 	install -Dm755 scripts/seiza-wallpaper $(PREFIX)/bin/seiza-wallpaper
+	install -Dm755 scripts/seiza-clip-store $(PREFIX)/bin/seiza-clip-store
 	install -Dm644 scripts/wallust/wallust.toml $(PREFIX)/share/seiza/wallust/wallust.toml
 	install -Dm644 scripts/wallust/templates/seiza-palette $(PREFIX)/share/seiza/wallust/templates/seiza-palette
 

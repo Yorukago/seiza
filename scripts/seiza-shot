@@ -1,0 +1,13 @@
+#!/bin/sh
+# seiza-shot [area|screen]: grim (+ slurp) -> ~/Pictures/Screenshots, also on the clipboard.
+dir="${XDG_PICTURE_DIR:-$HOME/Pictures}/Screenshots"
+mkdir -p "$dir"
+f="$dir/seiza-$(date +%Y%m%d-%H%M%S).png"
+case "${1:-area}" in
+area) g=$(slurp) || exit 0; grim -g "$g" "$f" ;;
+screen) grim "$f" ;;
+*) echo "usage: seiza-shot [area|screen]" >&2; exit 2 ;;
+esac || exit 1
+wl-copy < "$f"
+notify-send -i "$f" "Screenshot saved" "$f" 2>/dev/null
+exit 0

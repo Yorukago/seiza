@@ -1,0 +1,7 @@
+[package]
+name = "seiza-conf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+seiza-common = { path = "../common" }

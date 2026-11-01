@@ -21,8 +21,9 @@ pub fn flag(file: &str, key: &str, default: bool) -> bool {
     }
 }
 
+/// seiza.kdl first, then the old per-topic file.
 pub fn get(file: &str, key: &str) -> Option<String> {
-    value(&std::fs::read_to_string(path(file)).ok()?, key).map(String::from)
+    crate::conf::load().and_then(|c| c.values.get(&format!("{file}/{key}")).cloned()).or_else(|| value(&std::fs::read_to_string(path(file)).ok()?, key).map(String::from))
 }
 
 /// `text` with `key` set to `val`: replaces the line if there is one, else adds it. Other lines stay as they are.
@@ -45,6 +46,9 @@ fn with_value(text: &str, key: &str, val: &str) -> String {
 }
 
 pub fn set(file: &str, key: &str, val: &str) -> std::io::Result<()> {
+    if crate::conf::set(file, key, val)? {
+        return Ok(());
+    }
     let p = path(file);
     std::fs::create_dir_all(p.parent().unwrap())?;
     std::fs::write(&p, with_value(&std::fs::read_to_string(&p).unwrap_or_default(), key, val))
@@ -64,6 +68,7 @@ mod tests {
         assert!(flag("f", "a", false) && !flag("f", "b", true));
         assert!(flag("f", "c", true) && !flag("f", "c", false), "something else means the default");
         assert!(flag("f", "missing", true) && !flag("nofile", "a", false));
+        crate::conf::tests::set_edits_in_place_and_keeps_comments(&dir);
         let _ = std::fs::remove_dir_all(dir);
     }
 

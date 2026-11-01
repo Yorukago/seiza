@@ -2,6 +2,7 @@
 //! to send it commands. Both talk to `$XDG_RUNTIME_DIR/seiza.sock`.
 pub mod apps;
 pub mod art;
+pub mod conf;
 pub mod config;
 pub mod constellation;
 pub mod draw;
