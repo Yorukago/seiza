@@ -7,3 +7,5 @@ edition = "2024"
 seiza-common = { path = "../common" }
 smithay-client-toolkit = "0.21.1"
 libc = "0.2"
+zbus = "5"
+png = "0.18"

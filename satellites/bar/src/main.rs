@@ -1,5 +1,7 @@
 //! seiza-bar: a top bar for Seiza. Shows the constellation, one pill per star
 //! (click or Alt+1..9 to fly there; dots count its windows) and the clock.
+mod tray;
+
 use std::{process::Command, thread, time::{Duration, Instant}};
 
 use seiza_common::{
@@ -40,8 +42,12 @@ use smithay_client_toolkit::{
 };
 
 const BAR_H: u32 = 32;
+const HIDDEN_H: u32 = 3; // autohide: the strip that still feels the pointer
+const HIDE_AFTER: Duration = Duration::from_millis(600);
 const FONT_PX: f32 = 15.0;
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
 const TICK: Duration = Duration::from_millis(250);
 
 fn date_text() -> String {
@@ -85,12 +91,13 @@ struct Modules {
     stats: bool,
     volume: bool,
     battery: bool,
+    autohide: bool,
 }
 
 impl Modules {
     fn load() -> Modules {
         let on = |k| seiza_common::config::flag("bar", k, true);
-        Modules { date: on("date"), stats: on("stats"), volume: on("volume"), battery: on("battery") }
+        Modules { date: on("date"), stats: on("stats"), volume: on("volume"), battery: on("battery"), autohide: seiza_common::config::flag("bar", "autohide", false) }
     }
 }
 
@@ -104,6 +111,8 @@ struct Bar {
     pointer: Option<wl_pointer::WlPointer>,
     width: u32,
     configured: bool,
+    hidden: bool,                // autohide: only a thin strip at the top edge is left
+    left_at: Option<Instant>,    // when the pointer left the shown bar
     frame_pending: bool,
     dirty: bool,
     exit: bool,
@@ -117,6 +126,8 @@ struct Bar {
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
     mode_hit: (f32, f32), // the mode icon: opens the constellation view
     session_hit: (f32, f32), // the power button: opens the session menu
+    tray: Option<tray::Tray>,
+    tray_hits: Vec<(f32, f32)>, // x range of each tray icon
     cpu: Option<u32>,
     cpu_prev: Option<(u64, u64)>,
     show: Modules, // which modules the settings page switched on
@@ -188,6 +199,32 @@ impl Bar {
         cv.icon_power(rx + 15.0, cy, 7.5, [1.0, 0.55, 0.62, 1.0]);
         self.session_hit = (rx, rx + 30.0);
         rx -= 6.0;
+        self.tray_hits.clear();
+        let icons = self.tray.as_ref().map(|t| t.items.lock().unwrap().clone()).unwrap_or_default();
+        if !icons.is_empty() {
+            let tw = icons.len() as f32 * (tray::ICON as f32 + 6.0) + 12.0;
+            rx -= tw;
+            Self::module(&mut cv, rx, tw);
+            for (i, it) in icons.iter().enumerate() {
+                let ix = rx + 9.0 + i as f32 * (tray::ICON as f32 + 6.0);
+                self.tray_hits.push((ix - 3.0, ix + tray::ICON as f32 + 3.0));
+                if it.px.is_empty() { // no icon found: a disc with the app's first letter
+                    cv.round_rect(ix, cy - 9.0, 18.0, 18.0, 9.0, rgba(palette().text, 0.3));
+                    let letter = it.label.chars().next().unwrap_or('?').to_uppercase().to_string();
+                    let lw = self.text.width(&letter);
+                    self.text.draw(&mut cv, ix + (18.0 - lw) / 2.0, base, &letter, ink);
+                    continue;
+                }
+                for (j, &p) in it.px.iter().enumerate() { // premultiplied source-over
+                    let (x, y) = (ix as usize + j % tray::ICON, (cy - 9.0) as usize + j / tray::ICON);
+                    let d = &mut cv.px[y * cv.w + x];
+                    let inv = 255 - (p >> 24);
+                    let ch = |s: u32| ((p >> s & 255) + (*d >> s & 255) * inv / 255).min(255) << s;
+                    *d = ch(24) | ch(16) | ch(8) | ch(0);
+                }
+            }
+            rx -= 6.0;
+        }
         let mut stats = Vec::new();
         if self.show.stats {
             if let Some(c) = self.cpu { stats.push(format!("cpu {c}%")); }
@@ -238,6 +275,16 @@ impl Bar {
         cv
     }
 
+    /// Autohide: shrink to the strip at the top edge, or grow back to the pill. The buffer follows the next configure.
+    fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+        self.left_at = None;
+        self.layer.set_size(0, if hidden { HIDDEN_H } else { BAR_H });
+        self.layer.set_margin(if hidden { 0 } else { 8 }, 12, 0, 12);
+        self.layer.commit();
+        self.dirty = true;
+    }
+
     fn tick(&mut self, qh: &QueueHandle<Self>) {
         let clock = format!("{}{}", date_text(), time_text());
         if clock != self.clock {
@@ -260,11 +307,14 @@ impl Bar {
                 self.dirty = true;
             }
         }
+        if self.show.autohide && !self.hidden && self.left_at.is_some_and(|t| t.elapsed() > HIDE_AFTER) {
+            self.set_hidden(true);
+        }
         if !self.configured || self.frame_pending || !self.dirty {
             return;
         }
         self.dirty = false;
-        let cv = self.render();
+        let cv = if self.hidden { Canvas { w: self.width as usize, h: HIDDEN_H as usize, px: vec![0; self.width as usize * HIDDEN_H as usize] } } else { self.render() };
         if let (Ok(path), Some(_)) = (std::env::var("SEIZA_BAR_DUMP"), &self.state) { // debugging aid: write the bar as PPM and quit
             let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
             ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
@@ -344,8 +394,23 @@ impl PointerHandler for Bar {
             if &e.surface != self.layer.wl_surface() {
                 continue;
             }
+            match e.kind {
+                PointerEventKind::Enter { .. } if self.hidden => self.set_hidden(false),
+                PointerEventKind::Enter { .. } => self.left_at = None,
+                PointerEventKind::Leave { .. } => self.left_at = Some(Instant::now()),
+                _ => {}
+            }
             let x = e.position.0 as f32;
             let on_volume = x >= self.vol_hit.0 && x < self.vol_hit.1;
+            if let PointerEventKind::Press { button, .. } = e.kind {
+                let method = match button { BTN_LEFT => "Activate", BTN_RIGHT => "ContextMenu", BTN_MIDDLE => "SecondaryActivate", _ => "" };
+                if let (Some(i), Some(t)) = (self.tray_hits.iter().position(|&(a, b)| x >= a && x < b), &self.tray) {
+                    if !method.is_empty() {
+                        t.click(i, method);
+                    }
+                    continue;
+                }
+            }
             match e.kind {
                 PointerEventKind::Press { button: BTN_LEFT, .. } if on_volume => {
                     wpctl(&["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
@@ -397,8 +462,12 @@ fn main() {
     let layer = layer_shell.create_layer_surface(&qh, compositor.create_surface(&qh), Layer::Top, Some("seiza-bar"), None);
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_margin(8, 12, 0, 12); // a floating pill, not an edge-to-edge strip
-    layer.set_exclusive_zone(BAR_H as i32 + 8);
-    layer.set_size(0, BAR_H);
+    let autohide = seiza_common::config::flag("bar", "autohide", false);
+    layer.set_exclusive_zone(if autohide { 0 } else { BAR_H as i32 + 8 }); // a hiding bar floats over the windows
+    layer.set_size(0, if autohide { HIDDEN_H } else { BAR_H });
+    if autohide {
+        layer.set_margin(0, 12, 0, 12);
+    }
     layer.commit();
 
     let mut app = Bar {
@@ -411,6 +480,8 @@ fn main() {
         pointer: None,
         width: 1,
         configured: false,
+        hidden: autohide,
+        left_at: None,
         frame_pending: false,
         dirty: true,
         exit: false,
@@ -424,6 +495,8 @@ fn main() {
         vol_hit: (0.0, 0.0),
         mode_hit: (0.0, 0.0),
         session_hit: (0.0, 0.0),
+        tray: None,
+        tray_hits: Vec::new(),
         cpu: None,
         cpu_prev: None,
         show: Modules::load(),
@@ -452,6 +525,10 @@ fn main() {
             TimeoutAction::ToDuration(TICK)
         })
         .unwrap();
+
+    let (wake, wake_rx) = channel::channel();
+    app.tray = tray::Tray::start(wake);
+    handle.insert_source(wake_rx, |_, _, app: &mut Bar| app.dirty = true).unwrap();
 
     let signal = event_loop.get_signal();
     event_loop
