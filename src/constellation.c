@@ -60,6 +60,9 @@ int constellation_format(const struct constellation *c, char *buf, size_t n) {
 		for (int j = 0; j < s->napps; j++) {
 			PUT("app %s\n", s->apps[j]);
 		}
+		if (s->tiled) {
+			PUT("tile %d\n", s->tiled > 0 ? 1 : -1);
+		}
 	}
 	for (int i = 0; i < c->nlinks; i++) {
 		PUT("link %d %d\n", c->links[i][0], c->links[i][1]);
@@ -111,6 +114,8 @@ int constellation_parse(const char *text, struct constellation *out) {
 		} else if (strncmp(line, "figure ", 7) == 0 && have_header) {
 			if (!constellation_name_ok(line + 7)) { ok = 0; break; }
 			snprintf(out->figure, sizeof(out->figure), "%s", line + 7);
+		} else if (strncmp(line, "tile ", 5) == 0 && out->nstars > 0) {
+			out->stars[out->nstars - 1].tiled = atoi(line + 5) > 0 ? 1 : -1;
 		} else if (strncmp(line, "app ", 4) == 0 && out->nstars > 0) {
 			constellation_add_app(&out->stars[out->nstars - 1], line + 4);
 		} else if (strcmp(line, "end") == 0 && have_header) {

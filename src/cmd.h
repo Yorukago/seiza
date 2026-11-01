@@ -35,6 +35,9 @@ struct cmd_ops {
 	void (*debug_windows)(void *ud);                 /* log every window Seiza knows of: where, how big, what kind */
 	int  (*debug_pointer)(void *ud, double x, double y, int act); /* tests only: move the pointer, then 1 = click, 2 = zoom out a step; -1 unless SEIZA_DEBUG_INPUT is set */
 	int  (*toggle_link)(void *ud, int a, int b);     /* a thread between stars a and b (1-based), or none if there was one; -1 if no such stars */
+	void (*switcher)(void *ud);                      /* write the window list (most recent first) for seiza-switcher and start it */
+	int  (*focus_window)(void *ud, int n);           /* window n of that list (1-based): fly to its star and focus it; -1 if no such window */
+	void (*toggle_tile)(void *ud);                   /* tile or untile the star the camera is on */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other

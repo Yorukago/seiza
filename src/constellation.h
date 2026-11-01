@@ -6,6 +6,7 @@
  *     constellation <name>
  *     star <x> <y> <star name, rest of the line>
  *     app <command line, rest of the line>       (belongs to the star above)
+ *     tile 1|-1                                  (the star above is always / never tiled; left out = follow the config)
  *     link <a> <b>                               (a thread between stars a and b, counting from 0 in file order)
  *     point <n>, figure <name>                   (older files: read, and turned into links by the compositor; never written)
  *     end                                        (a file without it was cut short)
@@ -24,6 +25,7 @@ struct cstar {
 	double x, y; /* center of the star's territory, world coordinates */
 	char apps[CSTAR_APPS_MAX][256];
 	int napps;
+	int tiled; /* 0 follows the layout config, 1 tiled, -1 floating */
 	int fig_point; /* legacy: 1-based point of the old figure this star held; 0 = none */
 };
 

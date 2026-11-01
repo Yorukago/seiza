@@ -95,6 +95,15 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	if (IS("overview")) { NEED(0); ops->overview(ud); return reply(out, outn, 0, ""); }
 	if (IS("quit")) { NEED(0); ops->quit(ud); return reply(out, outn, 0, ""); }
 	if (IS("zoom-reset")) { NEED(0); ops->zoom_reset(ud); return reply(out, outn, 0, ""); }
+	if (IS("switch")) { NEED(0); ops->switcher(ud); return reply(out, outn, 0, ""); }
+	if (IS("focus-window")) {
+		NEED(1);
+		int n;
+		if (parse_int(w[2], &n) != 0) {
+			return reply(out, outn, -1, "focus-window needs a window number");
+		}
+		return reply(out, outn, ops->focus_window(ud, n), "no such window");
+	}
 	if (IS("cycle-window")) { NEED(0); ops->cycle_window(ud); return reply(out, outn, 0, ""); }
 	if (IS("new-star")) { NEED(0); return reply(out, outn, ops->new_star(ud), "could not create star"); }
 	if (IS("delete-star")) {
@@ -185,6 +194,7 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	if (IS("help")) { NEED(0); ops->help(ud); return reply(out, outn, 0, ""); }
 	if (IS("figure")) { NEED(1); return reply(out, outn, ops->set_figure(ud, w[2]), "no such figure"); }
 	if (IS("maximize")) { NEED(0); ops->toggle_maximize(ud); return reply(out, outn, 0, ""); }
+	if (IS("tile")) { NEED(0); ops->toggle_tile(ud); return reply(out, outn, 0, ""); }
 	if (IS("close-window")) { NEED(0); ops->close_window(ud); return reply(out, outn, 0, ""); }
 	if (IS("move-window") || IS("resize-window") || IS("focus")) {
 		NEED(2);
