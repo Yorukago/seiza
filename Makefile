@@ -66,11 +66,15 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-lock $(PREFIX)/bin/seiza-lock
 	install -Dm755 satellites/target/release/seiza-widgets $(PREFIX)/bin/seiza-widgets
 	install -Dm755 satellites/target/release/seiza-osd $(PREFIX)/bin/seiza-osd
+	install -Dm755 satellites/target/release/seiza-notify $(PREFIX)/bin/seiza-notify
+	install -Dm755 satellites/target/release/seiza-panel $(PREFIX)/bin/seiza-panel
+	install -Dm755 satellites/target/release/seiza-diary $(PREFIX)/bin/seiza-diary
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel
 	install -Dm755 satellites/target/release/seiza-conf $(PREFIX)/bin/seiza-conf
 	install -Dm755 satellites/target/release/seiza-help $(PREFIX)/bin/seiza-help
+	install -Dm755 satellites/target/release/seiza-hh $(PREFIX)/bin/seiza-hh
 	install -Dm644 portals/seiza-portals.conf $(HOME)/.config/xdg-desktop-portal/seiza-portals.conf
 	test -e $(HOME)/.config/xdg-desktop-portal-wlr/config || install -Dm644 portals/xdpw.conf $(HOME)/.config/xdg-desktop-portal-wlr/config
 	install -Dm755 scripts/seiza-shot $(PREFIX)/bin/seiza-shot
