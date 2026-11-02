@@ -21,6 +21,16 @@ pub fn load_font() -> Font {
     panic!("no usable font found (install any sans TTF, e.g. noto-fonts)");
 }
 
+/// A Japanese-capable font for the glyphs the main one lacks; loaded once, None if fontconfig has none.
+fn cjk_font() -> Option<&'static Font> {
+    static F: std::sync::OnceLock<Option<Font>> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let out = std::process::Command::new("fc-match").args(["-f", "%{file}", "sans:lang=ja"]).output().ok()?;
+        Font::from_bytes(std::fs::read(String::from_utf8(out.stdout).ok()?).ok()?, FontSettings::default()).ok()
+    })
+    .as_ref()
+}
+
 pub type Rgba = [f32; 4];
 
 /// Source-over onto a premultiplied ARGB pixel.
@@ -174,7 +184,10 @@ impl Text {
     }
 
     pub fn glyph(&mut self, ch: char) -> &(fontdue::Metrics, Vec<u8>) {
-        self.cache.entry(ch).or_insert_with(|| self.font.rasterize(ch, self.px))
+        self.cache.entry(ch).or_insert_with(|| match cjk_font() {
+            Some(f) if self.font.lookup_glyph_index(ch) == 0 && f.lookup_glyph_index(ch) != 0 => f.rasterize(ch, self.px),
+            _ => self.font.rasterize(ch, self.px),
+        })
     }
 
     pub fn width(&mut self, s: &str) -> f32 {
@@ -308,5 +321,112 @@ impl Canvas {
             self.rect(cx + s, cy + k * r - t / 2.0, cx + r, cy + k * r + t / 2.0, c);
         }
         self.rect(cx - s * 0.35, cy - s * 0.35, cx + s * 0.35, cy + s * 0.35, c);
+    }
+
+    /// A straight stroke from (x0, y0) to (x1, y1), `t` thick.
+    fn seg(&mut self, (x0, y0): (f32, f32), (x1, y1): (f32, f32), t: f32, c: Rgba) {
+        let (cx, cy, r) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0).hypot(y1 - y0) / 2.0 + t);
+        self.shape(cx, cy, r, c, |x, y| {
+            let (dx, dy) = (x1 - x0, y1 - y0);
+            let k = (((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy).max(1e-6)).clamp(0.0, 1.0);
+            (x - x0 - k * dx).hypot(y - y0 - k * dy) <= t / 2.0
+        });
+    }
+
+    /// Wi-Fi: three arcs and a dot. `off` draws only the dot.
+    pub fn icon_wifi(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let t = (r * 0.2).max(1.6);
+        let by = cy + r * 0.7;
+        for k in [0.6f32, 1.05, 1.5] {
+            self.ring(cx, by, r * k, t, c, |a| !(-135.0..-45.0).contains(&a));
+        }
+        self.shape(cx, by, t * 1.2, c, |x, y| (x - cx).hypot(y - by) <= t * 0.9);
+    }
+
+    /// A wired network: one box over two, joined by a bar.
+    pub fn icon_ethernet(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let (t, b) = ((r * 0.2).max(1.6), r * 0.42);
+        self.rect(cx - b, cy - r, cx + b, cy - r + b * 1.5, c);
+        for dx in [-0.75f32, 0.75] {
+            self.rect(cx + dx * r - b, cy + r - b * 1.5, cx + dx * r + b, cy + r, c);
+        }
+        self.rect(cx - t / 2.0, cy - r + b * 1.5, cx + t / 2.0, cy + r * 0.2, c);
+        self.rect(cx - 0.75 * r, cy + r * 0.2 - t / 2.0, cx + 0.75 * r, cy + r * 0.2 + t / 2.0, c);
+        for dx in [-0.75f32, 0.75] {
+            self.rect(cx + dx * r - t / 2.0, cy + r * 0.2, cx + dx * r + t / 2.0, cy + r - b * 1.5, c);
+        }
+    }
+
+    /// The Bluetooth rune.
+    pub fn icon_bluetooth(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let t = (r * 0.2).max(1.6);
+        let p = [(cx - r * 0.55, cy - r * 0.45), (cx + r * 0.55, cy + r * 0.45), (cx, cy + r), (cx, cy - r), (cx + r * 0.55, cy - r * 0.45), (cx - r * 0.55, cy + r * 0.45)];
+        for w in p.windows(2) {
+            self.seg(w[0], w[1], t, c);
+        }
+    }
+
+    /// A microphone; `slash` crosses it out.
+    pub fn icon_mic(&mut self, cx: f32, cy: f32, r: f32, slash: bool, c: Rgba) {
+        let t = (r * 0.2).max(1.6);
+        self.round_rect(cx - r * 0.3, cy - r, r * 0.6, r * 1.2, r * 0.3, c);
+        self.ring(cx, cy - r * 0.1, r * 0.65, t, c, |a| a < 0.0);
+        self.rect(cx - t / 2.0, cy + r * 0.55, cx + t / 2.0, cy + r * 0.9, c);
+        self.rect(cx - r * 0.35, cy + r * 0.9 - t, cx + r * 0.35, cy + r * 0.9, c);
+        if slash {
+            self.seg((cx - r * 0.8, cy - r * 0.8), (cx + r * 0.8, cy + r * 0.8), t, c);
+        }
+    }
+
+    /// A screenshot: the four corners of a frame.
+    pub fn icon_frame(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let (t, a) = ((r * 0.2).max(1.6), r * 0.45);
+        for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let (x, y) = (cx + sx * r, cy + sy * r);
+            self.rect(x.min(x - sx * a), y.min(y - sy * t), x.max(x - sx * a), y.max(y - sy * t), c);
+            self.rect(x.min(x - sx * t), y.min(y - sy * a), x.max(x - sx * t), y.max(y - sy * a), c);
+        }
+    }
+
+    /// A record button: a ring with a disc inside.
+    pub fn icon_record(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        self.ring(cx, cy, r, (r * 0.2).max(1.6), c, |_| false);
+        self.shape(cx, cy, r, c, |x, y| (x - cx).hypot(y - cy) <= r * 0.5);
+    }
+
+    /// A clipboard with two lines of text.
+    pub fn icon_clipboard(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let (t, w, h) = ((r * 0.2).max(1.6), r * 0.8, r * 0.95);
+        self.rect(cx - w, cy - h + r * 0.15, cx - w + t, cy + h, c);
+        self.rect(cx + w - t, cy - h + r * 0.15, cx + w, cy + h, c);
+        self.rect(cx - w, cy + h - t, cx + w, cy + h, c);
+        self.rect(cx - w, cy - h + r * 0.15, cx + w, cy - h + r * 0.15 + t, c);
+        self.round_rect(cx - r * 0.4, cy - h - r * 0.05, r * 0.8, r * 0.4, r * 0.15, c); // the clip
+        self.rect(cx - r * 0.4, cy - r * 0.05, cx + r * 0.4, cy - r * 0.05 + t, c);
+        self.rect(cx - r * 0.4, cy + r * 0.35, cx + r * 0.2, cy + r * 0.35 + t, c);
+    }
+
+    /// Three stars joined by threads: the constellation view.
+    pub fn icon_constellation(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let t = (r * 0.16).max(1.4);
+        let p = [(cx - r * 0.85, cy + r * 0.5), (cx - r * 0.1, cy - r * 0.35), (cx + r * 0.85, cy + r * 0.15), (cx + r * 0.3, cy + r * 0.85)];
+        for w in p.windows(2) {
+            self.seg(w[0], w[1], t, c);
+        }
+        for (x, y) in p {
+            self.shape(x, y, r * 0.3, c, |px, py| (px - x).hypot(py - y) <= r * 0.26);
+        }
+    }
+
+    /// A bell.
+    pub fn icon_bell(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        self.shape(cx, cy, r * 1.1, c, |x, y| {
+            let (dx, dy) = ((x - cx) / r, (y - cy) / r);
+            let dome = dy < 0.1 && (dx / 0.6).powi(2) + ((dy + 0.1) / 0.75).powi(2) <= 1.0;
+            let flare = (0.1..=0.55).contains(&dy) && dx.abs() <= 0.6 + (dy - 0.1) * 0.5;
+            let clapper = (dx).hypot(dy - 0.78) <= 0.2;
+            let knob = dx.hypot(dy + 0.9) <= 0.12;
+            dome || flare || clapper || knob
+        });
     }
 }
