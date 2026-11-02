@@ -69,11 +69,52 @@ fn read_battery() -> Option<(u32, bool)> {
 }
 
 /// (percent, muted) of the default output, via PipeWire's wpctl.
-fn read_volume() -> Option<(u32, bool)> {
-    let out = Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SINK@"]).output().ok()?;
+fn read_volume(target: &str) -> Option<(u32, bool)> {
+    let out = Command::new("wpctl").args(["get-volume", target]).output().ok()?;
     let text = String::from_utf8(out.stdout).ok()?; // "Volume: 0.67" or "Volume: 0.67 [MUTED]"
     let v: f32 = text.split_whitespace().nth(1)?.parse().ok()?;
     Some(((v * 100.0).round() as u32, text.contains("MUTED")))
+}
+
+/// What a click on a part of the bar does.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Act {
+    Goto(usize), // fly to star N (0-based)
+    Media,       // play / pause
+    Shot,
+    Mic,
+    Panel,
+}
+
+/// "Playing\tartist - title" from playerctl, if some player is open. Paused players still show, dimmed.
+fn read_media() -> Option<(bool, String)> {
+    let out = Command::new("playerctl").args(["metadata", "--format", "{{status}}\t{{artist}} - {{title}}"]).output().ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let (status, what) = text.trim().split_once('\t')?;
+    let what = what.trim_start_matches(" - ");
+    (!what.is_empty() && status != "Stopped").then(|| (status == "Playing", what.to_string()))
+}
+
+/// "eth", "wifi" or "off": the first connected device, from `nmcli`.
+fn read_net() -> &'static str {
+    let out = Command::new("nmcli").args(["-t", "-f", "TYPE,STATE", "device"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    if out.contains("ethernet:connected") { "eth" } else if out.contains("wifi:connected") { "wifi" } else { "off" }
+}
+
+fn read_bt() -> bool {
+    Command::new("bluetoothctl").arg("show").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
+}
+
+/// Cut `s` to fit `max` pixels, with an ellipsis.
+fn clip(t: &mut Text, s: &str, max: f32) -> String {
+    let mut out = s.to_string();
+    if t.width(&out) <= max {
+        return out;
+    }
+    while !out.is_empty() && t.width(&out) + 10.0 > max {
+        out.pop();
+    }
+    out.trim_end().to_string() + "…"
 }
 
 /// Run a wpctl subcommand without making the bar wait for it.
@@ -92,12 +133,17 @@ struct Modules {
     volume: bool,
     battery: bool,
     autohide: bool,
+    dots: bool,    // one dot per star in the middle
+    media: bool,   // now playing
+    quick: bool,   // screenshot and microphone buttons
+    net: bool,     // network and bluetooth
+    weather: bool, // the temperature (asks wttr.in, so off unless you turn it on)
 }
 
 impl Modules {
     fn load() -> Modules {
         let on = |k| seiza_common::config::flag("bar", k, true);
-        Modules { date: on("date"), stats: on("stats"), volume: on("volume"), battery: on("battery"), autohide: seiza_common::config::flag("bar", "autohide", false) }
+        Modules { date: on("date"), stats: on("stats"), volume: on("volume"), battery: on("battery"), autohide: seiza_common::config::flag("bar", "autohide", false), dots: on("dots"), media: on("media"), quick: on("quick"), net: on("net"), weather: seiza_common::config::flag("bar", "weather", false) }
     }
 }
 
@@ -119,13 +165,12 @@ struct Bar {
     state: Option<State>,
     clock: String,
     text: Text,
-    hits: Vec<(f32, f32, usize)>,
+    hits: Vec<(f32, f32, Act)>, // x range of each clickable part
     battery: Option<(u32, bool)>,
     volume: Option<(u32, bool)>,
     last_poll: Option<Instant>,
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
     mode_hit: (f32, f32), // the mode icon: opens the constellation view
-    session_hit: (f32, f32), // the power button: opens the session menu
     tray: Option<tray::Tray>,
     tray_hits: Vec<(f32, f32)>, // x range of each tray icon
     cpu: Option<u32>,
@@ -134,12 +179,22 @@ struct Bar {
     ram: Option<u32>,
     temp: Option<u32>,
     load: Option<f32>,
+    media: Option<(bool, String)>,
+    mic: Option<(u32, bool)>,
+    net: &'static str,
+    bt: bool,
+    weather: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl Bar {
     /// A rounded capsule behind one group of widgets.
     fn module(cv: &mut Canvas, x: f32, w: f32) {
         cv.round_rect(x, 4.0, w, BAR_H as f32 - 8.0, (BAR_H as f32 - 8.0) / 2.0, rgba(palette().dust, 0.55));
+    }
+
+    /// A capsule holding `w` pixels of clickable stuff: remember it as one hit.
+    fn hit(&mut self, x: f32, w: f32, a: Act) {
+        self.hits.push((x, x + w, a));
     }
 
     fn render(&mut self) -> Canvas {
@@ -180,25 +235,42 @@ impl Bar {
             self.text.draw(&mut cv, x + 14.0 + dw + 18.0, base, &time, ink);
         }
 
-        // center: one sparkle per open window in the current star
-        let idx = st.stars.iter().position(|s| s.name == st.current).unwrap_or(0);
-        let col = STAR_COLORS[idx % 6];
-        let n = st.stars.get(idx).map_or(0, |s| s.windows.min(8)) as f32;
-        let span = n * 22.0 + 12.0;
-        if n > 0.0 {
+        x += if date.is_empty() { tw + 28.0 } else { dw + tw + 46.0 } + 6.0;
+        if let Some((playing, what)) = self.media.clone().filter(|_| self.show.media) {
+            let what = clip(&mut self.text, &what, 240.0);
+            let mw = 12.0 + 14.0 + self.text.width(&what) + 14.0;
+            Self::module(&mut cv, x, mw);
+            let c = if playing { accent } else { dim };
+            if playing { // play triangle
+                cv.shape(x + 19.0, cy, 5.0, c, |u, v| u > -0.8 && u < 0.8 - v.abs() * 1.6);
+            } else { // pause bars
+                cv.round_rect(x + 14.0, cy - 5.0, 3.0, 10.0, 1.0, c);
+                cv.round_rect(x + 20.0, cy - 5.0, 3.0, 10.0, 1.0, c);
+            }
+            self.text.draw(&mut cv, x + 12.0 + 14.0, base, &what, if playing { ink } else { dim });
+            self.hit(x, mw, Act::Media);
+        }
+
+        // center: one dot per star. Lit with the star's colour when it holds windows, the current one ringed.
+        if self.show.dots && !st.stars.is_empty() {
+            let n = st.stars.len().min(12);
+            let span = n as f32 * 20.0 + 12.0;
             let x0 = (w as f32 - span) / 2.0;
             Self::module(&mut cv, x0, span);
-            for i in 0..n as usize {
-                cv.sparkle(x0 + 17.0 + i as f32 * 22.0, cy, 7.5, [col[0], col[1], col[2], 1.0]);
+            let cur = st.stars.iter().position(|s| s.name == st.current).unwrap_or(0);
+            for (i, s) in st.stars.iter().take(n).enumerate() {
+                let (dx, col) = (x0 + 16.0 + i as f32 * 20.0, STAR_COLORS[i % 6]);
+                let c: Rgba = if s.windows > 0 { [col[0], col[1], col[2], 1.0] } else { rgba(palette().text, 0.3) };
+                if i == cur {
+                    cv.round_rect(dx - 8.0, cy - 8.0, 16.0, 16.0, 8.0, [c[0], c[1], c[2], 0.35]);
+                }
+                cv.round_rect(dx - 4.0, cy - 4.0, 8.0, 8.0, 4.0, c);
+                self.hit(dx - 10.0, 20.0, Act::Goto(i));
             }
         }
 
         // right, from the edge inward: PC status, then volume and battery
-        let mut rx = w as f32 - 8.0 - 30.0;
-        Self::module(&mut cv, rx, 30.0);
-        cv.icon_power(rx + 15.0, cy, 7.5, [1.0, 0.55, 0.62, 1.0]);
-        self.session_hit = (rx, rx + 30.0);
-        rx -= 6.0;
+        let mut rx = w as f32 - 8.0;
         self.tray_hits.clear();
         let icons = self.tray.as_ref().map(|t| t.items.lock().unwrap().clone()).unwrap_or_default();
         if !icons.is_empty() {
@@ -223,6 +295,39 @@ impl Bar {
                     *d = ch(24) | ch(16) | ch(8) | ch(0);
                 }
             }
+            rx -= 6.0;
+        }
+        if self.show.net {
+            let nw = 78.0;
+            rx -= nw;
+            Self::module(&mut cv, rx, nw);
+            let dimc = rgba(palette().text, 0.3);
+            match self.net {
+                "eth" => cv.icon_ethernet(rx + 24.0, cy, 8.0, ink),
+                "wifi" => cv.icon_wifi(rx + 24.0, cy - 1.0, 6.5, ink),
+                _ => cv.icon_wifi(rx + 24.0, cy - 1.0, 6.5, dimc),
+            }
+            cv.icon_bluetooth(rx + 54.0, cy, 8.0, if self.bt { accent } else { dimc });
+            self.hit(rx, nw, Act::Panel);
+            rx -= 6.0;
+        }
+        if self.show.quick {
+            rx -= 66.0;
+            Self::module(&mut cv, rx, 66.0);
+            cv.icon_frame(rx + 16.5, cy, 7.5, ink);
+            self.hit(rx, 33.0, Act::Shot);
+            let muted = self.mic.is_none_or(|(_, m)| m);
+            let mc = if muted { rgba(palette().text, 0.3) } else { accent };
+            cv.icon_mic(rx + 49.0, cy, 7.5, muted, mc);
+            self.hit(rx + 33.0, 33.0, Act::Mic);
+            rx -= 6.0;
+        }
+        let temp = self.weather.lock().unwrap().clone();
+        if self.show.weather && !temp.is_empty() {
+            let ww = self.text.width(&temp) + 28.0;
+            rx -= ww;
+            Self::module(&mut cv, rx, ww);
+            self.text.draw(&mut cv, rx + 14.0, base, &temp, ink);
             rx -= 6.0;
         }
         let mut stats = Vec::new();
@@ -293,7 +398,8 @@ impl Bar {
         }
         if self.last_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
             self.last_poll = Some(Instant::now());
-            let (battery, volume) = (read_battery(), read_volume());
+            let (battery, volume) = (read_battery(), read_volume("@DEFAULT_AUDIO_SINK@"));
+            let (media, mic, net, bt) = (read_media(), read_volume("@DEFAULT_AUDIO_SOURCE@"), read_net(), read_bt());
             let counters = read_cpu_counters();
             let cpu = match (self.cpu_prev, counters) {
                 (Some((t0, i0)), Some((t1, i1))) if t1 > t0 => Some((100.0 * (1.0 - (i1 - i0) as f64 / (t1 - t0) as f64)).round() as u32),
@@ -302,6 +408,10 @@ impl Bar {
             self.cpu_prev = counters;
             let (ram, temp, load) = (read_ram_pct(), read_temp(), read_load());
             let load = load.map(|l| (l * 100.0).round() / 100.0);
+            if (&media, mic, net, bt) != (&self.media, self.mic, self.net, self.bt) {
+                (self.media, self.mic, self.net, self.bt) = (media, mic, net, bt);
+                self.dirty = true;
+            }
             if (battery, volume, cpu, ram, temp, load) != (self.battery, self.volume, self.cpu, self.ram, self.temp, self.load) {
                 (self.battery, self.volume, self.cpu, self.ram, self.temp, self.load) = (battery, volume, cpu, ram, temp, load);
                 self.dirty = true;
@@ -411,13 +521,25 @@ impl PointerHandler for Bar {
                     continue;
                 }
             }
+            if let PointerEventKind::Press { button: BTN_LEFT, .. } = e.kind {
+                if let Some(&(_, _, act)) = self.hits.iter().find(|&&(a, b, _)| x >= a && x < b) {
+                    match act {
+                        Act::Goto(i) => drop(seiza_common::command(&format!("seiza goto {}", i + 1))),
+                        Act::Media => drop(Command::new("playerctl").arg("play-pause").spawn()),
+                        Act::Shot => drop(Command::new("seiza-shot").arg("area").spawn()),
+                        Act::Mic => {
+                            wpctl(&["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]);
+                            self.last_poll = None;
+                        }
+                        Act::Panel => drop(Command::new("seiza-panel").spawn()),
+                    }
+                    continue;
+                }
+            }
             match e.kind {
                 PointerEventKind::Press { button: BTN_LEFT, .. } if on_volume => {
                     wpctl(&["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
                     self.last_poll = None; // re-read now, not in 2s
-                }
-                PointerEventKind::Press { button: BTN_LEFT, .. } if x >= self.session_hit.0 && x < self.session_hit.1 => {
-                    let _ = Command::new("seiza-session").spawn(); // the power menu is its own program
                 }
                 PointerEventKind::Press { button: BTN_LEFT, .. } if x >= self.mode_hit.0 && x < self.mode_hit.1 => {
                     let _ = Command::new("seiza-carousel").spawn(); // the constellation view is its own program (pressing again closes it)
@@ -494,7 +616,6 @@ fn main() {
         last_poll: None,
         vol_hit: (0.0, 0.0),
         mode_hit: (0.0, 0.0),
-        session_hit: (0.0, 0.0),
         tray: None,
         tray_hits: Vec::new(),
         cpu: None,
@@ -503,7 +624,27 @@ fn main() {
         ram: None,
         temp: None,
         load: None,
+        media: None,
+        mic: None,
+        net: "off",
+        bt: false,
+        weather: Default::default(),
     };
+    if app.show.weather {
+        let (cell, place) = (app.weather.clone(), seiza_common::config::get("weather", "place").unwrap_or_default());
+        let units = if seiza_common::config::get("weather", "units").as_deref() == Some("imperial") { "u" } else { "m" };
+        let place: String = place.trim().chars().map(|c| if c.is_ascii_alphanumeric() || "-_,.".contains(c) { c } else { '+' }).collect();
+        thread::spawn(move || loop {
+            let url = format!("https://wttr.in/{place}?{units}&format=%25t");
+            if let Ok(o) = Command::new("curl").args(["-sf", "-m", "10", &url]).output() {
+                let t = String::from_utf8_lossy(&o.stdout).trim().replace('+', "");
+                if o.status.success() && !t.is_empty() && t.len() < 12 { // an error page is long
+                    *cell.lock().unwrap() = t;
+                }
+            }
+            thread::sleep(Duration::from_secs(1200));
+        });
+    }
 
     let mut event_loop: EventLoop<Bar> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
