@@ -2890,7 +2890,9 @@ dependencies = [
  "fontdue",
  "kdl",
  "libc",
+ "png",
  "serde_json",
+ "ttf-parser",
 ]
 
 [[package]]

@@ -31,6 +31,69 @@ fn cjk_font() -> Option<&'static Font> {
     .as_ref()
 }
 
+/// Colour emoji: the bitmaps in Noto Color Emoji (or any CBDT/sbix emoji font fontconfig names for "emoji").
+/// None if there is no such font; then emoji draw as the main font draws them, a box.
+fn emoji_face() -> Option<&'static ttf_parser::Face<'static>> {
+    static F: std::sync::OnceLock<Option<ttf_parser::Face<'static>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let out = std::process::Command::new("fc-match").args(["-f", "%{file}", "Noto Color Emoji"]).output().ok()?;
+        let bytes: &'static [u8] = Box::leak(std::fs::read(String::from_utf8(out.stdout).ok()?).ok()?.into_boxed_slice()); // lives for the whole run
+        ttf_parser::Face::parse(bytes, 0).ok()
+    })
+    .as_ref()
+}
+
+/// One emoji, scaled to `px` tall, premultiplied ARGB.
+#[derive(Clone)]
+struct Sprite {
+    w: usize,
+    h: usize,
+    px: Vec<u32>,
+}
+
+/// The picture of `ch` at `px` tall, if the emoji font has one. shortcut: single code points only; a flag,
+/// a family or a skin tone draws as its parts. Upgrade by reading the font's GSUB ligatures.
+fn emoji_sprite(ch: char, px: f32) -> Option<Sprite> {
+    let face = emoji_face()?;
+    let img = face.glyph_raster_image(face.glyph_index(ch)?, 136)?;
+    if img.format != ttf_parser::RasterImageFormat::PNG {
+        return None;
+    }
+    let mut dec = png::Decoder::new(std::io::Cursor::new(img.data));
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = dec.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let ch_n = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        _ => return None,
+    };
+    let (sw, sh) = (info.width as usize, info.height as usize);
+    let scale = px * 1.1 / sh as f32; // a little taller than the text, as emoji usually are
+    let (w, h) = (((sw as f32 * scale).round() as usize).max(1), ((sh as f32 * scale).round() as usize).max(1));
+    let mut out = vec![0u32; w * h];
+    for y in 0..h {
+        for x in 0..w { // a box filter over the source pixels this one covers, on premultiplied colour
+            let (x0, x1, y0, y1) = (x * sw / w, ((x + 1) * sw / w).max(x * sw / w + 1), y * sh / h, ((y + 1) * sh / h).max(y * sh / h + 1));
+            let mut sum = [0u32; 4];
+            for sy in y0..y1.min(sh) {
+                for sx in x0..x1.min(sw) {
+                    let i = (sy * sw + sx) * ch_n;
+                    let a = if ch_n == 4 { buf[i + 3] as u32 } else { 255 };
+                    sum[0] += a;
+                    for c in 0..3 {
+                        sum[c + 1] += buf[i + c] as u32 * a / 255;
+                    }
+                }
+            }
+            let n = ((y1.min(sh) - y0) * (x1.min(sw) - x0)).max(1) as u32;
+            out[y * w + x] = sum[0] / n << 24 | sum[1] / n << 16 | sum[2] / n << 8 | sum[3] / n;
+        }
+    }
+    Some(Sprite { w, h, px: out })
+}
+
 pub type Rgba = [f32; 4];
 
 /// Source-over onto a premultiplied ARGB pixel.
@@ -171,16 +234,22 @@ pub fn composite(dst: &mut Canvas, src: &Canvas, c: (f32, f32), s: f32, dy: f32,
     }
 }
 
+/// Variation selectors and the zero-width joiner: they change an emoji, and draw nothing of their own.
+fn is_joiner(c: char) -> bool {
+    matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{200D}')
+}
+
 #[derive(Clone)]
 pub struct Text {
     font: Font,
     px: f32,
     cache: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
+    emoji: HashMap<char, Option<Sprite>>,
 }
 
 impl Text {
     pub fn new(font: Font, px: f32) -> Text {
-        Text { font, px, cache: HashMap::new() }
+        Text { font, px, cache: HashMap::new(), emoji: HashMap::new() }
     }
 
     pub fn glyph(&mut self, ch: char) -> &(fontdue::Metrics, Vec<u8>) {
@@ -190,13 +259,43 @@ impl Text {
         })
     }
 
+    /// The colour picture for `ch`, if it is an emoji the main font has no glyph for.
+    fn sprite(&mut self, ch: char) -> Option<&Sprite> {
+        if (ch as u32) < 0x2190 || self.font.lookup_glyph_index(ch) != 0 {
+            return None;
+        }
+        let px = self.px;
+        self.emoji.entry(ch).or_insert_with(|| emoji_sprite(ch, px)).as_ref()
+    }
+
     pub fn width(&mut self, s: &str) -> f32 {
-        s.chars().map(|c| self.glyph(c).0.advance_width).sum()
+        s.chars().map(|c| if is_joiner(c) { 0.0 } else if let Some(sp) = self.sprite(c) { sp.w as f32 + 2.0 } else { self.glyph(c).0.advance_width }).sum()
     }
 
     /// Draw `s` with its baseline at `base`; returns the x after the last glyph.
     pub fn draw(&mut self, cv: &mut Canvas, mut x: f32, base: f32, s: &str, c: Rgba) -> f32 {
         for ch in s.chars() {
+            if is_joiner(ch) {
+                continue;
+            }
+            if let Some(sp) = self.sprite(ch).cloned() {
+                let (ox, oy) = (x.round() as i32 + 1, (base - self.px * 0.35 - sp.h as f32 / 2.0).round() as i32); // centred on the x-height
+                for sy in 0..sp.h {
+                    for sx in 0..sp.w {
+                        let (px, py) = (ox + sx as i32, oy + sy as i32);
+                        if px < 0 || py < 0 || px as usize >= cv.w || py as usize >= cv.h {
+                            continue;
+                        }
+                        let p = sp.px[sy * sp.w + sx];
+                        let d = &mut cv.px[py as usize * cv.w + px as usize];
+                        let inv = 255 - (p >> 24);
+                        let chan = |s: u32| ((p >> s & 255) + (*d >> s & 255) * inv / 255).min(255) << s;
+                        *d = chan(24) | chan(16) | chan(8) | chan(0);
+                    }
+                }
+                x += sp.w as f32 + 2.0;
+                continue;
+            }
             let (m, bitmap) = self.glyph(ch).clone();
             let (gx, gy) = (x.round() as i32 + m.xmin, base.round() as i32 - m.height as i32 - m.ymin);
             for row in 0..m.height {
@@ -428,5 +527,24 @@ impl Canvas {
             let knob = dx.hypot(dy + 0.9) <= 0.12;
             dome || flare || clapper || knob
         });
+    }
+}
+
+#[cfg(test)]
+mod emoji_tests {
+    use super::*;
+
+    #[test]
+    fn an_emoji_has_width_and_colour_when_the_font_is_there() {
+        if emoji_face().is_none() {
+            return; // no emoji font on this machine: nothing to check
+        }
+        let mut t = Text::new(load_font(), 20.0);
+        assert!(t.width("😀") > 10.0, "it takes room");
+        assert_eq!(t.width("a\u{FE0F}"), t.width("a"), "a variation selector takes none");
+        let mut cv = Canvas { w: 60, h: 40, px: vec![0; 60 * 40] };
+        t.draw(&mut cv, 4.0, 28.0, "😀", [1.0, 1.0, 1.0, 1.0]);
+        let yellow = cv.px.iter().any(|&p| p >> 24 > 200 && (p >> 16 & 255) > 200 && (p >> 8 & 255) > 150 && (p & 255) < 120);
+        assert!(yellow, "the grin is drawn in colour, not in the text colour");
     }
 }

@@ -8,3 +8,5 @@ serde_json = "1.0.154"
 fontdue = "0.9"
 libc = "0.2"
 kdl = "6"
+ttf-parser = "0.25" # the colour emoji strikes of Noto Color Emoji
+png = "0.18"
