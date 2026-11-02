@@ -94,8 +94,10 @@ impl Settings {
                 }
             }
             Keysym::BackSpace => self.ui.backspace(),
-            Keysym::Up if !typing => self.ui.page = self.ui.page.saturating_sub(1),
-            Keysym::Down if !typing => self.ui.page = (self.ui.page + 1).min(self.ui.page_names().len() - 1),
+            Keysym::Up if !typing => self.ui.set_page(self.ui.page.saturating_sub(1)),
+            Keysym::Down if !typing => self.ui.set_page((self.ui.page + 1).min(self.ui.page_names().len() - 1)),
+            Keysym::Page_Up if !typing => self.ui.scroll_by(-1),
+            Keysym::Page_Down if !typing => self.ui.scroll_by(1),
             _ => match event.utf8.as_deref() {
                 Some(s) if typing && !self.chord && !s.chars().any(char::is_control) => self.ui.type_text(s),
                 _ => return,
@@ -224,6 +226,10 @@ impl PointerHandler for Settings {
                 PointerEventKind::Motion { .. } if self.down => {
                     let effect = self.ui.press(x, y, w, h, true);
                     self.run(effect);
+                }
+                PointerEventKind::Axis { vertical, .. } if vertical.absolute != 0.0 => {
+                    self.ui.scroll_by(if vertical.absolute > 0.0 { 1 } else { -1 });
+                    self.dirty = true;
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
                     self.down = false;

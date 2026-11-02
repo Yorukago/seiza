@@ -14,6 +14,7 @@ pub const W: f32 = 900.0;
 pub const H: f32 = 640.0;
 const NAV_W: f32 = 190.0;
 const ROW_H: f32 = 78.0;
+const FIT: usize = 6; // rows that fit above the footer; a longer page scrolls by whole rows
 
 #[derive(Clone, Copy)]
 pub enum Ctl {
@@ -62,6 +63,15 @@ pub fn pages() -> Vec<Page> {
             tog("bar/stats", "system stats", "cpu and ram", "1"),
             tog("bar/volume", "volume", "the speaker level", "1"),
             tog("bar/battery", "battery", "only where there is one", "1"),
+            tog("bar/dots", "star dots", "one per star; click to fly there", "1"),
+            tog("bar/media", "now playing", "click to play or pause", "1"),
+            tog("bar/quick", "quick buttons", "screenshot and microphone", "1"),
+            tog("bar/net", "network", "network and bluetooth", "1"),
+            tog("bar/weather", "weather", "the temperature (asks wttr.in)", "0"),
+        ]},
+        Page { name: "panel", blurb: "the side panel.", rows: vec![
+            tog("panel/weather", "weather", "a card with the temperature (asks wttr.in)", "0"),
+            tog("panel/calendar", "calendar", "this month, today lit", "0"),
         ]},
         Page { name: "stars", blurb: "the sky behind everything.", rows: vec![
             row("sky/nebula", "painted sky", "how much cloud the night shows", Ctl::Slider(0.0, 1.0, 0.05), "0.4"),
@@ -79,6 +89,7 @@ pub fn pages() -> Vec<Page> {
             tog("yoru/confirm", "confirm power actions", "press twice to shut down or log out", "1"),
             row("launcher/style", "launcher look", "a list, or apps as stars", Ctl::Choice(&["list", "stars"]), "list"),
             row("launcher/search", "web search", "what a query that is no app asks", Ctl::Choice(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo"),
+            row("ysh/voice", "ysh voice", "how much Yoru says in the shell: nothing, hi and bye, or everything", Ctl::Choice(&["off", "quiet", "full"]), "full"),
             row("launcher/terminal", "terminal", "runs apps that want one; kitty if empty", Ctl::Path, ""),
         ]},
         Page { name: "widgets", blurb: "what lives on the sky.", rows: vec![
@@ -94,6 +105,28 @@ pub fn pages() -> Vec<Page> {
             row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
         ]},
     ]
+}
+
+/// ysh reads YSH_VOICE from its own config file, so that is where the setting lives.
+fn ysh_rc() -> std::path::PathBuf {
+    let dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
+    std::path::PathBuf::from(dir).join("ysh/config.ysh")
+}
+
+/// The value of the `export YSH_VOICE=` line, if the file has one.
+fn ysh_voice(text: &str) -> Option<&str> {
+    text.lines().find_map(|l| l.trim().strip_prefix("export YSH_VOICE=")).map(|v| v.trim_matches(['"', '\'']))
+}
+
+/// `text` with its YSH_VOICE line set to `val` (added at the end if missing); every other line stays.
+fn with_voice(text: &str, val: &str) -> String {
+    let line = format!("export YSH_VOICE={val}");
+    let mut done = false;
+    let mut out: Vec<String> = text.lines().map(|l| if l.trim().starts_with("export YSH_VOICE=") { done = true; line.clone() } else { l.to_string() }).collect();
+    if !done {
+        out.push(line);
+    }
+    out.join("\n") + "\n"
 }
 
 const WIDGET_NAMES: [&str; 6] = ["clock", "calendar", "system", "media", "weather", "agenda"];
@@ -145,6 +178,7 @@ fn thumbnail(path: &str) -> Option<(usize, usize, Vec<u32>)> {
 pub struct Ui {
     pages: Vec<Page>,
     pub page: usize,
+    pub row0: usize, // first row shown on a page too long for the card
     pub values: HashMap<&'static str, String>,
     pub focus: Option<&'static str>, // the text field being typed into
     pub msg: String,
@@ -171,19 +205,31 @@ impl Ui {
         for r in pages.iter().flat_map(|p| &p.rows) {
             let v = match (r.id.split_once('/'), &widgets) {
                 (Some(("widgets", name)), Some(text)) => if text.lines().any(|l| l.trim() == name) { "1" } else { "0" }.to_string(),
+                (Some(("ysh", _)), _) => ysh_voice(&std::fs::read_to_string(ysh_rc()).unwrap_or_default()).unwrap_or(r.default).to_string(),
                 (Some((file, key)), _) if file != "widgets" && matches!(r.ctl, Ctl::Toggle) => if config::flag(file, key, r.default == "1") { "1" } else { "0" }.to_string(),
                 (Some((file, key)), _) if file != "widgets" => config::get(file, key).unwrap_or_else(|| r.default.to_string()),
                 _ => r.default.to_string(),
             };
             values.insert(r.id, v);
         }
-        let mut ui = Ui { pages, page: 0, values, focus: None, msg: "that's all for now..".into(), restart: vec![], thumb: None, t22: Text::new(load_font(), 24.0), t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0) };
+        let mut ui = Ui { pages, page: 0, row0: 0, values, focus: None, msg: "that's all for now..".into(), restart: vec![], thumb: None, t22: Text::new(load_font(), 24.0), t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0) };
         ui.load_thumb();
         ui
     }
 
     pub fn load_thumb(&mut self) {
         self.thumb = Some(self.values["look/wallpaper"].as_str()).filter(|p| !p.trim().is_empty()).and_then(thumbnail);
+    }
+
+    /// Scroll a long page by `d` rows (wheel, PageUp/PageDown); a short page stays put.
+    pub fn scroll_by(&mut self, d: i32) {
+        let max = self.rows().len().saturating_sub(FIT) as i32;
+        self.row0 = (self.row0 as i32 + d).clamp(0, max) as usize;
+    }
+
+    pub fn set_page(&mut self, i: usize) {
+        self.page = i;
+        self.row0 = 0;
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -209,7 +255,7 @@ impl Ui {
             Ctl::Swatches => (6.0 * 34.0, 28.0),
         };
         let x = W - 36.0 - w;
-        let y = 112.0 + i as f32 * ROW_H + (ROW_H - h) / 2.0 - 6.0;
+        let y = 112.0 + (i as f32 - self.row0 as f32) * ROW_H + (ROW_H - h) / 2.0 - 6.0;
         (x, y, w, h)
     }
 
@@ -223,6 +269,10 @@ impl Ui {
             }
             "look" if matches!(key, "apply" | "random") => Ok(()),
             "keys" => Ok(()),
+            "ysh" => {
+                let rc = ysh_rc();
+                std::fs::write(&rc, with_voice(&std::fs::read_to_string(&rc).unwrap_or_default(), &val))
+            }
             _ => config::set(file, key, &val),
         };
         self.msg = match saved {
@@ -269,11 +319,12 @@ impl Ui {
         }
         if !dragging && px >= 0.0 && px < NAV_W {
             if let Some(i) = (0..self.pages.len()).find(|&i| py >= 112.0 + i as f32 * 44.0 && py < 112.0 + i as f32 * 44.0 + 40.0) {
-                self.page = i;
+                self.set_page(i);
             }
             return Effect::None;
         }
-        for i in 0..self.rows().len() {
+        let (first, last) = (self.row0, (self.row0 + FIT).min(self.rows().len()));
+        for i in first..last {
             let (cx, cy, cw, ch) = self.control(i);
             let id = self.rows()[i].id;
             let inside = px >= cx - 6.0 && px < cx + cw + 6.0 && py >= cy - 6.0 && py < cy + ch + 6.0;
@@ -355,8 +406,9 @@ impl Ui {
         self.t22.draw(&mut cv, ox + NAV_W + 36.0, oy + 58.0, name, rgba(p.text, 1.0));
         self.t13.draw(&mut cv, ox + NAV_W + 36.0, oy + 84.0, blurb, rgba(p.text, 0.55));
 
-        for i in 0..self.rows().len() {
-            let y = oy + 112.0 + i as f32 * ROW_H;
+        let (first, last) = (self.row0, (self.row0 + FIT).min(self.rows().len()));
+        for i in first..last {
+            let y = oy + 112.0 + (i - self.row0) as f32 * ROW_H;
             cv.round_rect(ox + NAV_W + 36.0, y - 8.0, W - NAV_W - 72.0, 1.0, 0.0, rgba(p.text, 0.07));
             let (id, label, hint) = (self.rows()[i].id, self.rows()[i].label, self.rows()[i].hint);
             self.t17.draw(&mut cv, ox + NAV_W + 36.0, y + 28.0, label, rgba(p.text, 1.0));
@@ -426,6 +478,10 @@ impl Ui {
         }
         self.t13.draw(&mut cv, ox + NAV_W + 36.0, oy + H - 28.0, &self.msg, rgba(p.text, 0.55));
         let ew = self.t13.width("esc to close");
+        if self.row0 + FIT < self.rows().len() {
+            let mw = self.t13.width("scroll for more");
+            self.t13.draw(&mut cv, ox + W - 36.0 - ew - 24.0 - mw, oy + H - 28.0, "scroll for more", rgba(p.star, 0.8));
+        }
         self.t13.draw(&mut cv, ox + W - 36.0 - ew, oy + H - 28.0, "esc to close", rgba(p.text, 0.35));
         cv
     }
@@ -433,6 +489,15 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ysh_voice_line_is_read_and_replaced_in_place() {
+        let t = "alias g='git'\nexport YSH_VOICE=quiet\n# end\n";
+        assert_eq!(super::ysh_voice(t), Some("quiet"));
+        assert_eq!(super::with_voice(t, "off"), "alias g='git'\nexport YSH_VOICE=off\n# end\n");
+        assert_eq!(super::with_voice("alias a=b", "full"), "alias a=b\nexport YSH_VOICE=full\n");
+        assert_eq!(super::ysh_voice("alias a=b"), None);
+    }
+
     use super::*;
 
     fn with_config<R>(f: impl FnOnce() -> R) -> R {
@@ -451,7 +516,7 @@ mod tests {
         with_config(|| {
             let mut ui = Ui::new();
             assert_eq!(ui.values["motion/easing"], "drift");
-            ui.page = 4; // motion
+            ui.page = 5; // motion
             let (w, h) = (1920.0, 1080.0);
             let (ox, oy) = ((w - W) / 2.0, (h - H) / 2.0);
             // the easing choice: click its second segment
@@ -467,7 +532,7 @@ mod tests {
             ui.press(ox + cx + cw, oy + cy + ch / 2.0, w, h, false);
             assert_eq!(config::get("motion", "pan_secs").as_deref(), Some("2.00"));
             // the widgets toggles rewrite the whole file, and ask for a restart
-            ui.page = 6;
+            ui.page = 7;
             let (cx, cy, cw, ch) = ui.control(1); // calendar off
             ui.press(ox + cx + cw / 2.0, oy + cy + ch / 2.0, w, h, false);
             assert_eq!(std::fs::read_to_string(config::path("widgets")).unwrap(), "clock\nsystem\nmedia\n");
