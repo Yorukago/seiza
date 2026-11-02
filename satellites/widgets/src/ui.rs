@@ -120,6 +120,62 @@ fn blit(dst: &mut Canvas, src: &Canvas, ox: i32, oy: i32) {
     }
 }
 
+/// `src` over `dst` at `scale` (premultiplied ARGB): averaged over the source pixels each destination pixel covers
+/// when smaller, bilinear when bigger. Its top-left lands on (ox, oy).
+fn blit_scaled(dst: &mut Canvas, src: &Canvas, ox: i32, oy: i32, scale: f32) {
+    if (scale - 1.0).abs() < 1e-3 {
+        return blit(dst, src, ox, oy);
+    }
+    let (tw, th) = ((src.w as f32 * scale).ceil() as i32, (src.h as f32 * scale).ceil() as i32);
+    let at = |x: i32, y: i32| src.px[y.clamp(0, src.h as i32 - 1) as usize * src.w + x.clamp(0, src.w as i32 - 1) as usize];
+    for ty in 0..th {
+        let dy = oy + ty;
+        if dy < 0 || dy as usize >= dst.h {
+            continue;
+        }
+        for tx in 0..tw {
+            let dx = ox + tx;
+            if dx < 0 || dx as usize >= dst.w {
+                continue;
+            }
+            let mut sum = [0.0f32; 4];
+            let mut put = |px: u32, wt: f32| (0..4).for_each(|c| sum[c] += (px >> (8 * c) & 0xFF) as f32 * wt);
+            if scale < 1.0 {
+                let (x0, x1, y0, y1) = (tx as f32 / scale, (tx + 1) as f32 / scale, ty as f32 / scale, (ty + 1) as f32 / scale);
+                let area = (x1.min(src.w as f32) - x0) * (y1.min(src.h as f32) - y0);
+                if area <= 0.0 {
+                    continue;
+                }
+                for sy in y0 as i32..y1.ceil() as i32 {
+                    for sx in x0 as i32..x1.ceil() as i32 {
+                        let wx = (x1.min(sx as f32 + 1.0) - x0.max(sx as f32)).max(0.0);
+                        let wy = (y1.min(sy as f32 + 1.0) - y0.max(sy as f32)).max(0.0);
+                        if sx < src.w as i32 && sy < src.h as i32 {
+                            put(at(sx, sy), wx * wy / area);
+                        }
+                    }
+                }
+            } else {
+                let (fx, fy) = ((tx as f32 + 0.5) / scale - 0.5, (ty as f32 + 0.5) / scale - 0.5);
+                let (ix, iy) = (fx.floor(), fy.floor());
+                let (ax, ay) = (fx - ix, fy - iy);
+                for (ddx, ddy, wt) in [(0, 0, (1.0 - ax) * (1.0 - ay)), (1, 0, ax * (1.0 - ay)), (0, 1, (1.0 - ax) * ay), (1, 1, ax * ay)] {
+                    put(at(ix as i32 + ddx, iy as i32 + ddy), wt);
+                }
+            }
+            let [b, g, r, a] = sum.map(|v| v.round() as u32);
+            let s = a << 24 | r << 16 | g << 8 | b;
+            if s == 0 {
+                continue;
+            }
+            let d = &mut dst.px[dy as usize * dst.w + dx as usize];
+            let inv = 255 - a;
+            let ch = |shift: u32| ((s >> shift & 0xFF) + (*d >> shift & 0xFF) * inv / 255).min(255);
+            *d = ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
+        }
+    }
+}
+
 /// `s` cut to fit `max` pixels, with ".." when it was cut.
 fn fit(t: &mut Text, s: &str, max: f32) -> String {
     if t.width(s) <= max {
@@ -253,10 +309,17 @@ impl Ui {
         self.view = Some(View { constellation: st.constellation.clone(), current: st.current.clone(), stars, zoom: st.zoom as f32, cam: (st.cam.0 as f32, st.cam.1 as f32) });
     }
 
+    /// Cards shrink and grow with the camera's zoom, like the windows do.
+    fn scale(&self) -> f32 {
+        self.view.as_ref().map_or(1.0, |v| v.zoom)
+    }
+
     /// A card's place on a `w` x `h` screen: (x, y, width, height), or None while it is not in view.
     /// Every card lives on a star. Ones never dragged sit in a centered row on the first star; held ones stay on the screen.
     pub fn rect(&self, name: &str, w: f32, h: f32) -> Option<(f32, f32, f32, f32)> {
-        let (cw, ch) = Self::card_size(name);
+        let (nw, nh) = Self::card_size(name);
+        let z = self.scale();
+        let (cw, ch) = (nw * z, nh * z);
         let on_screen = |x: f32, y: f32| (x.clamp(0.0, (w - cw).max(0.0)), y.clamp(0.0, (h - ch).max(0.0)), cw, ch);
         if let Some(d) = self.drag.as_ref().filter(|d| d.name == name) {
             return Some(on_screen(d.at.0, d.at.1));
@@ -324,7 +387,7 @@ impl Ui {
     pub fn tap(&mut self) -> Option<&'static str> {
         let d = self.drag.as_ref()?;
         let moved = (d.at.0 - d.from.0).abs() + (d.at.1 - d.from.1).abs();
-        let (gx, gy) = d.grab;
+        let (gx, gy) = (d.grab.0 / self.scale(), d.grab.1 / self.scale());
         let hit = d.name == "media" && moved < 4.0 && (gy - MEDIA_BTN_Y).abs() < 16.0 && self.media.is_some();
         let (cw, _) = Self::card_size("media");
         let cmd = hit.then(|| BUTTONS.iter().find(|(dx, _)| (gx - (cw / 2.0 + dx)).abs() < 20.0).map(|b| b.1)).flatten()?;
@@ -343,7 +406,7 @@ impl Ui {
     /// With no star to pin to (no state from the compositor yet) it goes back where it was.
     pub fn release(&mut self, w: f32, h: f32) -> Option<(String, Pin)> {
         let d = self.drag.take()?;
-        let (cw, ch) = Self::card_size(&d.name);
+        let (cw, ch) = (Self::card_size(&d.name).0 * self.scale(), Self::card_size(&d.name).1 * self.scale());
         let (x, y) = (d.at.0.clamp(0.0, (w - cw).max(0.0)), d.at.1.clamp(0.0, (h - ch).max(0.0)));
         let v = self.view.as_ref()?;
         let &(_, sx, sy) = v.stars.iter().find(|(n, _, _)| *n == v.current)?;
@@ -365,7 +428,8 @@ impl Ui {
                 let card = self.render_card(&name);
                 self.cache.insert(name.clone(), card);
             }
-            blit(&mut cv, &self.cache[&name], x as i32 - CARD_PAD as i32, y as i32);
+            let z = self.scale();
+            blit_scaled(&mut cv, &self.cache[&name], (x - CARD_PAD as f32 * z).round() as i32, y.round() as i32, z);
         }
         cv
     }
@@ -577,6 +641,20 @@ mod tests {
     fn view(current: &str, cam: (f32, f32)) -> View {
         // two stars 2000 apart; with a star centered on a 1920x1080 screen the camera is its center minus (960, 540)
         View { constellation: "default".into(), current: current.into(), stars: vec![("a".into(), 960.0, 540.0), ("b".into(), 2960.0, 540.0)], zoom: 1.0, cam }
+    }
+
+    #[test]
+    fn cards_shrink_with_the_zoom_like_windows() {
+        let mut ui = Ui::new(vec!["clock".into()]);
+        let mut v = view("a", (0.0, 0.0));
+        let (_, _, w1, h1) = { ui.view = Some(v.clone()); ui.rect("clock", 1920.0, 1080.0).unwrap() };
+        v.zoom = 0.5;
+        ui.view = Some(v);
+        let (_, _, w, h) = ui.rect("clock", 1920.0, 1080.0).unwrap();
+        assert_eq!((w, h), (w1 / 2.0, h1 / 2.0));
+        let mut cv = Canvas { w: 400, h: 300, px: vec![0; 400 * 300] };
+        blit_scaled(&mut cv, &Canvas { w: 100, h: 100, px: vec![0xFF00_FF00; 100 * 100] }, 10, 10, 0.5);
+        assert_eq!((cv.px[30 * 400 + 30], cv.px[70 * 400 + 70]), (0xFF00_FF00, 0), "filled inside 50x50, empty outside");
     }
 
     #[test]
