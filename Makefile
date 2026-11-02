@@ -53,6 +53,7 @@ test: $(TESTS)
 
 smoke: seiza
 	python3 -I tests/smoke_ipc.py
+	python3 -I tests/smoke_monitors.py
 
 PREFIX ?= $(HOME)/.local
 

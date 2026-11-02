@@ -2307,12 +2307,24 @@ static int corner_fired(void *data) {
 	return 0;
 }
 
+/* The hot corner of whichever monitor the pointer is on, if that corner is on the outside of the layout:
+ * a corner at the seam between two monitors is not a corner, or crossing over would open the panel. */
 static bool in_corner(struct tinywl_server *server) {
-	struct wlr_box f = server->full;
-	double x = server->cursor->x - f.x, y = server->cursor->y - f.y;
+	struct wlr_output *out = wlr_output_layout_output_at(server->output_layout, server->cursor->x, server->cursor->y);
 	int c = server->panel_corner;
+	if (!out || c <= 0) {
+		return false;
+	}
+	struct wlr_box f = {0};
+	wlr_output_layout_get_box(server->output_layout, out, &f);
+	double x = server->cursor->x - f.x, y = server->cursor->y - f.y;
 	bool right = c == 1 || c == 3, bottom = c == 3 || c == 4;
-	return c > 0 && (right ? x >= f.width - 4 : x < 4) && (bottom ? y >= f.height - 4 : y < 4);
+	if (!(right ? x >= f.width - 4 : x < 4) || !(bottom ? y >= f.height - 4 : y < 4)) {
+		return false;
+	}
+	double ix = right ? f.x + f.width - 2 : f.x + 1, iy = bottom ? f.y + f.height - 2 : f.y + 1; /* a point inside the corner */
+	double ox = right ? f.x + f.width + 1 : f.x - 1, oy = bottom ? f.y + f.height + 1 : f.y - 1;
+	return !wlr_output_layout_output_at(server->output_layout, ox, iy) && !wlr_output_layout_output_at(server->output_layout, ix, oy);
 }
 
 static void corner_motion(struct tinywl_server *server) {
@@ -2738,7 +2750,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	output->destroy.notify = output_destroy;
 	wl_signal_add(&wlr_output->events.destroy, &output->destroy);
 
-	wl_list_insert(&server->outputs, &output->link);
+	wl_list_insert(server->outputs.prev, &output->link); /* appended: the first monitor stays the primary one */
 
 	/* Adds this to the output layout. The add_auto function arranges outputs
 	 * from left-to-right in the order they appear. A more sophisticated
@@ -3328,8 +3340,10 @@ static void layers_arrange(struct tinywl_server *server) {
 				}
 			}
 		}
-		server->full = full;
-		server->usable = usable;
+		if (o->link.prev == &server->outputs) { /* only the primary monitor sets what windows keep clear of */
+			server->full = full;
+			server->usable = usable;
+		}
 	}
 }
 
@@ -3373,13 +3387,15 @@ static void layer_destroy(struct wl_listener *listener, void *data) {
 static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 	struct tinywl_server *server = wl_container_of(listener, server, new_layer_surface);
 	struct wlr_layer_surface_v1 *ls = data;
-	if (!ls->output) { /* the client let us pick: the first output */
+	if (!ls->output) { /* the client let us pick */
 		if (wl_list_empty(&server->outputs)) {
 			wlr_layer_surface_v1_destroy(ls);
 			return;
 		}
-		struct tinywl_output *o = wl_container_of(server->outputs.next, o, link);
-		ls->output = o->wlr_output;
+		struct tinywl_output *o = wl_container_of(server->outputs.next, o, link); /* the primary monitor... */
+		bool fixed = ls->namespace && (!strcmp(ls->namespace, "seiza-bar") || !strcmp(ls->namespace, "seiza-starfield") || !strcmp(ls->namespace, "seiza-widgets"));
+		struct wlr_output *at = fixed ? NULL : wlr_output_layout_output_at(server->output_layout, server->cursor->x, server->cursor->y);
+		ls->output = at ? at : o->wlr_output; /* ...but pop-ups (panel, launcher, menus) open where the pointer is */
 	}
 	struct seiza_layer *sl = calloc(1, sizeof(*sl));
 	sl->server = server;
