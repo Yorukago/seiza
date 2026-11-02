@@ -202,6 +202,7 @@ struct Starfield {
     exit: bool,
     target: Cam,
     cur: Cam,
+    at: (f64, f64), // where this monitor sits in the compositor's layout: 0,0 for the primary one
     sky_stars: Vec<SkyStar>,
     sky_links: Vec<(usize, usize)>,
     overview: bool,
@@ -439,7 +440,7 @@ impl Starfield {
         }
         let (w, h) = (self.width as usize, self.height as usize);
         let drawing = Instant::now();
-        let (wcx, wcy) = ((self.cur.x + self.cur.screen.0 / 2.0) / self.cur.zoom, (self.cur.y + self.cur.screen.1 / 2.0) / self.cur.zoom);
+        let (wcx, wcy) = ((self.cur.x + w as f64 / 2.0) / self.cur.zoom, (self.cur.y + h as f64 / 2.0) / self.cur.zoom); // the world point at this monitor's centre
         let (dx, dy) = self.nebula(wcx, wcy);
         self.frame.clear();
         let bw = w + 2 * NEBULA_MARGIN;
@@ -546,7 +547,13 @@ fn main() {
     let layer_shell = LayerShell::bind(&globals, &qh).expect("compositor has no layer-shell");
     let shm = Shm::bind(&globals, &qh).expect("wl_shm missing");
 
-    let layer = layer_shell.create_layer_surface(&qh, compositor.create_surface(&qh), Layer::Background, Some("seiza-starfield"), None);
+    // `--on NAME --at X,Y`: the starfield for a monitor plugged in later, which the compositor starts and
+    // which shows the part of the one sky that monitor covers.
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1));
+    let at: (f64, f64) = arg("--at").and_then(|v| v.split_once(',')).and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?))).unwrap_or((0.0, 0.0));
+    let namespace = match arg("--on") { Some(name) => format!("seiza-starfield@{name}"), None => "seiza-starfield".into() };
+    let layer = layer_shell.create_layer_surface(&qh, compositor.create_surface(&qh), Layer::Background, Some(namespace), None);
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(-1); // fill the whole output, ignoring bars
     layer.set_size(0, 0);
@@ -566,6 +573,7 @@ fn main() {
         exit: false,
         target: cam,
         cur: cam,
+        at,
         sky_stars: Vec::new(),
         sky_links: Vec::new(),
         overview: false,
@@ -599,7 +607,7 @@ fn main() {
     handle
         .insert_source(rx, |ev, _, app: &mut Starfield| {
             if let channel::Event::Msg(m) = ev {
-                app.target = m.cam;
+                app.target = Cam { x: m.cam.x + app.at.0, y: m.cam.y + app.at.1, ..m.cam }; // the camera, seen from this monitor
                 app.overview = m.overview;
                 app.sky_stars = m.stars;
                 app.sky_links = m.links;

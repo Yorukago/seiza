@@ -2703,6 +2703,26 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	free(output);
 }
 
+static bool g_env_ready; /* WAYLAND_DISPLAY is set: programs started now can reach us */
+
+/* A monitor other than the primary one: the starfield from autostart only covers the primary, so start another
+ * for this one, told where it sits in the layout. It exits when the monitor goes. */
+static void start_starfield(struct tinywl_server *server, struct tinywl_output *output) {
+	if (output->link.prev == &server->outputs) {
+		return;
+	}
+	for (const char *c = output->wlr_output->name; *c; c++) {
+		if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') {
+			return;
+		}
+	}
+	struct wlr_box b = {0};
+	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &b);
+	char cmd[200];
+	snprintf(cmd, sizeof(cmd), "seiza-starfield --on %s --at %d,%d", output->wlr_output->name, b.x, b.y);
+	op_spawn(server, cmd);
+}
+
 static void server_new_output(struct wl_listener *listener, void *data) {
 	/* This event is raised by the backend when a new output (aka a display or
 	 * monitor) becomes available. */
@@ -2766,6 +2786,9 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
 	place_corners(output);
+	if (g_env_ready) {
+		start_starfield(server, output);
+	}
 }
 
 /* Remember how this window's program was launched, on its star, so the star can
@@ -3393,7 +3416,16 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 			return;
 		}
 		struct tinywl_output *o = wl_container_of(server->outputs.next, o, link); /* the primary monitor... */
-		bool fixed = ls->namespace && (!strcmp(ls->namespace, "seiza-bar") || !strcmp(ls->namespace, "seiza-starfield") || !strcmp(ls->namespace, "seiza-widgets"));
+		const char *on = ls->namespace ? strchr(ls->namespace, '@') : NULL; /* "seiza-starfield@HDMI-A-1": asks for that monitor */
+		if (on) {
+			struct tinywl_output *w;
+			wl_list_for_each(w, &server->outputs, link) {
+				if (!strcmp(w->wlr_output->name, on + 1)) {
+					o = w;
+				}
+			}
+		}
+		bool fixed = on || (ls->namespace && (!strcmp(ls->namespace, "seiza-bar") || !strcmp(ls->namespace, "seiza-starfield") || !strcmp(ls->namespace, "seiza-widgets")));
 		struct wlr_output *at = fixed ? NULL : wlr_output_layout_output_at(server->output_layout, server->cursor->x, server->cursor->y);
 		ls->output = at ? at : o->wlr_output; /* ...but pop-ups (panel, launcher, menus) open where the pointer is */
 	}
@@ -3772,6 +3804,11 @@ int main(int argc, char *argv[]) {
 	 * Only a real session publishes this to dbus/systemd: a nested one must not repoint the host's portals. */
 	setenv("XDG_CURRENT_DESKTOP", "seiza", true);
 	setenv("XDG_SESSION_TYPE", "wayland", true);
+	g_env_ready = true;
+	struct tinywl_output *mon;
+	wl_list_for_each(mon, &server.outputs, link) { /* monitors that were there from the start */
+		start_starfield(&server, mon);
+	}
 	if (real_session && fork() == 0) {
 		execlp("dbus-update-activation-environment", "dbus-update-activation-environment", "--systemd",
 			"WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", (void *)NULL);
