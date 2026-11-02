@@ -43,6 +43,7 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 #include <sys/inotify.h>
@@ -150,6 +151,7 @@ struct tinywl_server {
 	struct wl_list unmanaged; /* struct xunmanaged */
 	struct wlr_scene_tree *xtop; /* in the canvas, raised above the windows: where those menus draw */
 	int idle_dim, idle_lock, idle_off; /* seconds without input until the screen dims / seiza-lock / screens off; 0 = never. From seiza.kdl */
+	int panel_corner, panel_dwell; /* hot corner that opens seiza-panel: 0 off, 1 top-right, 2 top-left, 3 bottom-right, 4 bottom-left; dwell in ms. From seiza.kdl */
 	struct wlr_idle_inhibit_manager_v1 *idle_inhibit; /* a client holding an inhibitor (a video) keeps the screen awake */
 	struct wlr_scene_rect *dim_rect;
 	struct motion motion; /* pan duration and easing, from ~/.config/seiza/motion */
@@ -1425,6 +1427,17 @@ static void frame_colors_load(struct tinywl_server *server) {
 			sscanf(off, "off=%d", &server->idle_off);
 		}
 	}
+	server->panel_corner = 1;
+	server->panel_dwell = 150;
+	if ((kdl = cfg_kdl(server, "panel"))) {
+		const char *c = strstr(kdl, "corner="), *d = strstr(kdl, "dwell=");
+		if (c) {
+			server->panel_corner = !strncmp(c + 7, "off", 3) ? 0 : !strncmp(c + 7, "top-left", 8) ? 2 : !strncmp(c + 7, "bottom-right", 12) ? 3 : !strncmp(c + 7, "bottom-left", 11) ? 4 : 1;
+		}
+		if (d) {
+			sscanf(d, "dwell=%d", &server->panel_dwell);
+		}
+	}
 	if (g_idle_timer) {
 		wl_event_source_timer_update(g_idle_timer, server->idle_dim > 0 || server->idle_lock > 0 || server->idle_off > 0 ? 1000 : 0);
 	}
@@ -1489,7 +1502,7 @@ static void op_spawn(void *ud, const char *cmdline);
  * ('#' comments). With no such file the satellites that ship with Seiza start;
  * an empty file starts nothing. Only run at startup, never on reload-config. */
 static void autostart(struct tinywl_server *server) {
-	static char text[8192] = "seiza-starfield\nseiza-bar\nseiza-widgets\nseiza-osd\nwl-paste --type text --watch seiza-clip-store\nseiza-conf slideshow\n";
+	static char text[8192] = "seiza-starfield\nseiza-bar\nseiza-widgets\nseiza-osd\nseiza-notify\nwl-paste --type text --watch seiza-clip-store\nseiza-conf slideshow\n";
 	char path[512];
 	snprintf(path, sizeof(path), "%s/autostart", server->cfg_dir);
 	FILE *f = fopen(path, "r");
@@ -2282,8 +2295,41 @@ static void star_move(struct tinywl_server *server, struct star *s, double dx, d
 	relayout_all(server);
 }
 
+/* Hot corner: the pointer rests in a 4 px corner box for panel_dwell ms and seiza-panel opens. It fires once
+ * per visit, so closing the panel with the pointer still in the corner does not reopen it. */
+static struct wl_event_source *g_corner_timer;
+static bool g_corner_fired;
+
+static int corner_fired(void *data) {
+	struct tinywl_server *server = data;
+	g_corner_fired = true;
+	op_spawn(server, "seiza-panel open");
+	return 0;
+}
+
+static bool in_corner(struct tinywl_server *server) {
+	struct wlr_box f = server->full;
+	double x = server->cursor->x - f.x, y = server->cursor->y - f.y;
+	int c = server->panel_corner;
+	bool right = c == 1 || c == 3, bottom = c == 3 || c == 4;
+	return c > 0 && (right ? x >= f.width - 4 : x < 4) && (bottom ? y >= f.height - 4 : y < 4);
+}
+
+static void corner_motion(struct tinywl_server *server) {
+	if (!g_corner_timer) {
+		g_corner_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server->wl_display), corner_fired, server);
+	}
+	if (server->locked || !in_corner(server)) {
+		g_corner_fired = false;
+		wl_event_source_timer_update(g_corner_timer, 0);
+	} else if (!g_corner_fired) {
+		wl_event_source_timer_update(g_corner_timer, server->panel_dwell > 0 ? server->panel_dwell : 1);
+	}
+}
+
 static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 	idle_activity(server);
+	corner_motion(server);
 	if (server->locked) { /* the pointer belongs to the lock surface */
 		struct wlr_session_lock_surface_v1 *ls = NULL;
 		if (server->lock && !wl_list_empty(&server->lock->surfaces)) {
@@ -2941,6 +2987,47 @@ static void toplevel_init_common(struct tinywl_server *server, struct tinywl_top
 	layout_toplevel(toplevel);
 }
 
+/* Seiza draws the only frame there is, so every client is told to leave its own title bar and buttons off.
+ * wlroots only takes the mode once the surface has had its initial commit, so a decoration that comes earlier waits for it. */
+struct deco_wait {
+	struct wl_listener commit, destroy;
+	struct wlr_xdg_toplevel_decoration_v1 *d;
+};
+
+static void deco_wait_free(struct deco_wait *w) {
+	wl_list_remove(&w->commit.link);
+	wl_list_remove(&w->destroy.link);
+	free(w);
+}
+
+static void deco_commit(struct wl_listener *listener, void *data) {
+	struct deco_wait *w = wl_container_of(listener, w, commit);
+	if (!w->d->toplevel->base->initial_commit)
+		return;
+	wlr_xdg_toplevel_decoration_v1_set_mode(w->d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	deco_wait_free(w);
+}
+
+static void deco_destroy(struct wl_listener *listener, void *data) {
+	deco_wait_free(wl_container_of(listener, (struct deco_wait *)0, destroy));
+}
+
+static void server_new_decoration(struct wl_listener *listener, void *data) {
+	struct wlr_xdg_toplevel_decoration_v1 *d = data;
+	if (d->toplevel->base->initialized) {
+		wlr_xdg_toplevel_decoration_v1_set_mode(d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+		return;
+	}
+	struct deco_wait *w = calloc(1, sizeof *w);
+	if (!w)
+		return;
+	w->d = d;
+	w->commit.notify = deco_commit;
+	wl_signal_add(&d->toplevel->base->surface->events.commit, &w->commit);
+	w->destroy.notify = deco_destroy;
+	wl_signal_add(&d->events.destroy, &w->destroy);
+}
+
 static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	/* This event is raised when a client creates a new toplevel (application window). */
 	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
@@ -3574,6 +3661,9 @@ int main(int argc, char *argv[]) {
 		wlr_log(WLR_ERROR, "seiza: could not set up XWayland: X11 programs will not run");
 	}
 
+	struct wlr_xdg_decoration_manager_v1 *deco = wlr_xdg_decoration_manager_v1_create(server.wl_display);
+	static struct wl_listener new_deco = {.notify = server_new_decoration};
+	wl_signal_add(&deco->events.new_toplevel_decoration, &new_deco);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 	wlr_viewporter_create(server.wl_display);
