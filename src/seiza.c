@@ -359,7 +359,7 @@ static void update_border(struct tinywl_toplevel *tl) {
 	wlr_scene_node_set_enabled(&tl->glow->node, !tl->mode);
 	wlr_scene_rect_set_size(tl->border, gw + 2 * t, gh + 2 * t);
 	wlr_scene_rect_set_corner_radius(tl->border, r + t);
-	float a = 1.0f - tl->faded, bc[4], gc[4]; /* colours are premultiplied, so alpha scales every channel */
+	float a = fminf(1.0f, fmaxf(0.0f, 1.0f - tl->faded)), bc[4], gc[4]; /* colours are premultiplied, so alpha scales every channel */
 	for (int i = 0; i < 4; i++) {
 		bc[i] = (focused ? BORDER_FOCUSED : BORDER_IDLE)[i] * a;
 		gc[i] = (focused ? GLOW_FOCUSED : GLOW_IDLE)[i] * a;
@@ -653,8 +653,33 @@ struct scale_arg {
 static double mono_s(void);
 #define OPEN_SECS 0.3 /* Hyprland's speed 3 (units of 100 ms), as in the user's windowsIn */
 
+/* The curves of the user's Hyprland rice (ii). A y above 1 overshoots: that is the bounce. */
+static const struct { const char *name; double c[4]; } CURVES[] = {
+	{"emphasizedDecel",         {0.05, 0.70, 0.10, 1.00}},
+	{"expressiveFastSpatial",   {0.42, 1.67, 0.21, 0.90}},
+	{"expressiveSlowSpatial",   {0.39, 1.29, 0.35, 0.98}},
+	{"expressiveDefaultSpatial", {0.38, 1.21, 0.22, 1.00}},
+	{"emphasizedAccel",         {0.30, 0.00, 0.80, 0.15}},
+	{"standardDecel",           {0.00, 0.00, 0.00, 1.00}},
+	{"menu_decel",              {0.10, 1.00, 0.00, 1.00}},
+	{"menu_accel",              {0.52, 0.03, 0.72, 0.08}},
+	{"stall",                   {1.00, -0.10, 0.70, 0.85}},
+};
+#define OPEN_CURVE "expressiveFastSpatial" /* the open animation's curve; emphasizedDecel is the calm one */
+
+/* The curve called `name`; an unknown name gives the first one. */
+static const double *curve_named(const char *name) {
+	for (size_t i = 0; i < sizeof(CURVES) / sizeof(CURVES[0]); i++) {
+		if (!strcmp(CURVES[i].name, name)) {
+			return CURVES[i].c;
+		}
+	}
+	return CURVES[0].c;
+}
+
 /* A CSS cubic-bezier(x1, y1, x2, y2): progress p (time, 0..1) in, eased value out. Bisection on x(t); 20 steps is plenty for a screen. */
-static double bezier(double x1, double y1, double x2, double y2, double p) {
+static double bezier(const double c[4], double p) {
+	double x1 = c[0], y1 = c[1], x2 = c[2], y2 = c[3];
 	double lo = 0, hi = 1, t = p, u;
 	for (int i = 0; i < 20; i++) {
 		t = (lo + hi) / 2;
@@ -669,7 +694,7 @@ static double bezier(double x1, double y1, double x2, double y2, double p) {
 	return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
 }
 
-/* 0..1: how far a window that has just been mapped has faded in (and the end of the fade clears open_t0). */
+/* How far along its open animation a window is: 0 at the start, 1 at the end, past 1 while it bounces (the end clears open_t0). */
 static float open_alpha(struct tinywl_toplevel *tl) {
 	if (tl->open_t0 == 0) {
 		return 1.0f;
@@ -679,7 +704,7 @@ static float open_alpha(struct tinywl_toplevel *tl) {
 		tl->open_t0 = 0;
 		return 1.0f;
 	}
-	return (float)bezier(0.05, 0.7, 0.1, 1.0, p); /* Hyprland's emphasizedDecel */
+	return (float)bezier(curve_named(OPEN_CURVE), p); /* may pass 1.0: the window overshoots */
 }
 
 static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data) {
@@ -722,7 +747,7 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		 * bigger than that. Which window gets the pointer follows Wayland pointer focus, not X geometry. */
 		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, tl->xsurface->width, tl->xsurface->height);
 	}
-	struct scale_arg arg = {pz, tl->mode ? 0 : lround(WIN_RADIUS * pz), alpha}; /* maximized windows have square corners */
+	struct scale_arg arg = {pz, tl->mode ? 0 : lround(WIN_RADIUS * pz), fminf(1.0f, fmaxf(0.0f, alpha))}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
 	update_border(tl);
 }
