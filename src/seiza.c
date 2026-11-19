@@ -1927,7 +1927,7 @@ static void op_switcher(void *ud) {
 		fprintf(f, "%s\n", line);
 	}
 	fclose(f);
-	op_spawn(server, "seiza-switcher");
+	op_spawn(server, "seiza-launcher --windows");
 }
 
 static int op_focus_window(void *ud, int n) {
