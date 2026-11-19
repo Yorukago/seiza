@@ -260,6 +260,7 @@ struct tinywl_keyboard {
  * plus a soft gold bloom while focused. Thickness and radius are in screen px
  * at zoom 1; the radius follows the zoom, the thickness does not. */
 #define GLOW_SIGMA 18
+#define OPEN_POPIN 0.2 /* Hyprland's `popin 80%`: a window opens at 80% size and grows to 100% along its fade */
 static struct frame FRAME; /* radius, border and glow: from the frame file, set by frame_colors_load() */
 #define WIN_RADIUS FRAME.radius
 #define BORDER_W FRAME.border
@@ -350,7 +351,7 @@ static void update_border(struct tinywl_toplevel *tl) {
 	struct wlr_box geo = tl_geometry(tl), *g = &geo;
 	bool focused = tl_surface(tl) && tl->server->seat->keyboard_state.focused_surface == tl_surface(tl);
 	int t = BORDER_W;
-	double z = tl->server->zoom;
+	double z = tl->server->zoom * (1 - OPEN_POPIN * tl->faded);
 	int r = lround(WIN_RADIUS * z);
 	int gx = lround(g->x * z), gy = lround(g->y * z);
 	int gw = lround(g->width * z), gh = lround(g->height * z);
@@ -701,7 +702,9 @@ static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data
 
 /* Put one window where world + camera + zoom say it should be. */
 static void layout_toplevel(struct tinywl_toplevel *tl) {
-	double z = tl->server->zoom;
+	float alpha = open_alpha(tl);
+	tl->faded = 1.0f - alpha;
+	double z = tl->server->zoom, pz = z * (1 - OPEN_POPIN * tl->faded); /* pz: zoom while popping in */
 	/* The constellation view shows no windows, and a window that is not on screen (an X11 program's
 	 * helper windows exist long before, or without ever, being shown) gets no frame either. */
 	struct wlr_surface *surface = tl_surface(tl);
@@ -710,7 +713,8 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		/* a window can be anywhere on the canvas, but its top edge stays below the bar (usable.y is 0 until a bar exists) */
 		tl->wy = fmax(tl->wy, tl->star->cy - STAR_H / 2.0 + (tl->mode ? 0 : tl->server->usable.y - tl->server->full.y));
 	}
-	wlr_scene_node_set_position(&tl->scene_tree->node, lround(tl->wx * z), lround(tl->wy * z));
+	struct wlr_box geo = tl_geometry(tl); /* the smaller window keeps its centre */
+	wlr_scene_node_set_position(&tl->scene_tree->node, lround(tl->wx * z + (z - pz) * geo.width / 2), lround(tl->wy * z + (z - pz) * geo.height / 2));
 	if (tl->xsurface && surface && surface->mapped && tl->xsurface->width && tl->xsurface->height &&
 			(tl->xsurface->x != 0 || tl->xsurface->y != 0)) {
 		/* Every X11 window sits at X position (0,0), whatever its place on our canvas: X only delivers
@@ -718,9 +722,7 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		 * bigger than that. Which window gets the pointer follows Wayland pointer focus, not X geometry. */
 		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, tl->xsurface->width, tl->xsurface->height);
 	}
-	float alpha = open_alpha(tl);
-	tl->faded = 1.0f - alpha;
-	struct scale_arg arg = {z, tl->mode ? 0 : lround(WIN_RADIUS * z), alpha}; /* maximized windows have square corners */
+	struct scale_arg arg = {pz, tl->mode ? 0 : lround(WIN_RADIUS * pz), alpha}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
 	update_border(tl);
 }
