@@ -650,7 +650,23 @@ struct scale_arg {
 };
 
 static double mono_s(void);
-#define OPEN_SECS 0.18
+#define OPEN_SECS 0.3 /* Hyprland's speed 3 (units of 100 ms), as in the user's windowsIn */
+
+/* A CSS cubic-bezier(x1, y1, x2, y2): progress p (time, 0..1) in, eased value out. Bisection on x(t); 20 steps is plenty for a screen. */
+static double bezier(double x1, double y1, double x2, double y2, double p) {
+	double lo = 0, hi = 1, t = p, u;
+	for (int i = 0; i < 20; i++) {
+		t = (lo + hi) / 2;
+		u = 1 - t;
+		if (3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t < p) {
+			lo = t;
+		} else {
+			hi = t;
+		}
+	}
+	u = 1 - t;
+	return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
+}
 
 /* 0..1: how far a window that has just been mapped has faded in (and the end of the fade clears open_t0). */
 static float open_alpha(struct tinywl_toplevel *tl) {
@@ -662,7 +678,7 @@ static float open_alpha(struct tinywl_toplevel *tl) {
 		tl->open_t0 = 0;
 		return 1.0f;
 	}
-	return 1.0f - (float)pow(1.0 - p, 3.0);
+	return (float)bezier(0.05, 0.7, 0.1, 1.0, p); /* Hyprland's emphasizedDecel */
 }
 
 static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data) {
