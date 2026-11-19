@@ -218,6 +218,8 @@ struct tinywl_toplevel {
 	struct wlr_scene_rect *border;
 	struct wlr_scene_shadow *glow;
 	int mode; /* 0 normal, 1 maximized */
+	float faded;    /* 0 when fully shown; while it fades in, how much is still missing (the frame follows it) */
+	double open_t0; /* when it was mapped, while it is still fading in; 0 otherwise */
 	double saved_wx, saved_wy; /* where it was, and how big, before it left mode 0 */
 	int saved_w, saved_h;
 	struct wl_listener map;
@@ -356,12 +358,17 @@ static void update_border(struct tinywl_toplevel *tl) {
 	wlr_scene_node_set_enabled(&tl->glow->node, !tl->mode);
 	wlr_scene_rect_set_size(tl->border, gw + 2 * t, gh + 2 * t);
 	wlr_scene_rect_set_corner_radius(tl->border, r + t);
-	wlr_scene_rect_set_color(tl->border, focused ? BORDER_FOCUSED : BORDER_IDLE);
+	float a = 1.0f - tl->faded, bc[4], gc[4]; /* colours are premultiplied, so alpha scales every channel */
+	for (int i = 0; i < 4; i++) {
+		bc[i] = (focused ? BORDER_FOCUSED : BORDER_IDLE)[i] * a;
+		gc[i] = (focused ? GLOW_FOCUSED : GLOW_IDLE)[i] * a;
+	}
+	wlr_scene_rect_set_color(tl->border, bc);
 	wlr_scene_node_set_position(&tl->border->node, gx - t, gy - t);
 	int bloom = 2 * GLOW_SIGMA;
 	wlr_scene_shadow_set_size(tl->glow, gw + 2 * t + 2 * bloom, gh + 2 * t + 2 * bloom);
 	wlr_scene_shadow_set_corner_radius(tl->glow, r + t);
-	wlr_scene_shadow_set_color(tl->glow, focused ? GLOW_FOCUSED : GLOW_IDLE);
+	wlr_scene_shadow_set_color(tl->glow, gc);
 	wlr_scene_node_set_position(&tl->glow->node, gx - t - bloom, gy - t - bloom);
 }
 
@@ -639,7 +646,24 @@ static void update_current_star(struct tinywl_server *server) {
 struct scale_arg {
 	double z;
 	int radius;
+	float opacity;
 };
+
+static double mono_s(void);
+#define OPEN_SECS 0.18
+
+/* 0..1: how far a window that has just been mapped has faded in (and the end of the fade clears open_t0). */
+static float open_alpha(struct tinywl_toplevel *tl) {
+	if (tl->open_t0 == 0) {
+		return 1.0f;
+	}
+	double p = (mono_s() - tl->open_t0) / OPEN_SECS;
+	if (p >= 1.0) {
+		tl->open_t0 = 0;
+		return 1.0f;
+	}
+	return 1.0f - (float)pow(1.0 - p, 3.0);
+}
 
 static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data) {
 	struct scale_arg *arg = data;
@@ -656,6 +680,7 @@ static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data
 	}
 	wlr_scene_buffer_set_dest_size(sb, fmax(1, lround(w * z)), fmax(1, lround(h * z)));
 	wlr_scene_buffer_set_corner_radius(sb, arg->radius);
+	wlr_scene_buffer_set_opacity(sb, arg->opacity);
 }
 
 /* Put one window where world + camera + zoom say it should be. */
@@ -677,7 +702,9 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		 * bigger than that. Which window gets the pointer follows Wayland pointer focus, not X geometry. */
 		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, tl->xsurface->width, tl->xsurface->height);
 	}
-	struct scale_arg arg = {z, tl->mode ? 0 : lround(WIN_RADIUS * z)}; /* maximized windows have square corners */
+	float alpha = open_alpha(tl);
+	tl->faded = 1.0f - alpha;
+	struct scale_arg arg = {z, tl->mode ? 0 : lround(WIN_RADIUS * z), alpha}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
 	update_border(tl);
 }
@@ -685,7 +712,7 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 static void layout_unmanaged(struct xunmanaged *u) {
 	double z = u->server->zoom;
 	wlr_scene_node_set_position(&u->tree->node, lround((u->ax + u->xs->x) * z), lround((u->ay + u->xs->y) * z));
-	struct scale_arg arg = {z, 0};
+	struct scale_arg arg = {z, 0, 1.0f};
 	wlr_scene_node_for_each_buffer(&u->tree->node, scale_buffer, &arg);
 }
 
@@ -775,6 +802,26 @@ static void anim_step(struct tinywl_server *server) {
 	}
 }
 
+static void frames_all(struct tinywl_server *server) {
+	struct tinywl_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		wlr_output_schedule_frame(o->wlr_output);
+	}
+}
+
+/* One step of every window that is still fading in; true while any is. */
+static bool open_step(struct tinywl_server *server) {
+	bool any = false;
+	struct tinywl_toplevel *tl;
+	wl_list_for_each(tl, &server->toplevels, link) {
+		if (tl->open_t0) {
+			layout_toplevel(tl);
+			any |= tl->open_t0 != 0;
+		}
+	}
+	return any;
+}
+
 static void anim_to(struct tinywl_server *server, double cam_x, double cam_y, double zoom) {
 	double sx, sy;
 	screen_center(server, &sx, &sy);
@@ -787,10 +834,7 @@ static void anim_to(struct tinywl_server *server, double cam_x, double cam_y, do
 	server->anim.t0 = mono_s();
 	server->anim.dur = motion_duration(&server->motion);
 	server->anim.on = true;
-	struct tinywl_output *o;
-	wl_list_for_each(o, &server->outputs, link) {
-		wlr_output_schedule_frame(o->wlr_output); /* start the frames that will carry it */
-	}
+	frames_all(server); /* start the frames that will carry it */
 }
 
 /* The constellation view hides the bar (layer Top), the widgets (layer Bottom) and the windows. */
@@ -2660,10 +2704,11 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		scene, output->wlr_output);
 
 	anim_step(output->server);
+	bool opening = open_step(output->server);
 
 	/* Render the scene if needed and commit the output */
 	wlr_scene_output_commit(scene_output, NULL);
-	if (output->server->anim.on) {
+	if (output->server->anim.on || opening) {
 		wlr_output_schedule_frame(output->wlr_output); /* the glide is not done: another frame */
 	}
 
@@ -2822,6 +2867,10 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		layout_toplevel(toplevel);
 	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+	if (!toplevel->server->motion.reduce) {
+		toplevel->open_t0 = mono_s();
+		frames_all(toplevel->server);
+	}
 	layout_toplevel(toplevel); /* it is on screen from now on: show it, frame and all */
 	if (toplevel->xdg_toplevel && toplevel->xdg_toplevel->requested.fullscreen) { /* asked for before it could be answered */
 		toplevel_set_mode(toplevel, 1);
