@@ -54,6 +54,7 @@
 #include "keys.h"
 #include "palette.h"
 #include "motion.h"
+#include "night.h"
 #include "frame.h"
 #include "figure.h"
 
@@ -1368,6 +1369,53 @@ static void outputs_power(struct tinywl_server *server, bool on) {
 	}
 }
 
+/* Night light: the screens' colour follows the schedule in seiza.kdl (night { temp; from; to }), or `seiza night on|off|auto`.
+ * The scene hands this colour table (g_night_tr) to the output: a real display applies it in hardware; whether a nested or headless one does is up to its backend. */
+static double g_night_temp;                   /* kelvin at full warmth; 0 = no schedule */
+static int g_night_from = 20 * 60, g_night_to = 7 * 60; /* minutes of the day */
+static int g_night_force = -1;                /* -1 follow the schedule, 0 off, 1 on */
+static double g_night_last = 6500;            /* the temperature the screens were last set to */
+static struct wlr_color_transform *g_night_tr; /* NULL = colours untouched */
+static struct wl_event_source *g_night_timer;
+
+static void night_apply(struct tinywl_server *server) {
+	double f = g_night_force >= 0 ? g_night_force : 0;
+	if (g_night_force < 0 && g_night_temp > 0) {
+		time_t now = time(NULL);
+		struct tm tm;
+		localtime_r(&now, &tm);
+		f = night_factor(tm.tm_hour * 60 + tm.tm_min, g_night_from, g_night_to);
+	}
+	double warm = g_night_temp > 0 ? g_night_temp : 3500; /* `seiza night on` without a schedule */
+	double k = 6500 + (warm - 6500) * f, m[3];
+	if (k == g_night_last) {
+		return; /* nothing changed (this also covers daylight with nothing to undo) */
+	}
+	g_night_last = k;
+	night_rgb(k, m);
+	if (g_night_tr) {
+		wlr_color_transform_unref(g_night_tr);
+		g_night_tr = NULL;
+	}
+	if (k < 6500) {
+		/* Three 1D tables, like wlsunset's: a real display can take these straight into the hardware. */
+		uint16_t lut[3][256];
+		for (int c = 0; c < 3; c++) {
+			for (int i = 0; i < 256; i++) {
+				lut[c][i] = (uint16_t)lround(65535.0 * i / 255 * m[c]);
+			}
+		}
+		g_night_tr = wlr_color_transform_init_lut_3x1d(256, lut[0], lut[1], lut[2]);
+	}
+	frames_all(server);
+}
+
+static int night_tick(void *data) {
+	night_apply(data);
+	wl_event_source_timer_update(g_night_timer, 30000); /* the ramp is 30 minutes long: twice a minute is plenty */
+	return 0;
+}
+
 /* Any key, pointer move, button or scroll: the idle clock starts over, the dim lifts and sleeping screens wake. */
 static void idle_activity(struct tinywl_server *server) {
 	g_last_input_ms = now_ms();
@@ -1475,6 +1523,23 @@ static void frame_colors_load(struct tinywl_server *server) {
 			sscanf(off, "off=%d", &server->idle_off);
 		}
 	}
+	g_night_temp = 0;
+	g_night_from = 20 * 60;
+	g_night_to = 7 * 60;
+	if ((kdl = cfg_kdl(server, "night"))) {
+		const char *t = strstr(kdl, "temp="), *f = strstr(kdl, "from="), *e = strstr(kdl, "to=");
+		int h, m;
+		if (t) {
+			sscanf(t, "temp=%lf", &g_night_temp);
+		}
+		if (f && sscanf(f, "from=%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+			g_night_from = h * 60 + m;
+		}
+		if (e && sscanf(e, "to=%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
+			g_night_to = h * 60 + m;
+		}
+	}
+	night_apply(server);
 	server->panel_corner = 1;
 	server->panel_dwell = 150;
 	if ((kdl = cfg_kdl(server, "panel"))) {
@@ -1993,12 +2058,26 @@ static int op_focus_window(void *ud, int n) {
 	return -1;
 }
 
+static int op_night(void *ud, const char *mode) {
+	if (!strcmp(mode, "on")) {
+		g_night_force = 1;
+	} else if (!strcmp(mode, "off")) {
+		g_night_force = 0;
+	} else if (!strcmp(mode, "auto")) {
+		g_night_force = -1;
+	} else {
+		return -1;
+	}
+	night_apply(ud);
+	return 0;
+}
+
 static const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_new_constellation, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
 	op_toggle_maximize, op_set_figure, op_rename_star, op_add_star_at, op_move_star, op_debug_windows, op_debug_pointer, op_toggle_link,
-	op_switcher, op_focus_window, op_toggle_tile,
+	op_switcher, op_focus_window, op_toggle_tile, op_night,
 };
 
 /* Run the binding for this key combo, if there is one. True if it was one. */
@@ -2711,7 +2790,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	bool opening = open_step(output->server);
 
 	/* Render the scene if needed and commit the output */
-	wlr_scene_output_commit(scene_output, NULL);
+	struct wlr_scene_output_state_options night = {.color_transform = g_night_tr};
+	wlr_scene_output_commit(scene_output, &night);
 	if (output->server->anim.on || opening) {
 		wlr_output_schedule_frame(output->wlr_output); /* the glide is not done: another frame */
 	}
@@ -3739,6 +3819,8 @@ int main(int argc, char *argv[]) {
 	tile_load(&server);
 	g_last_input_ms = now_ms();
 	g_idle_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server.wl_display), idle_tick, &server);
+	g_night_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server.wl_display), night_tick, &server);
+	wl_event_source_timer_update(g_night_timer, 1000);
 	frame_colors_load(&server);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is

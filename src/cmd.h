@@ -38,6 +38,7 @@ struct cmd_ops {
 	void (*switcher)(void *ud);                      /* write the window list (most recent first) for seiza-switcher and start it */
 	int  (*focus_window)(void *ud, int n);           /* window n of that list (1-based): fly to its star and focus it; -1 if no such window */
 	void (*toggle_tile)(void *ud);                   /* tile or untile the star the camera is on */
+	int  (*night)(void *ud, const char *mode);       /* night light: "on", "off" or "auto" (the schedule); -1 if it is none of those */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other
