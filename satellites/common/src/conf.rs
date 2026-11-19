@@ -67,7 +67,7 @@ pub const OPTS: &[Opt] = &[
     o("sky", "labels", Flag, "on", "star names in the overview"),
     o("sky", "threads", Flag, "on", "the lines joining stars in the overview"),
     o("motion", "pan_secs", Num(0.05, 3.0), "0.35", "seconds a pan between altitudes takes"),
-    o("motion", "easing", Pick(&["drift", "glide", "float"]), "drift", "how a pan settles"),
+    o("motion", "easing", Pick(&["drift", "glide", "float", "calm", "bounce"]), "drift", "how a pan settles"),
     o("motion", "reduce", Flag, "off", "pans become jumps"),
     o("layout", "tile", Flag, "off", "every star tiles its windows (Alt+t flips one star)"),
     o("layout", "max", Num(1.0, 8.0), "3", "windows a tiled star holds before the rest wait outside it"),

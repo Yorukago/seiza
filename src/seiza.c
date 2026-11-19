@@ -653,46 +653,7 @@ struct scale_arg {
 static double mono_s(void);
 #define OPEN_SECS 0.3 /* Hyprland's speed 3 (units of 100 ms), as in the user's windowsIn */
 
-/* The curves of the user's Hyprland rice (ii). A y above 1 overshoots: that is the bounce. */
-static const struct { const char *name; double c[4]; } CURVES[] = {
-	{"emphasizedDecel",         {0.05, 0.70, 0.10, 1.00}},
-	{"expressiveFastSpatial",   {0.42, 1.67, 0.21, 0.90}},
-	{"expressiveSlowSpatial",   {0.39, 1.29, 0.35, 0.98}},
-	{"expressiveDefaultSpatial", {0.38, 1.21, 0.22, 1.00}},
-	{"emphasizedAccel",         {0.30, 0.00, 0.80, 0.15}},
-	{"standardDecel",           {0.00, 0.00, 0.00, 1.00}},
-	{"menu_decel",              {0.10, 1.00, 0.00, 1.00}},
-	{"menu_accel",              {0.52, 0.03, 0.72, 0.08}},
-	{"stall",                   {1.00, -0.10, 0.70, 0.85}},
-};
 #define OPEN_CURVE "expressiveFastSpatial" /* the open animation's curve; emphasizedDecel is the calm one */
-
-/* The curve called `name`; an unknown name gives the first one. */
-static const double *curve_named(const char *name) {
-	for (size_t i = 0; i < sizeof(CURVES) / sizeof(CURVES[0]); i++) {
-		if (!strcmp(CURVES[i].name, name)) {
-			return CURVES[i].c;
-		}
-	}
-	return CURVES[0].c;
-}
-
-/* A CSS cubic-bezier(x1, y1, x2, y2): progress p (time, 0..1) in, eased value out. Bisection on x(t); 20 steps is plenty for a screen. */
-static double bezier(const double c[4], double p) {
-	double x1 = c[0], y1 = c[1], x2 = c[2], y2 = c[3];
-	double lo = 0, hi = 1, t = p, u;
-	for (int i = 0; i < 20; i++) {
-		t = (lo + hi) / 2;
-		u = 1 - t;
-		if (3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t < p) {
-			lo = t;
-		} else {
-			hi = t;
-		}
-	}
-	u = 1 - t;
-	return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
-}
 
 /* How far along its open animation a window is: 0 at the start, 1 at the end, past 1 while it bounces (the end clears open_t0). */
 static float open_alpha(struct tinywl_toplevel *tl) {
@@ -704,7 +665,7 @@ static float open_alpha(struct tinywl_toplevel *tl) {
 		tl->open_t0 = 0;
 		return 1.0f;
 	}
-	return (float)bezier(curve_named(OPEN_CURVE), p); /* may pass 1.0: the window overshoots */
+	return (float)motion_bezier(motion_curve(OPEN_CURVE), p); /* may pass 1.0: the window overshoots */
 }
 
 static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data) {

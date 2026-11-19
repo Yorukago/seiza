@@ -81,7 +81,7 @@ pub fn pages() -> Vec<Page> {
         ]},
         Page { name: "motion", blurb: "seiza is never in a hurry.", rows: vec![
             row("motion/pan_secs", "pan duration", "how long a pan between altitudes takes", Ctl::Slider(0.1, 2.0, 0.05), "0.35"),
-            row("motion/easing", "easing", "how a pan settles", Ctl::Choice(&["drift", "glide", "float"]), "drift"),
+            row("motion/easing", "easing", "how a pan settles", Ctl::Choice(&["drift", "glide", "float", "calm", "bounce"]), "drift"),
             tog("motion/reduce", "reduce motion", "pans become jumps", "0"),
         ]},
         Page { name: "yoru", blurb: "how the launcher and the menus behave.", rows: vec![
