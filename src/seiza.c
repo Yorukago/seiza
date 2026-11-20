@@ -4002,6 +4002,7 @@ int main(int argc, char *argv[]) {
 	wl_list_remove(&server.new_xdg_popup.link);
 	wl_list_remove(&server.new_layer_surface.link);
 	wl_list_remove(&server.new_lock.link);
+	wl_list_remove(&new_deco.link); /* wlroots asserts that no listener is left on the manager when the display goes */
 
 	wl_list_remove(&server.cursor_motion.link);
 	wl_list_remove(&server.cursor_motion_absolute.link);
