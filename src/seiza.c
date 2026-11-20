@@ -22,6 +22,8 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_ext_image_copy_capture_v1.h>
 #include <wlr/types/wlr_ext_image_capture_source_v1.h>
 #include <wlr/types/wlr_data_device.h>
@@ -180,6 +182,10 @@ struct tinywl_server {
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
 	struct wl_listener pointer_focus_change;
+	struct wlr_pointer_constraints_v1 *constraints;
+	struct wlr_relative_pointer_manager_v1 *relative_pointer;
+	struct wlr_pointer_constraint_v1 *constraint; /* the one in force on the pointer-focused surface, or NULL */
+	struct wl_listener new_constraint, constraint_destroy;
 	struct wl_listener request_set_selection;
 	struct wl_list keyboards;
 	enum tinywl_cursor_mode cursor_mode;
@@ -2247,6 +2253,43 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 	}
 }
 
+/* A program (a game, through XWayland) can lock the pointer: it then reads raw motion and the cursor stays put.
+ * shortcut: only a lock holds the pointer, a confine is accepted but not enforced; upgrade if a game needs real confinement. */
+static void constraint_destroyed(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(listener, server, constraint_destroy);
+	wl_list_remove(&server->constraint_destroy.link);
+	server->constraint = NULL;
+}
+
+static void constraint_set(struct tinywl_server *server, struct wlr_pointer_constraint_v1 *c) {
+	if (server->constraint == c) {
+		return;
+	}
+	if (server->constraint) {
+		wl_list_remove(&server->constraint_destroy.link);
+		wlr_pointer_constraint_v1_send_deactivated(server->constraint);
+	}
+	server->constraint = c;
+	if (c) {
+		server->constraint_destroy.notify = constraint_destroyed;
+		wl_signal_add(&c->events.destroy, &server->constraint_destroy);
+		wlr_pointer_constraint_v1_send_activated(c);
+	}
+}
+
+static void server_new_constraint(struct wl_listener *listener, void *data) {
+	struct tinywl_server *server = wl_container_of(listener, server, new_constraint);
+	struct wlr_pointer_constraint_v1 *c = data;
+	if (c->surface == server->seat->pointer_state.focused_surface) { /* asked for while already pointed at */
+		constraint_set(server, c);
+	}
+}
+
+static bool pointer_locked(const struct tinywl_server *server) {
+	return server->constraint && server->constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
+		&& server->cursor_mode == TINYWL_CURSOR_PASSTHROUGH;
+}
+
 static void seat_pointer_focus_change(struct wl_listener *listener, void *data) {
 	struct tinywl_server *server = wl_container_of(
 			listener, server, pointer_focus_change);
@@ -2257,6 +2300,7 @@ static void seat_pointer_focus_change(struct wl_listener *listener, void *data) 
 	if (event->new_surface == NULL) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 	}
+	constraint_set(server, event->new_surface ? wlr_pointer_constraints_v1_constraint_for_surface(server->constraints, event->new_surface, server->seat) : NULL);
 }
 
 static void seat_request_set_selection(struct wl_listener *listener, void *data) {
@@ -2573,6 +2617,13 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	 * special configuration applied for the specific input device which
 	 * generated the event. You can pass NULL for the device if you want to move
 	 * the cursor around without any input. */
+	/* Raw motion for programs that read it (games), in the window's own pixels. */
+	double z = server->zoom > 0 ? server->zoom : 1;
+	wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer, server->seat, (uint64_t)event->time_msec * 1000,
+			event->delta_x / z, event->delta_y / z, event->unaccel_dx / z, event->unaccel_dy / z);
+	if (pointer_locked(server)) {
+		return; /* the cursor stays where it is while a program holds the pointer */
+	}
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 			event->delta_x, event->delta_y);
 	process_cursor_motion(server, event->time_msec);
@@ -3795,6 +3846,10 @@ int main(int argc, char *argv[]) {
 	wlr_data_control_manager_v1_create(server.wl_display); /* SEIZA: lets wl-paste --watch see the clipboard (make clipboard) */
 	/* SEIZA: screenshots (grim) and screen sharing (portals) */
 	wlr_screencopy_manager_v1_create(server.wl_display);
+	server.relative_pointer = wlr_relative_pointer_manager_v1_create(server.wl_display);
+	server.constraints = wlr_pointer_constraints_v1_create(server.wl_display);
+	server.new_constraint.notify = server_new_constraint;
+	wl_signal_add(&server.constraints->events.new_constraint, &server.new_constraint);
 	wlr_ext_output_image_capture_source_manager_v1_create(server.wl_display, 1);
 	wlr_ext_image_copy_capture_manager_v1_create(server.wl_display, 1);
 
@@ -4003,6 +4058,10 @@ int main(int argc, char *argv[]) {
 	wl_list_remove(&server.new_layer_surface.link);
 	wl_list_remove(&server.new_lock.link);
 	wl_list_remove(&new_deco.link); /* wlroots asserts that no listener is left on the manager when the display goes */
+	wl_list_remove(&server.new_constraint.link);
+	if (server.constraint) {
+		wl_list_remove(&server.constraint_destroy.link);
+	}
 
 	wl_list_remove(&server.cursor_motion.link);
 	wl_list_remove(&server.cursor_motion_absolute.link);
