@@ -320,6 +320,14 @@ static void tl_set_maximized(struct tinywl_toplevel *tl, bool on) {
 	}
 }
 
+static void tl_set_fullscreen(struct tinywl_toplevel *tl, bool on) {
+	if (tl->xsurface) {
+		wlr_xwayland_surface_set_fullscreen(tl->xsurface, on);
+	} else {
+		wlr_xdg_toplevel_set_fullscreen(tl->xdg_toplevel, on);
+	}
+}
+
 static struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, double x, double y, double *sx, double *sy) {
 	if (tl->xsurface) {
 		return tl->xsurface->surface ? wlr_surface_surface_at(tl->xsurface->surface, x, y, sx, sy) : NULL;
@@ -1764,8 +1772,9 @@ static struct tinywl_toplevel *focused_toplevel(struct tinywl_server *server) {
 	return wl_container_of(server->toplevels.next, (struct tinywl_toplevel *)NULL, link);
 }
 
-/* Maximized fills what the bar leaves over, inside the window's star; the window's old place is remembered and comes back on mode 0.
- * Dragging or resizing a maximized window un-maximizes it (begin_interactive). */
+/* Mode 1 (maximized) fills what the bar leaves over, inside the window's star; mode 2 (fullscreen, asked for by the program)
+ * fills the whole output and hides the bar while that star is in view (output_frame). The window's old place is remembered
+ * and comes back on mode 0. Dragging or resizing a maximized or fullscreen window un-maximizes it (begin_interactive). */
 static void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
 	struct tinywl_server *server = tl->server;
 	if (mode == tl->mode || !tl->star || !tl_ready(tl)) {
@@ -1784,13 +1793,14 @@ static void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
 		tl->wy = tl->saved_wy;
 		tl_set_size(tl, tl->saved_w, tl->saved_h);
 	} else {
-		struct wlr_box r = server->usable;
+		struct wlr_box r = mode == 2 ? server->full : server->usable;
 		int w = r.width ? r.width : STAR_W, h = r.height ? r.height : STAR_H;
 		tl->wx = tl->star->cx - STAR_W / 2.0 + (r.width ? r.x - server->full.x : 0);
 		tl->wy = tl->star->cy - STAR_H / 2.0 + (r.height ? r.y - server->full.y : 0);
 		tl_set_size(tl, w, h);
 	}
 	tl_set_maximized(tl, mode == 1);
+	tl_set_fullscreen(tl, mode == 2);
 	layout_toplevel(tl);
 	tile_star(server, tl->star);
 	if (tl->star == server->current_star) {
@@ -1936,7 +1946,7 @@ static void op_toggle_tile(void *ud) {
 static void op_toggle_maximize(void *ud) {
 	struct tinywl_toplevel *tl = focused_toplevel(ud);
 	if (tl) {
-		toplevel_set_mode(tl, tl->mode == 1 ? 0 : 1);
+		toplevel_set_mode(tl, tl->mode ? 0 : 1); /* also the way out of a fullscreen that has no key of its own */
 	}
 }
 
@@ -2789,6 +2799,15 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	anim_step(output->server);
 	bool opening = open_step(output->server);
 
+	/* A fullscreen window on the star in view covers the bar (layer Top); the constellation view hides it anyway. */
+	bool covered = false;
+	struct tinywl_toplevel *fs;
+	wl_list_for_each(fs, &output->server->toplevels, link) {
+		struct wlr_surface *fs_surf = tl_surface(fs);
+		covered |= fs->mode == 2 && fs->star == output->server->current_star && fs_surf && fs_surf->mapped;
+	}
+	wlr_scene_node_set_enabled(&output->server->layers[2]->node, !output->server->overview && !covered);
+
 	/* Render the scene if needed and commit the output */
 	struct wlr_scene_output_state_options night = {.color_transform = g_night_tr};
 	wlr_scene_output_commit(scene_output, &night);
@@ -2957,7 +2976,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	}
 	layout_toplevel(toplevel); /* it is on screen from now on: show it, frame and all */
 	if (toplevel->xdg_toplevel && toplevel->xdg_toplevel->requested.fullscreen) { /* asked for before it could be answered */
-		toplevel_set_mode(toplevel, 1);
+		toplevel_set_mode(toplevel, 2);
 		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, true);
 	}
 	rules_apply(toplevel);
@@ -3041,9 +3060,10 @@ static void begin_interactive(struct tinywl_toplevel *toplevel,
 	 * consumes them itself, to move or resize windows. */
 	struct tinywl_server *server = toplevel->server;
 
-	if (toplevel->mode == 1) { /* leave maximized in place; a move also gets the old size back */
+	if (toplevel->mode) { /* leave maximized in place; a move also gets the old size back */
 		toplevel->mode = 0;
 		tl_set_maximized(toplevel, false);
+		tl_set_fullscreen(toplevel, false);
 		if (mode == TINYWL_CURSOR_MOVE) {
 			tl_set_size(toplevel, toplevel->saved_w, toplevel->saved_h);
 		}
@@ -3124,9 +3144,9 @@ static void xdg_toplevel_request_fullscreen(
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
 	if (toplevel->xdg_toplevel->base->initialized) {
-		/* Fullscreen is a maximize that keeps the bar: the program still gets to hide its own chrome. */
+		/* Fullscreen covers the bar too (games, video): Alt+m brings the window back. */
 		bool on = toplevel->xdg_toplevel->requested.fullscreen;
-		toplevel_set_mode(toplevel, on ? 1 : 0);
+		toplevel_set_mode(toplevel, on ? 2 : 0);
 		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, on);
 		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
 	}
@@ -3291,9 +3311,9 @@ static void xwl_request_activate(struct wl_listener *listener, void *data) {
 }
 
 static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
-	/* Fullscreen is a maximize that keeps the bar, as for Wayland windows. */
+	/* Fullscreen covers the bar, as for Wayland windows. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
-	toplevel_set_mode(toplevel, toplevel->xsurface->fullscreen ? 1 : 0);
+	toplevel_set_mode(toplevel, toplevel->xsurface->fullscreen ? 2 : 0);
 }
 
 static void server_new_xwayland_toplevel(struct tinywl_server *server, struct wlr_xwayland_surface *xs) {
