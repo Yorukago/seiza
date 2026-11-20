@@ -70,7 +70,7 @@ pub const OPTS: &[Opt] = &[
     o("motion", "pan_secs", Num(0.05, 3.0), "0.35", "seconds a pan between altitudes takes"),
     o("motion", "easing", Pick(&["drift", "glide", "float", "calm", "bounce"]), "drift", "how a pan settles"),
     o("motion", "reduce", Flag, "off", "pans become jumps"),
-    o("layout", "tile", Flag, "off", "every star tiles its windows (Alt+t flips one star)"),
+    o("layout", "tile", Flag, "off", "every star tiles its windows (Super+t flips one star)"),
     o("layout", "max", Num(1.0, 8.0), "3", "windows a tiled star holds before the rest wait outside it"),
     o("layout", "gap", Num(0.0, 64.0), "10", "pixels between tiles and around them"),
     o("layout", "master", Num(0.2, 0.8), "0.55", "how much of the width the first window takes when others are beside it"),
@@ -83,7 +83,7 @@ pub const OPTS: &[Opt] = &[
     o("idle", "dim", Num(0.0, 86400.0), "0", "seconds without input until the screen dims; 0 is never"),
     o("idle", "lock", Num(0.0, 86400.0), "0", "seconds without input until the screen locks; 0 is never"),
     o("idle", "off", Num(0.0, 86400.0), "0", "seconds without input until the screens switch off; 0 is never"),
-    o("panel", "corner", Pick(&["top-right", "top-left", "bottom-right", "bottom-left", "off"]), "top-right", "the screen corner that opens the panel when the pointer rests there; Alt+p always does"),
+    o("panel", "corner", Pick(&["top-right", "top-left", "bottom-right", "bottom-left", "off"]), "top-right", "the screen corner that opens the panel when the pointer rests there; Super+p always does"),
     o("panel", "weather", Flag, "off", "a weather card in the panel (asks wttr.in; uses the weather place and units)"),
     o("panel", "calendar", Flag, "off", "this month's calendar in the panel"),
     o("panel", "dwell", Num(0.0, 2000.0), "150", "milliseconds the pointer rests in the corner first"),
@@ -108,7 +108,7 @@ pub const ACTIONS: &[(&str, usize, usize, &str)] = &[
     ("resize-window", 2, 2, "resize the focused window by dw dh"),
     ("focus", 2, 2, "focus the neighbouring window: dx dy, each -1, 0 or 1"),
     ("cycle-window", 0, 0, "focus the next window"),
-    ("switch", 0, 0, "open the window switcher (Alt+Tab)"),
+    ("switch", 0, 0, "open the window switcher (Super+Tab)"),
     ("close-window", 0, 0, "close the focused window"),
     ("maximize", 0, 0, "maximize or restore the focused window"),
     ("tile", 0, 0, "tile or untile the windows of the star you are in"),
@@ -227,9 +227,9 @@ pub fn parse(text: &str) -> Conf {
             "def" => {}
             "binds" => for b in kids {
                 let combo = b.name().value();
-                let acts: Result<Vec<String>, String> = b.children().map(|k| k.nodes().iter().map(|a| action(a, &defs)).collect()).unwrap_or_else(|| Err("write the actions in braces: Alt+l { spawn \"kitty\"; }".into()));
+                let acts: Result<Vec<String>, String> = b.children().map(|k| k.nodes().iter().map(|a| action(a, &defs)).collect()).unwrap_or_else(|| Err("write the actions in braces: Super+l { spawn \"kitty\"; }".into()));
                 match acts {
-                    _ if !combo_ok(combo) => c.errors.push(at(text, b.span().offset(), format!("`{combo}` is not a key combo, like Alt+Shift+l"))),
+                    _ if !combo_ok(combo) => c.errors.push(at(text, b.span().offset(), format!("`{combo}` is not a key combo, like Super+Shift+l"))),
                     Ok(a) if !a.is_empty() => c.binds.push((combo.into(), a.join("; "))),
                     Ok(_) => c.errors.push(at(text, b.span().offset(), format!("{combo} does nothing"))),
                     Err(e) => c.errors.push(at(text, b.span().offset(), e)),
@@ -306,7 +306,7 @@ pub fn load() -> Option<Conf> {
 }
 
 /// One part of the config in the old flat file format, for the compositor:
-/// `keys` (`Alt+l = cmd`), `autostart` (one command a line), or a settings file such as `motion` (`key=value`).
+/// `keys` (`Super+l = cmd`), `autostart` (one command a line), or a settings file such as `motion` (`key=value`).
 pub fn export(c: &Conf, name: &str) -> String {
     match name {
         "rules" => c.rules.iter().map(|r| format!("{r}\n")).collect(),
@@ -367,11 +367,11 @@ pub fn template() -> String {
         }
         s += "}\n";
     }
-    s += "\n// Key bindings. Added to the built-in ones (`seiza help`, Alt+h, lists them); same combo replaces.\n// Modifiers: Alt Shift Ctrl Super. Actions:\n";
+    s += "\n// Key bindings. Added to the built-in ones (`seiza help`, Super+h, lists them); same combo replaces.\n// Modifiers: Alt Shift Ctrl Super. Actions:\n";
     for (name, _, _, doc) in ACTIONS {
         s += &format!("//   {name}: {doc}\n");
     }
-    s += "//   spawn \"command\": run a command\n// binds {\n//     Alt+Return { spawn \"kitty\"; }\n//     Alt+g      { goto 1; }\n//     Alt+Shift+g { my-thing; }\n// }\n";
+    s += "//   spawn \"command\": run a command\n// binds {\n//     Super+Return { spawn \"kitty\"; }\n//     Super+g      { goto 1; }\n//     Super+Shift+g { my-thing; }\n// }\n";
     s += "\n// Your own names for a few actions in a row (a def cannot use another def):\n// def my-thing { goto 1; spawn \"notify-send hi\"; }\n";
     s += "\n// Where a window goes when it opens (the first rule that matches wins). app is the app id\n// (seiza debug-windows shows them), title is a part of the title, star is a star's name,\n// mode is float or maximize, w and h a starting size.\n// rule app=\"steam\" star=\"games\" mode=\"maximize\"\n// rule app=\"pavucontrol\" w=700 h=500\n";
     s += "\n// Programs to start with the session. Leave the block out to start the built-in ones;\n// an empty block starts nothing.\n// autostart {\n//     spawn \"seiza-starfield\"\n//     spawn \"seiza-bar\"\n//     spawn \"seiza-widgets\"\n// }\n";
@@ -394,24 +394,24 @@ pub(crate) mod tests {
 
     #[test]
     fn good_file_reads_and_exports_the_old_formats() {
-        let c = parse("window { radius 20; glow bright }\nmotion { reduce on; pan_secs 0.5 }\nbinds { Alt+Shift+g { goto 1; spawn \"kitty -e fish\" } }\ndef both { focus 1 0; close-window }\nbinds { Alt+b { both } }\nautostart { spawn \"seiza-bar\" }");
+        let c = parse("window { radius 20; glow bright }\nmotion { reduce on; pan_secs 0.5 }\nbinds { Super+Shift+g { goto 1; spawn \"kitty -e fish\" } }\ndef both { focus 1 0; close-window }\nbinds { Super+b { both } }\nautostart { spawn \"seiza-bar\" }");
         assert!(c.errors.is_empty(), "{:?}", c.errors);
         assert_eq!(export(&c, "frame"), "glow=bright\nradius=20\n");
         assert_eq!(export(&c, "motion"), "pan_secs=0.5\nreduce=1\n");
-        assert_eq!(export(&c, "keys"), "Alt+Shift+g = seiza goto 1; kitty -e fish\nAlt+b = seiza focus 1 0; seiza close-window\n");
+        assert_eq!(export(&c, "keys"), "Super+Shift+g = seiza goto 1; kitty -e fish\nSuper+b = seiza focus 1 0; seiza close-window\n");
         assert_eq!(export(&c, "autostart"), "seiza-bar\n");
     }
 
     #[test]
     fn mistakes_are_named_with_their_line_and_the_rest_still_loads() {
-        let c = parse("window {\n  radius big\n  glow loud\n  radsius 3\n  border 4\n}\nbinds {\n  Alt+x { warp 1 }\n  Hyper+x { quit }\n  Alt+q { goto }\n  Alt+z { goto 2 }\n}\nforecast {}\nautostart {}");
+        let c = parse("window {\n  radius big\n  glow loud\n  radsius 3\n  border 4\n}\nbinds {\n  Super+x { warp 1 }\n  Hyper+x { quit }\n  Super+q { goto }\n  Super+z { goto 2 }\n}\nforecast {}\nautostart {}");
         let all = c.errors.join("\n");
         for want in ["seiza.kdl:2: window.radius: expected a number", "seiza.kdl:3: window.glow: `loud` is not one of off, soft, bright", "seiza.kdl:4: unknown option `window.radsius` (valid: radius, border, glow)", "seiza.kdl:8: unknown action `warp`", "seiza.kdl:9: `Hyper+x` is not a key combo", "seiza.kdl:10: `goto` takes 1 value(s), got 0", "seiza.kdl:13: unknown section `forecast`"] {
             assert!(all.contains(want), "missing {want:?} in:\n{all}");
         }
         assert_eq!(c.errors.len(), 7, "{all}");
         assert_eq!(export(&c, "frame"), "border=4\n");
-        assert_eq!(export(&c, "keys"), "Alt+z = seiza goto 2\n");
+        assert_eq!(export(&c, "keys"), "Super+z = seiza goto 2\n");
         assert_eq!(export(&c, "autostart"), "#\n");
     }
 

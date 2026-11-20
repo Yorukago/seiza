@@ -66,7 +66,7 @@ impl Editor {
                         self.ui.msg = reply.replacen("error: ", "", 1);
                         break; // the rest depended on this one
                     }
-                    Ok(_) => self.ui.msg = if c.starts_with("seiza figure") { "stars laid out. press alt+o to see them..".into() } else { String::new() },
+                    Ok(_) => self.ui.msg = if c.starts_with("seiza figure") { "stars laid out. press super+o to see them..".into() } else { String::new() },
                     Err(e) => {
                         self.ui.msg = format!("couldn't reach seiza: {e}");
                         break;
@@ -213,7 +213,7 @@ impl KeyboardHandler for Editor {
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
-        self.chord = m.ctrl || m.alt;
+        self.chord = m.ctrl || m.alt || m.logo;
     }
 }
 

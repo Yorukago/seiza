@@ -79,7 +79,7 @@ struct star {
 	float color[4];
 	char apps[CSTAR_APPS_MAX][256]; /* remembered launch commands (never auto-launched) */
 	int napps;
-	int tiled; /* 0 follows the layout config, 1 tiled, -1 floating (Alt+t) */
+	int tiled; /* 0 follows the layout config, 1 tiled, -1 floating (Super+t) */
 };
 
 /* An X11 override-redirect window: a menu, a tooltip, a drop-down. The program places it itself,
@@ -767,7 +767,7 @@ static void anim_cancel(struct tinywl_server *server);
  * fixed on screen (so it zooms toward the pointer, like a map). */
 static void zoom_at(struct tinywl_server *server, double factor) {
 	if (server->overview) {
-		return; /* the overview has its own fixed fit; leave it with Alt+O */
+		return; /* the overview has its own fixed fit; leave it with Super+O */
 	}
 	anim_cancel(server);
 	double z = fmin(ZOOM_MAX, fmax(ZOOM_MIN, server->zoom * factor));
@@ -918,9 +918,9 @@ static void overview_pointer(struct tinywl_server *server) {
 	}
 }
 
-static bool alt_held(struct tinywl_server *server) {
+static bool main_mod_held(struct tinywl_server *server) {
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	return kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_ALT);
+	return kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO);
 }
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel) {
@@ -1248,7 +1248,7 @@ static int op_debug_pointer(void *ud, double x, double y, int act) {
 			x, y, server->cursor->x, server->cursor->y, server->cam_x, server->cam_y, server->zoom, (void *)t, (void *)surf, sx, sy);
 	}
 	if (act == 2) {
-		zoom_at(server, 1 / 1.1); /* one wheel notch out, like Alt+scroll */
+		zoom_at(server, 1 / 1.1); /* one wheel notch out, like Super+scroll */
 		process_cursor_motion(server, now_ms += 50);
 		wlr_seat_pointer_notify_frame(server->seat);
 	}
@@ -2092,8 +2092,8 @@ static const struct cmd_ops seiza_ops = {
 
 /* Run the binding for this key combo, if there is one. True if it was one. */
 static bool handle_keybinding(struct tinywl_server *server, uint32_t mods, xkb_keysym_t sym) {
-	/* Alt+Escape always quits, even if the keys file is broken or rebinds it. */
-	if (mods == KMOD_ALT && xkb_keysym_to_lower(sym) == XKB_KEY_Escape) {
+	/* Super+Escape (and Alt+Escape) always quit, even if the keys file is broken or rebinds them. */
+	if ((mods == KMOD_SUPER || mods == KMOD_ALT) && xkb_keysym_to_lower(sym) == XKB_KEY_Escape) {
 		op_quit(server);
 		return true;
 	}
@@ -2641,13 +2641,13 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	/* SEIZA: Alt + left-drag moves the window under the cursor, Alt +
+	/* SEIZA: Super + left-drag moves the window under the cursor, Super +
 	 * right-drag resizes it from the nearest corner, even when the app draws
 	 * no title bar. The click is not forwarded to the app. */
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
 	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
 			(event->button == BTN_LEFT || event->button == BTN_RIGHT) &&
-			kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_ALT)) {
+			kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO)) {
 		double sx, sy;
 		struct wlr_surface *surface = NULL;
 		struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
@@ -2667,7 +2667,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			}
 			return;
 		}
-		/* Alt-click on empty space: grab the canvas and drag it. */
+		/* Super-click on empty space: grab the canvas and drag it. */
 		server->cursor_mode = TINYWL_CURSOR_PAN;
 		server->pan_last_x = server->cursor->x;
 		server->pan_last_y = server->cursor->y;
@@ -2701,9 +2701,9 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_axis_event *event = data;
 	idle_activity(server);
 
-	/* SEIZA: Alt + scroll zooms toward the cursor (scroll up = zoom in) and is
+	/* SEIZA: Super + scroll zooms toward the cursor (scroll up = zoom in) and is
 	 * not forwarded to the app. */
-	if (!server->locked && alt_held(server) && event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+	if (!server->locked && main_mod_held(server) && event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
 		zoom_at(server, event->delta < 0 ? 1.1 : 1 / 1.1);
 		return;
 	}
@@ -3144,7 +3144,7 @@ static void xdg_toplevel_request_fullscreen(
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
 	if (toplevel->xdg_toplevel->base->initialized) {
-		/* Fullscreen covers the bar too (games, video): Alt+m brings the window back. */
+		/* Fullscreen covers the bar too (games, video): Super+m brings the window back. */
 		bool on = toplevel->xdg_toplevel->requested.fullscreen;
 		toplevel_set_mode(toplevel, on ? 2 : 0);
 		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, on);

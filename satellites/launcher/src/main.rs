@@ -81,7 +81,7 @@ struct Launcher {
     dirty: bool,
     exit: bool,
     chord: bool, // ctrl or alt held: not typing
-    windows: bool, // the window switcher: Tab steps on, letting go of Alt picks
+    windows: bool, // the window switcher: Tab steps on, letting go of Super picks
     opened: Option<Instant>,
     closing: Option<Instant>,
     shown: f32, // the visibility last drawn
@@ -259,11 +259,11 @@ impl KeyboardHandler for Launcher {
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
-        if self.windows && self.chord && !m.alt && !m.ctrl && self.closing.is_none() {
+        if self.windows && self.chord && !m.alt && !m.ctrl && !m.logo && self.closing.is_none() {
             let i = self.ui.sel;
             self.launch(i);
         }
-        self.chord = m.ctrl || m.alt;
+        self.chord = m.ctrl || m.alt || m.logo;
     }
 }
 
@@ -434,7 +434,7 @@ fn main() {
     app.ui.picker = clip || windows;
     app.ui.refresh();
     if windows && app.ui.item(1).is_some() {
-        app.ui.select(1); // the window before this one: Alt+Tab flips back and forth
+        app.ui.select(1); // the window before this one: Super+Tab flips back and forth
     }
 
     while !app.exit {

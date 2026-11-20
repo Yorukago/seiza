@@ -47,7 +47,7 @@ switches it on and off.
 | `focus DX DY` | focus the nearest window in that direction, e.g. `focus -1 0` |
 | `focus-window N` | focus window N of the last `switch` list (flies to its star) |
 | `cycle-window` | focus the next window |
-| `switch` | open the Alt+Tab window list |
+| `switch` | open the Super+Tab window list |
 | `move-window DX DY` / `resize-window DX DY` | nudge the focused window, in pixels |
 | `maximize` / `tile` | toggle maximize for the focused window / tiling for the current star |
 | `close-window` | close the focused window |

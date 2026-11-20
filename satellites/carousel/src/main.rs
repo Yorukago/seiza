@@ -254,7 +254,7 @@ impl KeyboardHandler for Carousel {
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
-        self.chord = m.ctrl || m.alt;
+        self.chord = m.ctrl || m.alt || m.logo;
     }
 }
 

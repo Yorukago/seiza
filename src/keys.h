@@ -3,8 +3,8 @@
  * shipped defaults are written in the same syntax, so there is one mechanism
  * and the user's file simply overrides them.
  *
- *     Alt+Shift+Left = seiza pan -100 0
- *     Alt+t          = kitty
+ *     Super+Shift+Left = seiza pan -100 0
+ *     Super+t          = kitty
  *     shell          = /usr/bin/ysh        # optional: shell used for non-seiza commands
  *
  * Key names are xkbcommon names for whatever the active layout produces. */

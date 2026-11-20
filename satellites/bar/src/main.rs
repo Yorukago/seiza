@@ -1,5 +1,5 @@
 //! seiza-bar: a top bar for Seiza. Shows the constellation, one pill per star
-//! (click or Alt+1..9 to fly there; dots count its windows) and the clock.
+//! (click or Super+1..9 to fly there; dots count its windows) and the clock.
 mod tray;
 
 use std::{process::Command, thread, time::{Duration, Instant}};

@@ -35,7 +35,7 @@ const WHAT: &[(&str, &str)] = &[
     ("seiza cycle-window", "next window"),
     ("seiza-help", "this help"),
     ("seiza tile", "tile or untile this star"),
-    ("seiza switch", "switch windows (hold Alt, Tab steps)"),
+    ("seiza switch", "switch windows (hold Super, Tab steps)"),
     ("seiza-launcher --clip", "clipboard history"),
     ("seiza-launcher", "open the launcher"),
     ("seiza-shot area", "screenshot of an area"),
@@ -73,7 +73,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("seiza focus DX DY", "focus the nearest window that way"),
     ("seiza maximize / close-window", "the focused window"),
     ("seiza tile", "tile or untile this star (remembered)"),
-    ("seiza switch", "the window switcher (Alt+Tab)"),
+    ("seiza switch", "the window switcher (Super+Tab)"),
     ("seiza cycle-window", "focus the next window"),
     ("seiza reload-config", "re-read keys, motion and the frame"),
     ("seiza relaunch", "restart the satellites"),
@@ -89,7 +89,7 @@ const GUIDE: &[(&str, &str)] = &[
     ("satellite", "a small program Seiza starts: bar, sky, launcher..."),
     ("launcher", "type to find an app; Tab flips list and stars."),
     ("quick answers", "launcher: 2*(3+4), 5 km to mi, :moon. Enter copies."),
-    ("tiling", "a tiled star arranges its windows; Alt+t flips it."),
+    ("tiling", "a tiled star arranges its windows; Super+t flips it."),
     ("rules", "rule in seiza.kdl: send an app to a star, size it."),
     ("cards", "drag to pin a card to a star; right-click moves it on."),
     ("settings", "colors, frame, bar, sky and motion; most apply at once."),
@@ -100,14 +100,14 @@ const GUIDE: &[(&str, &str)] = &[
 /// Copy these into ~/.config/seiza/seiza.kdl.
 const RECIPES: &[(&str, &str)] = &[
     ("hide the bar", "bar { autohide on }  The bar becomes a thin strip at the top edge and grows when the pointer touches it."),
-    ("tile every star", "layout { tile on; max 3; gap 10 }  The first 3 windows of a star are laid out for you. Alt+t flips one star."),
+    ("tile every star", "layout { tile on; max 3; gap 10 }  The first 3 windows of a star are laid out for you. Super+t flips one star."),
     ("send an app to a star", "rule app=\"steam\" star=\"games\" mode=\"maximize\"  The first rule that matches wins. seiza debug-windows shows app ids."),
     ("size a window", "rule app=\"pavucontrol\" w=700 h=500  Give both w and h. title=\"part of the title\" matches by title instead."),
     ("see the weather", "weather { place \"Lisbon\" }, then turn on the weather card in settings, widgets. Without a place it guesses from your address."),
     ("see what is coming up", "calendar { source \"~/cal.ics\" }, then turn on the agenda card. A calendar's private address works too."),
     ("change the wallpaper by itself", "look { slideshow 30 }  Every 30 minutes the next picture in the wallpaper's folder recolors the sky. 0 is off."),
     ("lock when you leave", "idle { dim 120; lock 300; off 600 }  Seconds without input. 0 is never. Anything watching video keeps it awake."),
-    ("bind a key", "binds { Alt+Return { spawn \"kitty\" } }  Several actions: Alt+g { goto 1; spawn \"kitty\"; }"),
+    ("bind a key", "binds { Super+Return { spawn \"kitty\" } }  Several actions: Super+g { goto 1; spawn \"kitty\"; }"),
     ("name a few actions", "def my-thing { goto 1; spawn \"notify-send hi\"; }  then use my-thing in a bind."),
     ("choose what starts", "autostart { spawn \"seiza-bar\"; spawn \"seiza-starfield\" }  Leave it out to get the usual ones. An empty block starts nothing."),
     ("check your file", "seiza-conf check  names mistakes by line. Saving the file reloads it by itself."),
@@ -128,7 +128,7 @@ const FILES: &[(&str, &str)] = &[
     ("*.const", "saved constellations."),
 ];
 
-/// "Alt+Shift+Left = seiza pan..." lines to (keys, what it does).
+/// "Super+Shift+Left = seiza pan..." lines to (keys, what it does).
 pub fn parse_bindings(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|l| l.split_once(" = "))
@@ -332,8 +332,8 @@ mod tests {
 
     #[test]
     fn bindings_get_a_description() {
-        let b = parse_bindings("Alt+h = seiza-help\nAlt+3 = seiza goto 3\nAlt+t = my-terminal\nnot a binding\n");
-        assert_eq!(b, [("Alt+h".into(), "this help".into()), ("Alt+3".into(), "fly to star 3".into()), ("Alt+t".into(), "my-terminal".into())]);
+        let b = parse_bindings("Super+h = seiza-help\nSuper+3 = seiza goto 3\nSuper+t = my-terminal\nnot a binding\n");
+        assert_eq!(b, [("Super+h".into(), "this help".into()), ("Super+3".into(), "fly to star 3".into()), ("Super+t".into(), "my-terminal".into())]);
     }
 
     #[test]

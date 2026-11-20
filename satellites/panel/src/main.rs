@@ -1,6 +1,6 @@
 //! seiza-panel: a side panel with volume and brightness sliders, Wi-Fi / Bluetooth / microphone toggles
 //! and the notifications seiza-notify has shown. Opens from the top-right hot corner (`panel` in
-//! seiza.kdl) or Alt+d; running it again closes it, `seiza-panel open` only opens. Esc, or the pointer
+//! seiza.kdl) or Super+d; running it again closes it, `seiza-panel open` only opens. Esc, or the pointer
 //! leaving it, closes it. `seiza-panel --dump out.ppm` draws one frame.
 //! shortcut: the toggles and sliders are read once on open and after each click (wpctl, nmcli, bluetoothctl,
 //! brightnessctl are run synchronously), so a change made elsewhere while it is open shows next time.
