@@ -3833,6 +3833,8 @@ int main(int argc, char *argv[]) {
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
 	/* XWayland, started when the first X11 program connects. The programs we launch inherit
 	 * DISPLAY from here, so setting it is all they need to find it. */
+	/* Read before XWayland sets DISPLAY below, or every session would look nested. */
+	int real_session = !getenv("WAYLAND_DISPLAY") && !getenv("DISPLAY");
 	server.xwayland = wlr_xwayland_create(server.wl_display, compositor, true);
 	if (server.xwayland) {
 		server.new_xwayland_surface.notify = server_new_xwayland_surface;
@@ -3933,7 +3935,6 @@ int main(int argc, char *argv[]) {
 
 	/* Set the WAYLAND_DISPLAY environment variable to our socket and run the
 	 * startup command if requested. */
-	int real_session = !getenv("WAYLAND_DISPLAY") && !getenv("DISPLAY");
 	setenv("WAYLAND_DISPLAY", socket, true);
 	/* SEIZA: portals pick their backends by desktop name (portals/seiza-portals.conf).
 	 * Only a real session publishes this to dbus/systemd: a nested one must not repoint the host's portals. */
