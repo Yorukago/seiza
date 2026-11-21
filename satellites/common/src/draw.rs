@@ -268,9 +268,12 @@ impl Text {
     }
 
     pub fn glyph(&mut self, ch: char) -> &(fontdue::Metrics, Vec<u8>) {
-        self.cache.entry(ch).or_insert_with(|| match cjk_font() {
-            Some(f) if self.font.lookup_glyph_index(ch) == 0 && f.lookup_glyph_index(ch) != 0 => f.rasterize(ch, self.px),
-            _ => self.font.rasterize(ch, self.px),
+        self.cache.entry(ch).or_insert_with(|| {
+            // the CJK font is huge to parse, so only look at it for a glyph the main font lacks
+            match (self.font.lookup_glyph_index(ch) == 0).then(cjk_font).flatten() {
+                Some(f) if f.lookup_glyph_index(ch) != 0 => f.rasterize(ch, self.px),
+                _ => self.font.rasterize(ch, self.px),
+            }
         })
     }
 
