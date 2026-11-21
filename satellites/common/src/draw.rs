@@ -131,20 +131,121 @@ pub struct Canvas {
 }
 
 impl Canvas {
+    /// A soft line through `pts`, `w` wide, drawn as one shape: where segments meet the coverage is the
+    /// largest of them, not their sum, so a see-through line has no beads at its joints.
+    pub fn polyline(&mut self, pts: &[(f32, f32)], w: f32, c: Rgba) {
+        let r = w / 2.0 + 1.0;
+        let fold = |f: fn(f32, f32) -> f32, pick: fn(&(f32, f32)) -> f32, from: f32| pts.iter().map(pick).fold(from, f);
+        let (x0, x1) = ((fold(f32::min, |p| p.0, f32::MAX) - r).floor().max(0.0) as usize, ((fold(f32::max, |p| p.0, f32::MIN) + r).ceil().max(0.0) as usize).min(self.w));
+        let (y0, y1) = ((fold(f32::min, |p| p.1, f32::MAX) - r).floor().max(0.0) as usize, ((fold(f32::max, |p| p.1, f32::MIN) + r).ceil().max(0.0) as usize).min(self.h));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let bw = x1 - x0;
+        let mut cover = vec![0.0f32; bw * (y1 - y0)];
+        for seg in pts.windows(2) {
+            let ((ax, ay), (bx, by)) = (seg[0], seg[1]);
+            let (dx, dy) = (bx - ax, by - ay);
+            let len2 = (dx * dx + dy * dy).max(1e-6);
+            let sx0 = ((ax.min(bx) - r).floor().max(x0 as f32)) as usize;
+            let sx1 = (((ax.max(bx) + r).ceil()).max(0.0) as usize).min(x1);
+            let sy0 = ((ay.min(by) - r).floor().max(y0 as f32)) as usize;
+            let sy1 = (((ay.max(by) + r).ceil()).max(0.0) as usize).min(y1);
+            for py in sy0..sy1 {
+                for px in sx0..sx1 {
+                    let (qx, qy) = (px as f32 + 0.5 - ax, py as f32 + 0.5 - ay);
+                    let t = ((qx * dx + qy * dy) / len2).clamp(0.0, 1.0);
+                    let d = (qx - t * dx).hypot(qy - t * dy);
+                    let k = (w / 2.0 + 0.5 - d).clamp(0.0, 1.0);
+                    let slot = &mut cover[(py - y0) * bw + px - x0];
+                    *slot = slot.max(k);
+                }
+            }
+        }
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let k = cover[(py - y0) * bw + px - x0];
+                if k > 0.0 {
+                    blend(&mut self.px[py * self.w + px], c, k);
+                }
+            }
+        }
+    }
+
+    /// Lay `src` (premultiplied) over this canvas with its top-left corner at (ox, oy).
+    pub fn over(&mut self, src: &Canvas, ox: i32, oy: i32) {
+        for sy in 0..src.h {
+            let dy = sy as i32 + oy;
+            if dy < 0 || dy >= self.h as i32 {
+                continue;
+            }
+            for sx in 0..src.w {
+                let dx = sx as i32 + ox;
+                let s = src.px[sy * src.w + sx];
+                if s == 0 || dx < 0 || dx >= self.w as i32 {
+                    continue;
+                }
+                let d = &mut self.px[dy as usize * self.w + dx as usize];
+                let (dv, inv) = (*d, 255 - (s >> 24));
+                let ch = |sh: u32| ((s >> sh & 255) + (dv >> sh & 255) * inv / 255).min(255) << sh;
+                *d = ch(24) | ch(16) | ch(8) | ch(0);
+            }
+        }
+    }
+
     /// A rounded rectangle with antialiased edges (radius r; r = h/2 makes a pill).
     pub fn round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Rgba) {
         let (x0, x1) = ((x.floor().max(0.0)) as usize, ((x + w).ceil() as usize).min(self.w));
         let (y0, y1) = ((y.floor().max(0.0)) as usize, ((y + h).ceil() as usize).min(self.h));
-        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let a8 = (c[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        if a8 == 0 {
+            return;
+        }
+        let col = [0, 1, 2].map(|i| (c[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u32);
+        let (cx, cy, hw, hh) = (x + w / 2.0, y + h / 2.0, w / 2.0 - r, h / 2.0 - r);
         for py in y0..y1 {
+            let dy = (py as f32 + 0.5 - cy).abs() - hh;
+            let row = &mut self.px[py * self.w..(py + 1) * self.w];
             for px in x0..x1 {
-                // distance to the rounded box's edge, negative inside
-                let (dx, dy) = ((px as f32 + 0.5 - cx).abs() - (w / 2.0 - r), (py as f32 + 0.5 - cy).abs() - (h / 2.0 - r));
-                let d = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() + dx.max(dy).min(0.0) - r;
+                let dx = (px as f32 + 0.5 - cx).abs() - hw;
+                // distance to the rounded box's edge, negative inside; only a corner needs the square root
+                let d = if dx > 0.0 && dy > 0.0 { dx.hypot(dy) - r } else { dx.max(dy) - r };
                 let cover = (0.5 - d).clamp(0.0, 1.0);
-                if cover > 0.0 {
-                    blend(&mut self.px[py * self.w + px], c, cover);
+                if cover <= 0.0 {
+                    continue;
                 }
+                let a = (a8 as f32 * cover + 0.5) as u32;
+                let dst = &mut row[px];
+                if a >= 255 {
+                    *dst = 0xFF00_0000 | col[0] << 16 | col[1] << 8 | col[2];
+                } else if a > 0 {
+                    let (d, inv) = (*dst, 255 - a);
+                    let ch = |sh: u32, v: u32| (v * a + (d >> sh & 255) * inv + 127) / 255;
+                    *dst = (a + (d >> 24) * inv / 255) << 24 | ch(16, col[0]) << 16 | ch(8, col[1]) << 8 | ch(0, col[2]);
+                }
+            }
+        }
+    }
+
+    /// Like `over`, but shifted down by `dy` and faded to `a` (0..1); only rows `rows` of `src` are read.
+    pub fn over_faded(&mut self, src: &Canvas, dy: i32, a: f32, rows: std::ops::Range<usize>) {
+        let k = (a.clamp(0.0, 1.0) * 256.0) as u32;
+        for sy in rows.start..rows.end.min(src.h) {
+            let y = sy as i32 + dy;
+            if y < 0 || y >= self.h as i32 {
+                continue;
+            }
+            let n = src.w.min(self.w);
+            let (from, to) = (&src.px[sy * src.w..sy * src.w + n], &mut self.px[y as usize * self.w..y as usize * self.w + n]);
+            for (s, d) in from.iter().zip(to.iter_mut()) {
+                if *s == 0 {
+                    continue;
+                }
+                let f = |sh: u32| (*s >> sh & 255) * k >> 8;
+                let (sa, dv) = (f(24), *d);
+                let inv = 255 - sa;
+                let ch = |sh: u32| (f(sh) + (dv >> sh & 255) * inv / 255).min(255) << sh;
+                *d = ch(24) | ch(16) | ch(8) | ch(0);
             }
         }
     }
