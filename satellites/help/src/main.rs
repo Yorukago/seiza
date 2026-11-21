@@ -2,7 +2,7 @@
 //! files. `seiza-help --dump out.ppm [page [width height [visibility 0..1 [search]]]]` draws one frame to a file.
 mod ui;
 
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use seiza_common::draw::Canvas;
 use smithay_client_toolkit::{
@@ -30,8 +30,6 @@ use smithay_client_toolkit::{
 use ui::Ui;
 
 const BTN_LEFT: u32 = 0x110;
-const OPEN_SECS: f32 = 0.30;
-const CLOSE_SECS: f32 = 0.18;
 
 struct Help {
     registry_state: RegistryState,
@@ -48,8 +46,7 @@ struct Help {
     dirty: bool,
     exit: bool,
     keys_seen: Option<SystemTime>, // the keys file as last loaded
-    opened: Option<Instant>,
-    closing: Option<Instant>,
+    anim: seiza_common::kit::Anim,
     shown: f32, // the visibility last drawn
     ui: Ui,
 }
@@ -57,18 +54,13 @@ struct Help {
 impl Help {
     /// Visibility now, 0..1, and whether it is still moving. The card rises while it opens and drops while it closes.
     fn visibility(&mut self) -> (f32, bool) {
-        let t = self.opened.map_or(0.0, |o| (o.elapsed().as_secs_f32() / OPEN_SECS).min(1.0));
-        let open = 1.0 - (1.0 - t).powi(3); // eases out: fast, then settles
-        let Some(c) = self.closing else { return (open, t < 1.0) };
-        let ct = (c.elapsed().as_secs_f32() / CLOSE_SECS).min(1.0);
-        if ct >= 1.0 {
-            self.exit = true;
-        }
-        (open.min((1.0 - ct).powi(2)), true)
+        let (e, moving, done) = self.anim.visibility();
+        self.exit |= done;
+        (e, moving)
     }
 
     fn close(&mut self) {
-        self.closing.get_or_insert_with(Instant::now);
+        self.anim.close();
         self.dirty = true;
     }
 
@@ -161,7 +153,7 @@ impl LayerShellHandler for Help {
         }
         self.size = size;
         self.configured = true;
-        self.opened.get_or_insert_with(Instant::now);
+        self.anim.open();
         self.dirty = true;
         self.draw(qh);
     }
@@ -321,8 +313,7 @@ fn main() {
         dirty: true,
         exit: false,
         keys_seen: std::fs::metadata(seiza_common::config::path("keys")).and_then(|m| m.modified()).ok(),
-        opened: None,
-        closing: None,
+        anim: Default::default(),
         shown: -1.0,
         ui: Ui::new(),
     };

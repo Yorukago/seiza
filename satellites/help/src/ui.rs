@@ -2,12 +2,10 @@
 //! tests can run it. The key bindings come from the file the compositor rewrites on every
 //! (re)load of ~/.config/seiza/keys, so they are never stale; the other pages are written here.
 
-use std::time::Instant;
-
 use seiza_common::{
     config,
     draw::{load_font, Canvas, Text},
-    kit::{self, Thread},
+    kit::{self, Thread, PILL_W},
     palette::{palette, rgba},
 };
 
@@ -17,14 +15,11 @@ const H0: f32 = 740.0;
 const PAD: f32 = 30.0; // between the card's edge and its content
 const TOP: f32 = 168.0; // where a page's body starts, from the card's top
 const FOOT: f32 = 60.0; // the strip under the body
-const SLIDE: f32 = 90.0; // how far below its place the card starts, and ends when it closes
-const GLIDE_SECS: f32 = 0.16; // the big star moving to another page
 const GAP: f32 = 18.0; // between cards
 const MINCOL: f32 = 320.0; // the narrowest a column of cards may get
 const ROW1: f32 = 43.0; // a keys row with its keycaps beside the words
 const ROW2: f32 = 68.0; // ...and with them under the words, when they do not fit beside
 const CAP_SEP: f32 = 18.0; // between two keycaps (the "+")
-const PILL_W: f32 = 250.0; // the search pill
 
 pub const PAGES: [&str; 6] = ["keys", "commands", "guide", "recipes", "options", "files"];
 
@@ -279,7 +274,7 @@ pub struct Ui {
     pub scroll: usize, // steps scrolled off the top
     query: String,     // what is typed in the search pill
     hover: Option<usize>, // the page star under the pointer
-    glide: Option<(f32, Instant)>, // the big star moving: the page it left, and when
+    glide: kit::Glide, // the big star moving to another page
     stale: bool,                   // what is in `content` is out of date
     content: Option<Canvas>,       // the last frame drawn at full visibility
     back: Option<Canvas>,          // the card's plate, which only changes with the screen size
@@ -367,7 +362,7 @@ impl Ui {
             scroll: 0,
             query: String::new(),
             hover: None,
-            glide: None,
+            glide: kit::Glide::default(),
             stale: true,
             content: None,
             back: None,
@@ -508,7 +503,7 @@ impl Ui {
     pub fn go(&mut self, page: usize) {
         let page = page.min(PAGES.len() - 1);
         if page != self.page {
-            self.glide = Some((self.nav_pos(), Instant::now()));
+            self.glide.start(self.nav_pos());
         }
         self.page = page;
         self.scroll = 0;
@@ -518,13 +513,7 @@ impl Ui {
 
     /// Where the big star is, as a (fractional) page number.
     fn nav_pos(&self) -> f32 {
-        let Some((from, t)) = self.glide else { return self.page as f32 };
-        let k = (t.elapsed().as_secs_f32() / GLIDE_SECS).min(1.0);
-        from + (self.page as f32 - from) * (1.0 - (1.0 - k).powi(3)) // eases out
-    }
-
-    fn gliding(&self) -> bool {
-        self.glide.is_some_and(|(_, t)| t.elapsed().as_secs_f32() < GLIDE_SECS)
+        self.glide.pos(self.page)
     }
 
     /// True while a frame is still owed: the star is moving, or what is shown is out of date.
@@ -696,37 +685,23 @@ impl Ui {
     /// The frame at visibility `e` (0 = gone, 1 = fully there): the card rises from below while it fades in.
     pub fn render(&mut self, w: usize, h: usize, e: f32) -> Canvas {
         self.fit(w as f32, h as f32);
-        let g = self.gliding();
+        let g = self.glide.active();
         if self.stale || g || self.content.as_ref().is_none_or(|c| c.w != w || c.h != h) {
             self.content = Some(self.draw_card(w, h));
             self.stale = g; // a glide that was still going when this was drawn owes one more frame
             if !g {
-                self.glide = None;
+                self.glide.clear();
             }
         }
-        let content = self.content.as_ref().expect("drawn above");
-        if e >= 1.0 {
-            return content.clone();
-        }
-        let dy = ((1.0 - e) * SLIDE).round();
         let oy = self.origin(w as f32, h as f32).1;
-        let mut out = Canvas { w, h, px: vec![0; w * h] };
-        out.over_faded(content, dy as i32, e, (oy as usize).saturating_sub(24)..(oy + self.h) as usize + 24);
-        out
+        kit::appear(self.content.as_ref().expect("drawn above"), e, (oy as usize).saturating_sub(24)..(oy + self.h) as usize + 24)
     }
 
     /// The card's plate: a gold glow and edge round the window, its footer line and the words that never change.
     fn plate(&mut self, w: usize, h: usize) -> Canvas {
         let p = palette();
         let (ox, oy) = self.origin(w as f32, h as f32);
-        let mut b = Canvas { w, h, px: vec![0; w * h] };
-        for k in (1..=3).rev() {
-            let k = k as f32 * 4.0;
-            b.round_rect(ox - 1.0 - k, oy - 1.0 - k, self.w + 2.0 + 2.0 * k, self.h + 2.0 + 2.0 * k, 25.0 + k, rgba(p.star, 0.035));
-        }
-        b.round_rect(ox - 1.0, oy - 1.0, self.w + 2.0, self.h + 2.0, 25.0, rgba(p.star, 0.5));
-        b.round_rect(ox, oy, self.w, self.h, 24.0, rgba(p.panel, 1.0));
-        b.round_rect(ox + 1.0, oy + self.h - FOOT + 8.0, self.w - 2.0, 1.0, 0.0, rgba(p.text, 0.07));
+        let mut b = kit::window_plate(w, h, (ox, oy), (self.w, self.h), FOOT);
         self.t22.draw(&mut b, ox + PAD, oy + 46.0, "help", rgba(p.text, 0.95));
         let base = oy + self.h - 22.0;
         self.t13.draw(&mut b, ox + PAD, base, "click a star to change page  \u{b7}  type to search all of it  \u{b7}  Up/Down or wheel scrolls", rgba(p.text, 0.4));
@@ -734,23 +709,6 @@ impl Ui {
         let qw = self.t13.width(quit);
         self.t13.draw(&mut b, ox + self.w - PAD - qw, base, quit, rgba(p.text, 0.4));
         b
-    }
-
-    /// The search pill at (x, y): a hint while empty, else the end of what is typed and a caret.
-    fn draw_pill(&mut self, cv: &mut Canvas, x: f32, y: f32) {
-        let p = palette();
-        cv.round_rect(x, y, PILL_W, 34.0, 17.0, rgba(p.text, 0.12));
-        cv.round_rect(x + 1.0, y + 1.0, PILL_W - 2.0, 32.0, 16.0, rgba(p.sky, 1.0));
-        if self.query.is_empty() {
-            self.t15.draw(cv, x + 18.0, y + 22.0, "ask the sky..", rgba(p.text, 0.4));
-            return;
-        }
-        let mut shown: &str = &self.query; // too long to fit: its end, where the typing is
-        while self.t15.width(shown) > PILL_W - 44.0 {
-            shown = &shown[shown.chars().next().map_or(0, char::len_utf8)..];
-        }
-        let end = self.t15.draw(cv, x + 18.0, y + 22.0, shown, rgba(p.text, 0.95));
-        cv.round_rect(end + 1.0, y + 9.0, 1.5, 16.0, 0.0, rgba(p.star, 0.9));
     }
 
     fn draw_card(&mut self, w: usize, h: usize) -> Canvas {
@@ -780,7 +738,7 @@ impl Ui {
         };
         self.t22.draw(&mut cv, ox + PAD, oy + 122.0, &title, rgba(p.text, 1.0));
         self.t13.draw(&mut cv, ox + PAD, oy + 146.0, &blurb, rgba(p.text, 0.55));
-        self.draw_pill(&mut cv, ox + self.w - PAD - PILL_W, oy + 23.0);
+        kit::search_pill(&mut cv, &mut self.t15, ox + self.w - PAD - PILL_W, oy + 23.0, &self.query, "ask the sky..");
 
         let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
         if self.body_stale || self.body.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
@@ -902,7 +860,7 @@ mod tests {
         assert!(ui.pending() && ui.nav_pos() < 1.0, "just left entry 0");
         ui.render(1280, 720, 1.0);
         assert!(ui.pending(), "still gliding: another frame is owed");
-        std::thread::sleep(std::time::Duration::from_millis((GLIDE_SECS * 1000.0) as u64 + 40));
+        std::thread::sleep(std::time::Duration::from_millis((kit::GLIDE_SECS * 1000.0) as u64 + 40));
         ui.render(1280, 720, 1.0);
         assert!(!ui.pending() && ui.nav_pos() == 2.0, "the last frame lands on the entry");
     }

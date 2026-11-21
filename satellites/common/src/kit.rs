@@ -1,6 +1,8 @@
 //! The look the help, the settings and the panel share: cards, keycaps and the thread of stars that
 //! switches pages. Colours come from the palette, so a new wallpaper recolours all of it.
 
+use std::time::Instant;
+
 use crate::draw::{Canvas, Text};
 use crate::palette::{palette, rgba};
 
@@ -37,7 +39,113 @@ pub fn keycap(cv: &mut Canvas, font: &mut Text, x: f32, y: f32, label: &str) -> 
 /// How far each star sits above (-) or below (+) the thread's middle, so the row reads as a loose wave.
 const WAVE: [f32; 8] = [-1.0, 7.0, -5.0, 5.0, -8.0, 2.0, -3.0, 6.0];
 
-/// A row of pages drawn as stars on a wavy thread. `pos` is the (fractional) page the big star is at, so
+pub const OPEN_SECS: f32 = 0.30;
+pub const CLOSE_SECS: f32 = 0.18;
+/// How far below its place a card starts, and ends when it closes.
+pub const SLIDE: f32 = 90.0;
+pub const GLIDE_SECS: f32 = 0.16;
+/// Width of the search pill.
+pub const PILL_W: f32 = 250.0;
+
+/// When a window opened and when it began closing; says how visible it is.
+#[derive(Default)]
+pub struct Anim {
+    opened: Option<Instant>,
+    closing: Option<Instant>,
+}
+
+impl Anim {
+    pub fn open(&mut self) {
+        self.opened.get_or_insert_with(Instant::now);
+    }
+
+    pub fn close(&mut self) {
+        self.closing.get_or_insert_with(Instant::now);
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    /// (visibility 0..1, whether it is still moving, whether it has finished closing).
+    pub fn visibility(&self) -> (f32, bool, bool) {
+        let t = self.opened.map_or(0.0, |o| (o.elapsed().as_secs_f32() / OPEN_SECS).min(1.0));
+        let open = 1.0 - (1.0 - t).powi(3); // eases out: fast, then settles
+        let Some(c) = self.closing else { return (open, t < 1.0, false) };
+        let ct = (c.elapsed().as_secs_f32() / CLOSE_SECS).min(1.0);
+        (open.min((1.0 - ct).powi(2)), true, ct >= 1.0)
+    }
+}
+
+/// A star (or any marker) moving to a new page.
+#[derive(Default)]
+pub struct Glide(Option<(f32, Instant)>);
+
+impl Glide {
+    /// Begin moving from page `from`.
+    pub fn start(&mut self, from: f32) {
+        self.0 = Some((from, Instant::now()));
+    }
+
+    /// Where it is on its way to page `to`.
+    pub fn pos(&self, to: usize) -> f32 {
+        let Some((from, t)) = self.0 else { return to as f32 };
+        let k = (t.elapsed().as_secs_f32() / GLIDE_SECS).min(1.0);
+        from + (to as f32 - from) * (1.0 - (1.0 - k).powi(3)) // eases out
+    }
+
+    pub fn active(&self) -> bool {
+        self.0.is_some_and(|(_, t)| t.elapsed().as_secs_f32() < GLIDE_SECS)
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// `content` at visibility `e`: lower and fainter the less visible it is. Only `rows` of it are read.
+pub fn appear(content: &Canvas, e: f32, rows: std::ops::Range<usize>) -> Canvas {
+    if e >= 1.0 {
+        return content.clone();
+    }
+    let mut out = Canvas { w: content.w, h: content.h, px: vec![0; content.w * content.h] };
+    out.over_faded(content, ((1.0 - e) * SLIDE).round() as i32, e, rows);
+    out
+}
+
+/// A window's plate on a `w` x `h` canvas: a gold glow and edge round the card at (ox, oy), its fill, and a
+/// hairline `foot` from the bottom for the footer text.
+pub fn window_plate(w: usize, h: usize, (ox, oy): (f32, f32), (cw, ch): (f32, f32), foot: f32) -> Canvas {
+    let p = palette();
+    let mut b = Canvas { w, h, px: vec![0; w * h] };
+    for k in (1..=3).rev() {
+        let k = k as f32 * 4.0;
+        b.round_rect(ox - 1.0 - k, oy - 1.0 - k, cw + 2.0 + 2.0 * k, ch + 2.0 + 2.0 * k, 25.0 + k, rgba(p.star, 0.035));
+    }
+    b.round_rect(ox - 1.0, oy - 1.0, cw + 2.0, ch + 2.0, 25.0, rgba(p.star, 0.5));
+    b.round_rect(ox, oy, cw, ch, 24.0, rgba(p.panel, 1.0));
+    b.round_rect(ox + 1.0, oy + ch - foot + 8.0, cw - 2.0, 1.0, 0.0, rgba(p.text, 0.07));
+    b
+}
+
+/// The search pill at (x, y): `hint` while empty, else the end of what is typed and a caret.
+pub fn search_pill(cv: &mut Canvas, font: &mut Text, x: f32, y: f32, query: &str, hint: &str) {
+    let p = palette();
+    cv.round_rect(x, y, PILL_W, 34.0, 17.0, rgba(p.text, 0.12));
+    cv.round_rect(x + 1.0, y + 1.0, PILL_W - 2.0, 32.0, 16.0, rgba(p.sky, 1.0));
+    if query.is_empty() {
+        font.draw(cv, x + 18.0, y + 22.0, hint, rgba(p.text, 0.4));
+        return;
+    }
+    let mut shown = query; // too long to fit: its end, where the typing is
+    while font.width(shown) > PILL_W - 44.0 {
+        shown = &shown[shown.chars().next().map_or(0, char::len_utf8)..];
+    }
+    let end = font.draw(cv, x + 18.0, y + 22.0, shown, rgba(p.text, 0.95));
+    cv.round_rect(end + 1.0, y + 9.0, 1.5, 16.0, 0.0, rgba(p.star, 0.9));
+}
+
+/// A row of pages drawn as stars `pos` is the (fractional) page the big star is at, so
 /// it can glide; stars grow and glow as it nears them.
 pub struct Thread {
     chain: Vec<(f32, f32)>, // the thread's loose start, the stars, its loose end
@@ -116,6 +224,30 @@ mod tests {
         assert_eq!(t.hit(500.0, 400.0), None);
         let (mx, _) = t.at(2.5);
         assert!(mx > t.star(2).0 && mx < t.star(3).0, "halfway is between the two stars");
+    }
+
+    #[test]
+    fn a_window_that_closes_ends_at_zero_and_says_so() {
+        let mut a = Anim::default();
+        assert_eq!(a.visibility().0, 0.0, "not open yet");
+        a.open();
+        std::thread::sleep(std::time::Duration::from_millis((OPEN_SECS * 1000.0) as u64 + 30));
+        assert_eq!(a.visibility(), (1.0, false, false));
+        a.close();
+        assert!(a.is_closing() && a.visibility().1);
+        std::thread::sleep(std::time::Duration::from_millis((CLOSE_SECS * 1000.0) as u64 + 30));
+        assert_eq!(a.visibility(), (0.0, true, true));
+    }
+
+    #[test]
+    fn a_glide_lands_on_its_page() {
+        let mut g = Glide::default();
+        assert_eq!(g.pos(3), 3.0);
+        g.start(0.0);
+        assert!(g.active() && g.pos(3) < 1.0);
+        std::thread::sleep(std::time::Duration::from_millis((GLIDE_SECS * 1000.0) as u64 + 30));
+        assert!(!g.active());
+        assert_eq!(g.pos(3), 3.0);
     }
 
     #[test]
