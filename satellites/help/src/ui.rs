@@ -24,6 +24,7 @@ const MINCOL: f32 = 320.0; // the narrowest a column of cards may get
 const ROW1: f32 = 43.0; // a keys row with its keycaps beside the words
 const ROW2: f32 = 68.0; // ...and with them under the words, when they do not fit beside
 const CAP_SEP: f32 = 18.0; // between two keycaps (the "+")
+const PILL_W: f32 = 250.0; // the search pill
 
 pub const PAGES: [&str; 6] = ["keys", "commands", "guide", "recipes", "options", "files"];
 
@@ -276,6 +277,7 @@ fn key_groups(keys: &[Item]) -> Vec<(&str, Vec<(&[String], &str)>)> {
 pub struct Ui {
     pub page: usize,
     pub scroll: usize, // steps scrolled off the top
+    query: String,     // what is typed in the search pill
     hover: Option<usize>, // the page star under the pointer
     glide: Option<(f32, Instant)>, // the big star moving: the page it left, and when
     stale: bool,                   // what is in `content` is out of date
@@ -363,6 +365,7 @@ impl Ui {
         let mut ui = Ui {
             page: 0,
             scroll: 0,
+            query: String::new(),
             hover: None,
             glide: None,
             stale: true,
@@ -395,6 +398,76 @@ impl Ui {
         self.h - TOP - FOOT
     }
 
+    pub fn searching(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    fn query_changed(&mut self) {
+        self.scroll = 0;
+        self.stale = true;
+        self.body_stale = true;
+    }
+
+    /// Add typed text to the search.
+    pub fn type_str(&mut self, s: &str) {
+        self.query.push_str(s);
+        self.query_changed();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.query.pop().is_some() {
+            self.query_changed();
+        }
+    }
+
+    /// Empty the search; false if there was nothing in it.
+    pub fn clear_search(&mut self) -> bool {
+        let had = self.searching();
+        self.query.clear();
+        if had {
+            self.query_changed();
+        }
+        had
+    }
+
+    /// The rows of every page that match all the words typed, one card per page. Keys rows are the
+    /// binding's meaning with its keys as the description.
+    fn search_cards(&self) -> Vec<(String, Vec<(String, String)>)> {
+        let words: Vec<String> = self.query.to_lowercase().split_whitespace().map(String::from).collect();
+        let keys = key_groups(&self.keys)
+            .into_iter()
+            .flat_map(|(_, binds)| binds)
+            .map(|(caps, what)| (what.to_string(), caps.iter().map(|c| shown(c)).collect::<Vec<_>>().join(" + ")));
+        let mut out = vec![];
+        for page in 0..PAGES.len() {
+            let rows: Vec<(String, String)> = if page == 0 { keys.clone().collect() } else { text_cards(page).into_iter().flat_map(|(_, r)| r).collect() };
+            let hits: Vec<(String, String)> = rows
+                .into_iter()
+                .filter(|(n, d)| {
+                    if n.is_empty() && page != 0 {
+                        return false; // a section's blurb, not a thing to find
+                    }
+                    let hay = format!("{n} {d}").to_lowercase();
+                    words.iter().all(|w| hay.contains(w.as_str()))
+                })
+                .collect();
+            if !hits.is_empty() {
+                out.push((PAGES[page].to_string(), hits));
+            }
+        }
+        out
+    }
+
+    /// The cards of the text layout: the search results, else the page's own.
+    fn shown_cards(&self) -> Vec<(String, Vec<(String, String)>)> {
+        if self.searching() { self.search_cards() } else { text_cards(self.page) }
+    }
+
+    /// Whether the body is the keycap cards of the keys page (not a text layout).
+    fn keys_body(&self) -> bool {
+        self.page == 0 && !self.searching()
+    }
+
     /// How many columns of cards fit (MINCOL each) and how wide they are.
     fn columns(&self) -> (usize, f32) {
         let cw = self.cw();
@@ -419,7 +492,7 @@ impl Ui {
 
     /// (steps in the page, steps that fit); a step is one keys row, and the page is as tall as its tallest column.
     fn extent(&mut self) -> (usize, usize) {
-        let used = if self.page == 0 { self.key_plan().used } else { self.text_plan().used };
+        let used = if self.keys_body() { self.key_plan().used } else { self.text_plan().used };
         let tallest = used.iter().cloned().fold(0.0, f32::max);
         ((tallest / ROW1).ceil() as usize, (self.body_h() / ROW1) as usize)
     }
@@ -472,7 +545,7 @@ impl Ui {
 
     /// The row of page stars across the card's top.
     fn thread(&self, ox: f32, oy: f32) -> Thread {
-        Thread::new(ox + 170.0, ox + self.w - PAD, oy + 40.0, PAGES.len())
+        Thread::new(ox + 170.0, ox + self.w - PAD - PILL_W - 30.0, oy + 40.0, PAGES.len())
     }
 
     /// A click: on a page star it switches page. Returns true if it changed something.
@@ -570,7 +643,7 @@ impl Ui {
 
     /// The text pages as cards: each row a name (when it has one) with its description wrapped under it.
     fn text_plan(&mut self) -> TextPlan {
-        let cards = text_cards(self.page);
+        let cards = self.shown_cards();
         let (cols, col_w) = self.columns();
         let (mut lines, mut heights) = (vec![], vec![]);
         for (_, rows) in &cards {
@@ -656,11 +729,28 @@ impl Ui {
         b.round_rect(ox + 1.0, oy + self.h - FOOT + 8.0, self.w - 2.0, 1.0, 0.0, rgba(p.text, 0.07));
         self.t22.draw(&mut b, ox + PAD, oy + 46.0, "help", rgba(p.text, 0.95));
         let base = oy + self.h - 22.0;
-        self.t13.draw(&mut b, ox + PAD, base, "click a star to change page  \u{b7}  Left/Right works too  \u{b7}  Up/Down or wheel scrolls", rgba(p.text, 0.4));
-        let quit = "Esc / q: close";
+        self.t13.draw(&mut b, ox + PAD, base, "click a star to change page  \u{b7}  type to search all of it  \u{b7}  Up/Down or wheel scrolls", rgba(p.text, 0.4));
+        let quit = "Esc: clear / close";
         let qw = self.t13.width(quit);
         self.t13.draw(&mut b, ox + self.w - PAD - qw, base, quit, rgba(p.text, 0.4));
         b
+    }
+
+    /// The search pill at (x, y): a hint while empty, else the end of what is typed and a caret.
+    fn draw_pill(&mut self, cv: &mut Canvas, x: f32, y: f32) {
+        let p = palette();
+        cv.round_rect(x, y, PILL_W, 34.0, 17.0, rgba(p.text, 0.12));
+        cv.round_rect(x + 1.0, y + 1.0, PILL_W - 2.0, 32.0, 16.0, rgba(p.sky, 1.0));
+        if self.query.is_empty() {
+            self.t15.draw(cv, x + 18.0, y + 22.0, "ask the sky..", rgba(p.text, 0.4));
+            return;
+        }
+        let mut shown: &str = &self.query; // too long to fit: its end, where the typing is
+        while self.t15.width(shown) > PILL_W - 44.0 {
+            shown = &shown[shown.chars().next().map_or(0, char::len_utf8)..];
+        }
+        let end = self.t15.draw(cv, x + 18.0, y + 22.0, shown, rgba(p.text, 0.95));
+        cv.round_rect(end + 1.0, y + 9.0, 1.5, 16.0, 0.0, rgba(p.star, 0.9));
     }
 
     fn draw_card(&mut self, w: usize, h: usize) -> Canvas {
@@ -670,24 +760,32 @@ impl Ui {
             self.back = Some(self.plate(w, h));
         }
         let mut cv = self.back.clone().expect("made above");
-        let (pos, hover) = (self.nav_pos(), self.hover);
+        let (pos, hover) = (if self.searching() { -9.0 } else { self.nav_pos() }, self.hover); // no big star: the results are not one page
         self.thread(ox, oy).draw(&mut cv, &mut self.t13, &PAGES, pos, hover);
 
-        let blurb = match self.page {
-            0 => format!("live from {}: edit it and this updates.", config::path("keys").display()),
-            1 => "type these in a terminal, or bind them to a key.".into(),
-            2 => "the words Seiza uses.".into(),
-            3 => format!("copy a line into {}.", config::path("seiza.kdl").display()),
-            4 => "every setting seiza.kdl takes; seiza-conf docs prints the same.".into(),
-            _ => format!("in {}", config::path("").display()),
+        let (title, blurb) = if self.searching() {
+            let n: usize = self.search_cards().iter().map(|(_, r)| r.len()).sum();
+            let found = if n == 0 { "nothing matches that".to_string() } else { format!("{n} match{} across every page", if n == 1 { "" } else { "es" }) };
+            ("search".to_string(), found)
+        } else {
+            let blurb = match self.page {
+                0 => format!("live from {}: edit it and this updates.", config::path("keys").display()),
+                1 => "type these in a terminal, or bind them to a key.".into(),
+                2 => "the words Seiza uses.".into(),
+                3 => format!("copy a line into {}.", config::path("seiza.kdl").display()),
+                4 => "every setting seiza.kdl takes; seiza-conf docs prints the same.".into(),
+                _ => format!("in {}", config::path("").display()),
+            };
+            (PAGES[self.page].to_string(), blurb)
         };
-        self.t22.draw(&mut cv, ox + PAD, oy + 122.0, PAGES[self.page], rgba(p.text, 1.0));
+        self.t22.draw(&mut cv, ox + PAD, oy + 122.0, &title, rgba(p.text, 1.0));
         self.t13.draw(&mut cv, ox + PAD, oy + 146.0, &blurb, rgba(p.text, 0.55));
+        self.draw_pill(&mut cv, ox + self.w - PAD - PILL_W, oy + 23.0);
 
         let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
         if self.body_stale || self.body.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
             let mut body = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
-            if self.page == 0 {
+            if self.keys_body() {
                 self.draw_keys(&mut body);
             } else {
                 self.draw_text(&mut body);
@@ -807,6 +905,34 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis((GLIDE_SECS * 1000.0) as u64 + 40));
         ui.render(1280, 720, 1.0);
         assert!(!ui.pending() && ui.nav_pos() == 2.0, "the last frame lands on the entry");
+    }
+
+    #[test]
+    fn typing_searches_every_page() {
+        let mut ui = Ui::new();
+        ui.keys = key_items("Super+q = seiza close-window\nSuper+h = seiza-help\n");
+        ui.type_str("close");
+        let cards = ui.shown_cards();
+        let titles: Vec<&str> = cards.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(titles.contains(&"keys") && titles.contains(&"commands"), "{titles:?}");
+        let keys = &cards.iter().find(|(t, _)| t == "keys").unwrap().1;
+        assert_eq!(keys, &[("close the window".to_string(), "Super + q".to_string())]);
+        ui.type_str(" window");
+        assert!(ui.search_cards().iter().all(|(_, r)| r.iter().all(|(n, d)| format!("{n} {d}").to_lowercase().contains("window"))), "every word must match");
+        ui.type_str(" zzzz");
+        assert!(ui.search_cards().is_empty());
+        assert!(ui.text_plan().cards.is_empty(), "nothing found lays out nothing");
+    }
+
+    #[test]
+    fn escape_clears_the_search_before_it_closes() {
+        let mut ui = Ui::new();
+        assert!(!ui.clear_search(), "nothing to clear: the caller closes");
+        ui.type_str("ab");
+        ui.backspace();
+        assert_eq!(ui.query, "a");
+        assert!(ui.clear_search() && !ui.searching());
+        assert!(ui.keys_body(), "back to the page");
     }
 
     #[test]

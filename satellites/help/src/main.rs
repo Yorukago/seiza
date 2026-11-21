@@ -1,5 +1,5 @@
 //! seiza-help: the key bindings (live), the commands, the words Seiza uses and its config
-//! files. `seiza-help --dump out.ppm [page [width height [visibility 0..1]]]` draws one frame to a file.
+//! files. `seiza-help --dump out.ppm [page [width height [visibility 0..1 [search]]]]` draws one frame to a file.
 mod ui;
 
 use std::time::{Instant, SystemTime};
@@ -74,14 +74,22 @@ impl Help {
 
     fn key(&mut self, event: &KeyEvent) {
         match event.keysym {
-            Keysym::Escape | Keysym::q => self.close(),
-            Keysym::Left => self.ui.go(self.ui.page.saturating_sub(1)),
-            Keysym::Right | Keysym::Tab => self.ui.go(self.ui.page + 1),
+            Keysym::Escape => {
+                if !self.ui.clear_search() {
+                    self.close();
+                }
+            }
+            Keysym::BackSpace => self.ui.backspace(),
+            Keysym::Left if !self.ui.searching() => self.ui.go(self.ui.page.saturating_sub(1)),
+            Keysym::Right | Keysym::Tab if !self.ui.searching() => self.ui.go(self.ui.page + 1),
             Keysym::Up => self.ui.scroll_by(-1),
             Keysym::Down => self.ui.scroll_by(1),
             Keysym::Page_Up => self.ui.scroll_by(-8),
             Keysym::Page_Down => self.ui.scroll_by(8),
-            _ => return,
+            _ => match event.utf8.as_deref() {
+                Some(s) if !s.chars().any(char::is_control) => self.ui.type_str(s),
+                _ => return,
+            },
         }
         self.dirty = true;
     }
@@ -268,6 +276,9 @@ fn main() {
         let mut ui = Ui::new();
         ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0).min(ui::PAGES.len() - 1);
         let size = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+        if let Some(q) = args.get(6) {
+            ui.type_str(q);
+        }
         let cv = ui.render(size(3, 1920), size(4, 1080), args.get(5).and_then(|v| v.parse().ok()).unwrap_or(1.0));
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
