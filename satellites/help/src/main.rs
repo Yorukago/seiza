@@ -1,8 +1,8 @@
 //! seiza-help: the key bindings (live), the commands, the words Seiza uses and its config
-//! files. `seiza-help --dump out.ppm [page]` draws one frame to a file.
+//! files. `seiza-help --dump out.ppm [page [width height [visibility 0..1]]]` draws one frame to a file.
 mod ui;
 
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use seiza_common::draw::Canvas;
 use smithay_client_toolkit::{
@@ -30,6 +30,8 @@ use smithay_client_toolkit::{
 use ui::Ui;
 
 const BTN_LEFT: u32 = 0x110;
+const OPEN_SECS: f32 = 0.30;
+const CLOSE_SECS: f32 = 0.18;
 
 struct Help {
     registry_state: RegistryState,
@@ -46,13 +48,33 @@ struct Help {
     dirty: bool,
     exit: bool,
     keys_seen: Option<SystemTime>, // the keys file as last loaded
+    opened: Option<Instant>,
+    closing: Option<Instant>,
+    shown: f32, // the visibility last drawn
     ui: Ui,
 }
 
 impl Help {
+    /// Visibility now, 0..1, and whether it is still moving. The card rises while it opens and drops while it closes.
+    fn visibility(&mut self) -> (f32, bool) {
+        let t = self.opened.map_or(0.0, |o| (o.elapsed().as_secs_f32() / OPEN_SECS).min(1.0));
+        let open = 1.0 - (1.0 - t).powi(3); // eases out: fast, then settles
+        let Some(c) = self.closing else { return (open, t < 1.0) };
+        let ct = (c.elapsed().as_secs_f32() / CLOSE_SECS).min(1.0);
+        if ct >= 1.0 {
+            self.exit = true;
+        }
+        (open.min((1.0 - ct).powi(2)), true)
+    }
+
+    fn close(&mut self) {
+        self.closing.get_or_insert_with(Instant::now);
+        self.dirty = true;
+    }
+
     fn key(&mut self, event: &KeyEvent) {
         match event.keysym {
-            Keysym::Escape | Keysym::q => self.exit = true,
+            Keysym::Escape | Keysym::q => self.close(),
             Keysym::Left => self.ui.go(self.ui.page.saturating_sub(1)),
             Keysym::Right | Keysym::Tab => self.ui.go(self.ui.page + 1),
             Keysym::Up => self.ui.scroll_by(-1),
@@ -76,11 +98,16 @@ impl Help {
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        if !self.configured || self.frame_pending || !self.dirty {
+        if !self.configured || self.frame_pending {
+            return;
+        }
+        let (e, moving) = self.visibility();
+        if self.exit || !(self.dirty || moving || self.ui.pending() || e != self.shown) {
             return;
         }
         self.dirty = false;
-        let cv: Canvas = self.ui.render(self.size.0 as usize, self.size.1 as usize);
+        self.shown = e;
+        let cv: Canvas = self.ui.render(self.size.0 as usize, self.size.1 as usize, e);
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         // shortcut: assumes a little-endian host, which Argb8888 in memory then matches.
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
@@ -126,6 +153,7 @@ impl LayerShellHandler for Help {
         }
         self.size = size;
         self.configured = true;
+        self.opened.get_or_insert_with(Instant::now);
         self.dirty = true;
         self.draw(qh);
     }
@@ -187,6 +215,10 @@ impl PointerHandler for Help {
                 PointerEventKind::Press { button: BTN_LEFT, .. } => {
                     self.dirty |= self.ui.press(e.position.0 as f32, e.position.1 as f32, self.size.0 as f32, self.size.1 as f32);
                 }
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    self.dirty |= self.ui.hover(Some((e.position.0 as f32, e.position.1 as f32)), self.size.0 as f32, self.size.1 as f32);
+                }
+                PointerEventKind::Leave { .. } => self.dirty |= self.ui.hover(None, self.size.0 as f32, self.size.1 as f32),
                 PointerEventKind::Axis { vertical, .. } if vertical.absolute != 0.0 => {
                     self.ui.scroll_by(if vertical.absolute > 0.0 { 1 } else { -1 });
                     self.dirty = true;
@@ -234,8 +266,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new();
-        ui.go(args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0));
-        let cv = ui.render(1920, 1080);
+        ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0).min(ui::PAGES.len() - 1);
+        let size = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+        let cv = ui.render(size(3, 1920), size(4, 1080), args.get(5).and_then(|v| v.parse().ok()).unwrap_or(1.0));
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
@@ -277,6 +310,9 @@ fn main() {
         dirty: true,
         exit: false,
         keys_seen: std::fs::metadata(seiza_common::config::path("keys")).and_then(|m| m.modified()).ok(),
+        opened: None,
+        closing: None,
+        shown: -1.0,
         ui: Ui::new(),
     };
     while !app.exit {

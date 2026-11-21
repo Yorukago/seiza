@@ -123,6 +123,7 @@ pub fn blend(px: &mut u32, c: Rgba, cover: f32) {
     *px = na << 24 | ch(16, c[0]) << 16 | ch(8, c[1]) << 8 | ch(0, c[2]);
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     pub w: usize,
     pub h: usize,
