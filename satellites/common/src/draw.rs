@@ -3,11 +3,26 @@
 use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings};
+use crate::config;
 
 
-/// First usable sans font: whatever fontconfig says, else a few well-known paths.
+/// The font file fontconfig picks for `family`, but only if it really is that family (it answers with
+/// some other font for a name it does not know).
+fn font_file(family: &str) -> Option<String> {
+    let out = std::process::Command::new("fc-match").args(["-f", "%{family}|%{file}", &format!("{family}:style=Regular")]).output().ok()?;
+    let out = String::from_utf8(out.stdout).ok()?;
+    let (found, file) = out.split_once('|')?;
+    found.split(',').any(|f| f.trim().eq_ignore_ascii_case(family)).then(|| file.to_string())
+}
+
+/// First usable font: the one named by `look { font }` (Maple Mono NF unless set), else the system sans,
+/// else a few well-known paths.
 pub fn load_font() -> Font {
-    let from_fc = std::process::Command::new("fc-match").args(["-f", "%{file}", "sans"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok());
+    let family = config::get("look", "font").unwrap_or_else(|| "Maple Mono NF".into());
+    let from_fc = font_file(&family).or_else(|| {
+        let o = std::process::Command::new("fc-match").args(["-f", "%{file}", "sans"]).output().ok()?;
+        String::from_utf8(o.stdout).ok()
+    });
     let candidates = from_fc.into_iter().chain(
         ["/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"].map(String::from),
     );

@@ -47,6 +47,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
 pub const OPTS: &[Opt] = &[
     o("look", "wallpaper", Text, "", "picture the palette is borrowed from (wallust reads it)"),
     o("look", "slideshow", Num(0.0, 1440.0), "0", "minutes between pictures: the next one in the wallpaper's folder recolors the sky; 0 is off"),
+    o("look", "font", Text, "Maple Mono NF", "font family for every satellite; one fontconfig does not know falls back to the system sans"),
     o("look", "style", Pick(&["soft", "hard", "comp", "salient"]), "soft", "how boldly the picture colors the sky"),
     o("look", "contrast_guard", Flag, "on", "swap in cream text when a picture is too dim to read on"),
     o("look", "clock", Pick(&["24", "12"]), "24", "24 or 12 hour clock"),
