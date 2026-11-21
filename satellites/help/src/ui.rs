@@ -15,8 +15,6 @@ use seiza_common::{
 const W0: f32 = 1240.0;
 const H0: f32 = 740.0;
 const PAD: f32 = 30.0; // between the card's edge and its content
-const ROW_H: f32 = 34.0; // a row of the plain pages
-const LINE_H: f32 = 20.0; // a wrapped line that is not the last of its row
 const TOP: f32 = 168.0; // where a page's body starts, from the card's top
 const FOOT: f32 = 60.0; // the strip under the body
 const SLIDE: f32 = 90.0; // how far below its place the card starts, and ends when it closes
@@ -73,78 +71,106 @@ const WHAT: &[(&str, &str, &str)] = &[
 /// The order the groups are listed in; a command no row above knows goes under "Other".
 const GROUPS: [&str; 7] = ["Sky", "Windows", "Apps", "Capture", "Media", "Session", "Other"];
 
-const COMMANDS: &[(&str, &str)] = &[
-    ("seiza overview", "zoom out over every star"),
-    ("seiza pan DX DY", "move the camera by that many pixels"),
-    ("seiza zoom-reset", "back to full size"),
-    ("seiza goto N", "fly to star number N"),
-    ("seiza new-star", "make a star next to the current one"),
-    ("seiza delete-star [N]", "delete star N (default: current); it must be empty"),
-    ("seiza rename-star N NAME", "give star N a name"),
-    ("seiza add-star X Y", "a star centered there"),
-    ("seiza move-star N X Y", "move a star"),
-    ("seiza link A B", "toggle a thread between two stars"),
-    ("seiza figure NAME|none", "lay the stars out on a template"),
-    ("seiza save NAME / load NAME", "keep or open a constellation"),
-    ("seiza new-constellation NAME", "a fresh one with a single star"),
-    ("seiza move-window DX DY", "move the focused window"),
-    ("seiza resize-window DW DH", "grow or shrink it"),
-    ("seiza focus DX DY", "focus the nearest window that way"),
-    ("seiza maximize / close-window", "the focused window"),
-    ("seiza tile", "tile or untile this star (remembered)"),
-    ("seiza switch", "the window switcher (Super+Tab)"),
-    ("seiza cycle-window", "focus the next window"),
-    ("seiza reload-config", "re-read keys, motion and the frame"),
-    ("seiza relaunch", "restart the satellites"),
-    ("seiza quit", "leave Seiza"),
-    ("anything else", "runs as a shell command"),
+type Cards = &'static [(&'static str, &'static [(&'static str, &'static str)])];
+
+const COMMANDS: Cards = &[
+    ("sky", &[
+        ("seiza overview", "zoom out over every star"),
+        ("seiza pan DX DY", "move the camera by that many pixels"),
+        ("seiza zoom-reset", "back to full size"),
+        ("seiza goto N", "fly to star number N"),
+        ("seiza new-star", "make a star next to the current one"),
+        ("seiza delete-star [N]", "delete star N (default: current); it must be empty"),
+        ("seiza rename-star N NAME", "give star N a name"),
+        ("seiza add-star X Y", "a star centered there"),
+        ("seiza move-star N X Y", "move a star"),
+        ("seiza link A B", "toggle a thread between two stars"),
+        ("seiza figure NAME|none", "lay the stars out on a template"),
+    ]),
+    ("constellations", &[
+        ("seiza save NAME / load NAME", "keep or open a constellation"),
+        ("seiza new-constellation NAME", "a fresh one with a single star"),
+    ]),
+    ("windows", &[
+        ("seiza move-window DX DY", "move the focused window"),
+        ("seiza resize-window DW DH", "grow or shrink it"),
+        ("seiza focus DX DY", "focus the nearest window that way"),
+        ("seiza maximize / close-window", "the focused window"),
+        ("seiza tile", "tile or untile this star (remembered)"),
+        ("seiza switch", "the window switcher (Super+Tab)"),
+        ("seiza cycle-window", "focus the next window"),
+    ]),
+    ("session", &[
+        ("seiza reload-config", "re-read keys, motion and the frame"),
+        ("seiza relaunch", "restart the satellites"),
+        ("seiza quit", "leave Seiza"),
+        ("anything else", "runs as a shell command"),
+    ]),
 ];
 
-const GUIDE: &[(&str, &str)] = &[
-    ("star", "a place on the big canvas. Windows live in a star."),
-    ("constellation", "a set of stars you can save and come back to."),
-    ("overview", "zoom out to see every star; click one to fly in."),
-    ("thread", "a line you draw between two stars, just for you."),
-    ("satellite", "a small program Seiza starts: bar, sky, launcher..."),
-    ("launcher", "type to find an app; Tab flips list and stars."),
-    ("quick answers", "launcher: 2*(3+4), 5 km to mi, :moon. Enter copies."),
-    ("tiling", "a tiled star arranges its windows; Super+t flips it."),
-    ("rules", "rule in seiza.kdl: send an app to a star, size it."),
-    ("cards", "drag to pin a card to a star; right-click moves it on."),
-    ("settings", "colors, frame, bar, sky and motion; most apply at once."),
-    ("lock", "the lock screen; it asks for your normal password."),
-    ("every window", "can be moved and resized from the keyboard too."),
+const GUIDE: Cards = &[
+    ("the sky", &[
+        ("star", "a place on the big canvas. Windows live in a star."),
+        ("constellation", "a set of stars you can save and come back to."),
+        ("overview", "zoom out to see every star; click one to fly in."),
+        ("thread", "a line you draw between two stars, just for you."),
+    ]),
+    ("programs", &[
+        ("satellite", "a small program Seiza starts: bar, sky, launcher..."),
+        ("launcher", "type to find an app; Tab flips list and stars."),
+        ("quick answers", "launcher: 2*(3+4), 5 km to mi, :moon. Enter copies."),
+        ("settings", "colors, frame, bar, sky and motion; most apply at once."),
+        ("lock", "the lock screen; it asks for your normal password."),
+    ]),
+    ("windows and cards", &[
+        ("tiling", "a tiled star arranges its windows; Super+t flips it."),
+        ("rules", "rule in seiza.kdl: send an app to a star, size it."),
+        ("cards", "drag to pin a card to a star; right-click moves it on."),
+        ("every window", "can be moved and resized from the keyboard too."),
+    ]),
 ];
 
 /// Copy these into ~/.config/seiza/seiza.kdl.
-const RECIPES: &[(&str, &str)] = &[
-    ("hide the bar", "bar { autohide on }  The bar becomes a thin strip at the top edge and grows when the pointer touches it."),
-    ("tile every star", "layout { tile on; max 3; gap 10 }  The first 3 windows of a star are laid out for you. Super+t flips one star."),
-    ("send an app to a star", "rule app=\"steam\" star=\"games\" mode=\"maximize\"  The first rule that matches wins. seiza debug-windows shows app ids."),
-    ("size a window", "rule app=\"pavucontrol\" w=700 h=500  Give both w and h. title=\"part of the title\" matches by title instead."),
-    ("see the weather", "weather { place \"Lisbon\" }, then turn on the weather card in settings, widgets. Without a place it guesses from your address."),
-    ("see what is coming up", "calendar { source \"~/cal.ics\" }, then turn on the agenda card. A calendar's private address works too."),
-    ("change the wallpaper by itself", "look { slideshow 30 }  Every 30 minutes the next picture in the wallpaper's folder recolors the sky. 0 is off."),
-    ("lock when you leave", "idle { dim 120; lock 300; off 600 }  Seconds without input. 0 is never. Anything watching video keeps it awake."),
-    ("bind a key", "binds { Super+Return { spawn \"kitty\" } }  Several actions: Super+g { goto 1; spawn \"kitty\"; }"),
-    ("name a few actions", "def my-thing { goto 1; spawn \"notify-send hi\"; }  then use my-thing in a bind."),
-    ("choose what starts", "autostart { spawn \"seiza-bar\"; spawn \"seiza-starfield\" }  Leave it out to get the usual ones. An empty block starts nothing."),
-    ("check your file", "seiza-conf check  names mistakes by line. Saving the file reloads it by itself."),
+const RECIPES: Cards = &[
+    ("look", &[
+        ("hide the bar", "bar { autohide on }  The bar becomes a thin strip at the top edge and grows when the pointer touches it."),
+        ("change the wallpaper by itself", "look { slideshow 30 }  Every 30 minutes the next picture in the wallpaper's folder recolors the sky. 0 is off."),
+        ("see the weather", "weather { place \"Lisbon\" }, then turn on the weather card in settings, widgets. Without a place it guesses from your address."),
+        ("see what is coming up", "calendar { source \"~/cal.ics\" }, then turn on the agenda card. A calendar's private address works too."),
+    ]),
+    ("windows", &[
+        ("tile every star", "layout { tile on; max 3; gap 10 }  The first 3 windows of a star are laid out for you. Super+t flips one star."),
+        ("send an app to a star", "rule app=\"steam\" star=\"games\" mode=\"maximize\"  The first rule that matches wins. seiza debug-windows shows app ids."),
+        ("size a window", "rule app=\"pavucontrol\" w=700 h=500  Give both w and h. title=\"part of the title\" matches by title instead."),
+    ]),
+    ("session", &[
+        ("lock when you leave", "idle { dim 120; lock 300; off 600 }  Seconds without input. 0 is never. Anything watching video keeps it awake."),
+        ("choose what starts", "autostart { spawn \"seiza-bar\"; spawn \"seiza-starfield\" }  Leave it out to get the usual ones. An empty block starts nothing."),
+        ("check your file", "seiza-conf check  names mistakes by line. Saving the file reloads it by itself."),
+    ]),
+    ("keys", &[
+        ("bind a key", "binds { Super+Return { spawn \"kitty\" } }  Several actions: Super+g { goto 1; spawn \"kitty\"; }"),
+        ("name a few actions", "def my-thing { goto 1; spawn \"notify-send hi\"; }  then use my-thing in a bind."),
+    ]),
 ];
 
-const FILES: &[(&str, &str)] = &[
-    ("seiza.kdl", "most settings in one file; seiza-conf docs lists them."),
-    ("keys", "Mods+Key = command. Yours add to the defaults. Saved = shown here."),
-    ("motion", "how the camera glides: pan_secs, easing, reduce."),
-    ("palette", "the sky's colors (role=#hex). seiza-wallpaper writes it."),
-    ("frame", "window corner radius, border and glow."),
-    ("sky", "the starfield: nebula and friends."),
-    ("look", "clock format, wallpaper, palette style, slideshow minutes."),
-    ("widgets", "which cards show; weather and agenda are opt-in."),
-    ("launcher", "style, search and terminal."),
-    ("autostart", "programs to start with Seiza, one per line."),
-    ("figures/NAME.fig", "your own constellation templates."),
-    ("*.const", "saved constellations."),
+const FILES: Cards = &[
+    ("in ~/.config/seiza", &[
+        ("seiza.kdl", "most settings in one file; seiza-conf docs lists them."),
+        ("keys", "Mods+Key = command. Yours add to the defaults. Saved = shown here."),
+        ("motion", "how the camera glides: pan_secs, easing, reduce."),
+        ("palette", "the sky's colors (role=#hex). seiza-wallpaper writes it."),
+        ("frame", "window corner radius, border and glow."),
+        ("sky", "the starfield: nebula and friends."),
+        ("look", "clock format, wallpaper, palette style, slideshow minutes."),
+        ("widgets", "which cards show; weather and agenda are opt-in."),
+        ("launcher", "style, search and terminal."),
+        ("autostart", "programs to start with Seiza, one per line."),
+    ]),
+    ("yours to make", &[
+        ("figures/NAME.fig", "your own constellation templates."),
+        ("*.const", "saved constellations."),
+    ]),
 ];
 
 /// One line of the keys page: a group heading, or a binding drawn as keycaps (the last is the key itself)
@@ -265,24 +291,66 @@ pub struct Ui {
     t13: Text,
 }
 
-/// The options table as help rows: a heading per section, then each option with its range and default.
-fn option_rows() -> Vec<(String, String)> {
+/// The options table as cards: one per section, its blurb first, then each option with its range and default.
+fn options_cards() -> Vec<(String, Vec<(String, String)>)> {
     use seiza_common::conf::{Kind, OPTS, SECTIONS};
-    let mut rows = vec![];
-    for (sec, what) in SECTIONS {
-        rows.push((format!("[{sec}]"), what.to_string()));
-        for o in OPTS.iter().filter(|o| o.section == *sec) {
-            let hint = match &o.kind {
-                Kind::Flag => "on or off".to_string(),
-                Kind::Num(lo, hi) => format!("{lo} to {hi}"),
-                Kind::Pick(list) => list.join(", "),
-                Kind::Text => "text".to_string(),
-            };
-            let default = if o.default.is_empty() { "empty".to_string() } else { o.default.to_string() };
-            rows.push((format!("  {}", o.key), format!("{}  ({hint}; default {default})", o.doc)));
-        }
+    SECTIONS
+        .iter()
+        .map(|(sec, what)| {
+            let mut rows = vec![(String::new(), what.to_string())];
+            for o in OPTS.iter().filter(|o| o.section == *sec) {
+                let hint = match &o.kind {
+                    Kind::Flag => "on or off".to_string(),
+                    Kind::Num(lo, hi) => format!("{lo} to {hi}"),
+                    Kind::Pick(list) => list.join(", "),
+                    Kind::Text => "text".to_string(),
+                };
+                let default = if o.default.is_empty() { "empty".to_string() } else { o.default.to_string() };
+                rows.push((o.key.to_string(), format!("{}  ({hint}; default {default})", o.doc)));
+            }
+            (sec.to_string(), rows)
+        })
+        .collect()
+}
+
+/// The cards of a text page (every page but keys).
+fn text_cards(page: usize) -> Vec<(String, Vec<(String, String)>)> {
+    let own = |g: Cards| g.iter().map(|(t, rows)| (t.to_string(), rows.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect())).collect();
+    match page {
+        1 => own(COMMANDS),
+        2 => own(GUIDE),
+        3 => own(RECIPES),
+        4 => options_cards(),
+        _ => own(FILES),
     }
-    rows
+}
+
+/// Deal cards of these heights into `cols` columns, each into the shortest column: the tallest first when
+/// `tallest_first` (they come out level), else in their own order (they read left to right).
+/// Returns each card's column and each column's height.
+fn deal(cols: usize, heights: &[f32], tallest_first: bool) -> (Vec<usize>, Vec<f32>) {
+    let mut by_height: Vec<usize> = (0..heights.len()).collect();
+    if tallest_first {
+        by_height.sort_by(|&a, &b| heights[b].total_cmp(&heights[a]));
+    }
+    let (mut col, mut used) = (vec![0usize; heights.len()], vec![0.0f32; cols]);
+    for i in by_height {
+        let c = (0..cols).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
+        col[i] = c;
+        used[c] += heights[i] + GAP;
+    }
+    (col, used)
+}
+
+/// How a text page is laid out for the current width.
+struct TextPlan {
+    cols: usize,
+    col_w: f32,
+    col: Vec<usize>,
+    used: Vec<f32>,
+    heights: Vec<f32>,
+    cards: Vec<(String, Vec<(String, String)>)>,
+    lines: Vec<Vec<Vec<String>>>, // per card, per row: the description wrapped to the card
 }
 
 pub fn keys_path() -> std::path::PathBuf {
@@ -327,60 +395,38 @@ impl Ui {
         self.h - TOP - FOOT
     }
 
-    fn key_w(&self) -> f32 {
-        match self.page {
-            3 | 4 => 190.0,
-            _ => 250.0,
-        }
+    /// How many columns of cards fit (MINCOL each) and how wide they are.
+    fn columns(&self) -> (usize, f32) {
+        let cw = self.cw();
+        let cols = (((cw + GAP) / (MINCOL + GAP)) as usize).clamp(1, 3);
+        (cols, (cw - GAP * (cols - 1) as f32) / cols as f32)
     }
 
-    /// (left, right, height) lines of a plain page. A long right side is wrapped onto lines with an empty left;
-    /// the last line of a group has room under it, so a one-line group is ROW_H tall as it always was.
-    fn rows(&mut self) -> Vec<(String, String, f32)> {
-        let table: Vec<(String, String)> = match self.page {
-            1 => COMMANDS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
-            2 => GUIDE.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
-            3 => RECIPES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
-            4 => option_rows(),
-            _ => FILES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
-        };
-        let room = self.cw() - self.key_w() - 10.0;
-        let mut out = vec![];
-        for (left, right) in table {
-            let mut lines: Vec<String> = vec![];
-            for word in right.split(' ') {
-                match lines.last_mut() {
-                    Some(l) if self.t13.width(&format!("{l} {word}")) <= room => {
-                        l.push(' ');
-                        l.push_str(word);
-                    }
-                    _ => lines.push(word.to_string()),
+    /// `text` broken into lines no wider than `room`.
+    fn wrap(&mut self, text: &str, room: f32) -> Vec<String> {
+        let mut lines: Vec<String> = vec![];
+        for word in text.split(' ') {
+            match lines.last_mut() {
+                Some(l) if self.t13.width(&format!("{l} {word}")) <= room => {
+                    l.push(' ');
+                    l.push_str(word);
                 }
-            }
-            let n = lines.len();
-            for (i, line) in lines.into_iter().enumerate() {
-                out.push((if i == 0 { left.clone() } else { String::new() }, line, if i + 1 == n { ROW_H } else { LINE_H }));
+                _ => lines.push(word.to_string()),
             }
         }
-        out
+        lines
     }
 
-    fn visible(&self) -> usize {
-        (self.body_h() / ROW_H) as usize
-    }
-
-    /// (steps in the page, steps that fit); the keys page counts its tallest column in keys rows.
+    /// (steps in the page, steps that fit); a step is one keys row, and the page is as tall as its tallest column.
     fn extent(&mut self) -> (usize, usize) {
-        if self.page != 0 {
-            return (self.rows().len(), self.visible());
-        }
-        let tallest = self.key_plan().used.iter().cloned().fold(0.0, f32::max);
+        let used = if self.page == 0 { self.key_plan().used } else { self.text_plan().used };
+        let tallest = used.iter().cloned().fold(0.0, f32::max);
         ((tallest / ROW1).ceil() as usize, (self.body_h() / ROW1) as usize)
     }
 
     pub fn scroll_by(&mut self, d: isize) {
         let (total, visible) = self.extent();
-        let d = if self.page == 0 { d * 2 } else { d }; // a keys row is short
+        let d = d * 2; // a step is one short row
         self.scroll = (self.scroll as isize + d).clamp(0, total.saturating_sub(visible) as isize) as usize;
         self.stale = true;
         self.body_stale = true;
@@ -465,9 +511,7 @@ impl Ui {
     fn key_plan(&mut self) -> KeyPlan {
         let keys = std::mem::take(&mut self.keys); // so the text can be measured while these are borrowed
         let groups = key_groups(&keys);
-        let cw = self.cw();
-        let cols = (((cw + GAP) / (MINCOL + GAP)) as usize).clamp(1, 3);
-        let col_w = (cw - GAP * (cols - 1) as f32) / cols as f32;
+        let (cols, col_w) = self.columns();
         let (mut wrap, mut heights) = (vec![], vec![]);
         for (_, binds) in &groups {
             let mut h = kit::CARD_HEAD + 6.0;
@@ -480,14 +524,7 @@ impl Ui {
             wrap.push(flags);
             heights.push(h);
         }
-        let mut by_height: Vec<usize> = (0..groups.len()).collect();
-        by_height.sort_by(|&a, &b| heights[b].total_cmp(&heights[a]));
-        let (mut col, mut used) = (vec![0usize; groups.len()], vec![0.0f32; cols]);
-        for i in by_height {
-            let c = (0..cols).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
-            col[i] = c;
-            used[c] += heights[i] + GAP;
-        }
+        let (col, used) = deal(cols, &heights, true);
         drop(groups);
         self.keys = keys;
         KeyPlan { cols, col_w, col, used, heights, wrap }
@@ -531,22 +568,55 @@ impl Ui {
         self.keys = keys;
     }
 
-    /// The plain pages: two columns of text rows.
-    fn draw_rows(&mut self, cv: &mut Canvas) {
+    /// The text pages as cards: each row a name (when it has one) with its description wrapped under it.
+    fn text_plan(&mut self) -> TextPlan {
+        let cards = text_cards(self.page);
+        let (cols, col_w) = self.columns();
+        let (mut lines, mut heights) = (vec![], vec![]);
+        for (_, rows) in &cards {
+            let mut h = kit::CARD_HEAD + 4.0;
+            let mut card_lines = vec![];
+            for (name, desc) in rows {
+                let l = self.wrap(desc, col_w - 36.0);
+                h += 12.0 + if name.is_empty() { 0.0 } else { 24.0 } + l.len() as f32 * 18.0 + 12.0;
+                card_lines.push(l);
+            }
+            lines.push(card_lines);
+            heights.push(h);
+        }
+        let (col, used) = deal(cols, &heights, false);
+        TextPlan { cols, col_w, col, used, heights, cards, lines }
+    }
+
+    /// The text pages' cards, scrolled by `self.scroll` steps, drawn at the body's own origin.
+    fn draw_text(&mut self, cv: &mut Canvas) {
         let p = palette();
-        let (rows, key_w, bh, cw) = (self.rows(), self.key_w(), self.body_h(), self.cw());
-        let mut y = 0.0;
-        for (n, (left, right, h)) in rows.iter().enumerate().skip(self.scroll) {
-            if y + h > bh {
-                break;
+        let (plan, bh) = (self.text_plan(), self.body_h());
+        let mut y = vec![-(self.scroll as f32) * ROW1; plan.cols];
+        for (i, (title, rows)) in plan.cards.iter().enumerate() {
+            let (c, h) = (plan.col[i], plan.heights[i]);
+            let (x, top) = (c as f32 * (plan.col_w + GAP), y[c]);
+            y[c] += h + GAP;
+            if top + h < 0.0 || top > bh {
+                continue; // not on screen
             }
-            if rows.get(n + 1).is_none_or(|r| !r.0.is_empty()) {
-                cv.round_rect(0.0, y + h - 4.0, cw, 1.0, 0.0, rgba(p.text, 0.07)); // under the last line of a row
+            kit::card(cv, &mut self.t13, x, top, plan.col_w, h, title);
+            let mut ry = top + kit::CARD_HEAD;
+            for (k, (name, _)) in rows.iter().enumerate() {
+                if k > 0 {
+                    cv.round_rect(x + 1.0, ry, plan.col_w - 2.0, 1.0, 0.0, rgba(p.text, 0.06));
+                }
+                let mut by = ry + 12.0;
+                if !name.is_empty() {
+                    self.t15.draw(cv, x + 18.0, by + 14.0, name, rgba(p.star, 0.9));
+                    by += 24.0;
+                }
+                for line in &plan.lines[i][k] {
+                    self.t13.draw(cv, x + 18.0, by + 12.0, line, rgba(p.text, if name.is_empty() { 0.5 } else { 0.7 }));
+                    by += 18.0;
+                }
+                ry = by + 12.0;
             }
-            let base = y + if *h == ROW_H && !left.is_empty() { 20.0 } else { 14.0 }; // a one-line row sits in the middle; wrapped lines are packed
-            self.t13.draw(cv, 0.0, base, left, rgba(p.star, if left.starts_with('[') { 1.0 } else { 0.85 }));
-            self.t13.draw(cv, key_w, base, right, rgba(p.text, 0.85));
-            y += h;
         }
     }
 
@@ -620,7 +690,7 @@ impl Ui {
             if self.page == 0 {
                 self.draw_keys(&mut body);
             } else {
-                self.draw_rows(&mut body);
+                self.draw_text(&mut body);
             }
             self.body = Some(body);
             self.body_stale = false;
@@ -658,14 +728,28 @@ mod tests {
 
     #[test]
     fn the_options_page_lists_every_setting_with_its_default() {
-        let rows = option_rows();
+        let cards = options_cards();
+        let rows: Vec<&(String, String)> = cards.iter().flat_map(|(_, r)| r).collect();
         for key in ["autohide", "slideshow", "place", "source", "tile"] {
-            assert!(rows.iter().any(|(l, _)| l.trim() == key), "{key} missing");
+            assert!(rows.iter().any(|(l, _)| l == key), "{key} missing");
         }
-        assert!(rows.iter().any(|(l, r)| l.trim() == "radius" && r.contains("default 14")));
+        assert!(rows.iter().any(|(l, r)| l == "radius" && r.contains("default 14")));
         let mut ui = Ui::new();
         ui.go(4);
-        assert!(ui.rows().iter().all(|(_, _, h)| *h > 0.0));
+        let plan = ui.text_plan();
+        assert!(plan.heights.iter().all(|h| *h > kit::CARD_HEAD));
+        assert_eq!(plan.lines.len(), cards.len());
+    }
+
+    #[test]
+    fn every_text_page_has_cards_whose_rows_all_get_a_line() {
+        let mut ui = Ui::new();
+        for page in 1..PAGES.len() {
+            ui.go(page);
+            let plan = ui.text_plan();
+            assert!(!plan.cards.is_empty(), "page {page}");
+            assert!(plan.lines.iter().flatten().all(|l| !l.is_empty()), "page {page}: a row with no text");
+        }
     }
 
     #[test]
@@ -728,10 +812,12 @@ mod tests {
     #[test]
     fn scroll_stays_in_range() {
         let mut ui = Ui::new();
+        ui.fit(1280.0, 720.0);
         ui.go(1);
+        let (total, visible) = ui.extent();
+        assert!(total > visible, "the commands page does not fit 1280x720");
         ui.scroll_by(1000);
-        let max = ui.rows().len() - ui.visible(); // wrapped lines count, so the font changes it
-        assert_eq!(ui.scroll, max);
+        assert_eq!(ui.scroll, total - visible);
         ui.scroll_by(-1000);
         assert_eq!(ui.scroll, 0);
     }
