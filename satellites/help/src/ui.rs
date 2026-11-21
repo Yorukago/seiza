@@ -6,25 +6,26 @@ use std::time::Instant;
 
 use seiza_common::{
     config,
-    draw::{composite, load_font, Canvas, Text},
+    draw::{load_font, Canvas, Text},
+    kit::{self, Thread},
     palette::{palette, rgba},
 };
 
 /// The card's size before the first draw; after that it follows the screen (see `fit`).
 const W0: f32 = 1240.0;
 const H0: f32 = 740.0;
-const NAV_W: f32 = 190.0;
-const ROW_H: f32 = 34.0;
+const PAD: f32 = 30.0; // between the card's edge and its content
+const ROW_H: f32 = 34.0; // a row of the plain pages
 const LINE_H: f32 = 20.0; // a wrapped line that is not the last of its row
-const TOP: f32 = 112.0;
-const KROW: f32 = 25.0; // a row of the keys page
-const KHEAD: f32 = 34.0; // a group's heading
-const KSKIP: f32 = 14.0; // between groups
-const KGAP: f32 = 28.0; // between its two columns
-const KDESC: f32 = 274.0; // where a description starts, from the column's left
+const TOP: f32 = 168.0; // where a page's body starts, from the card's top
+const FOOT: f32 = 60.0; // the strip under the body
 const SLIDE: f32 = 90.0; // how far below its place the card starts, and ends when it closes
-const GLIDE_SECS: f32 = 0.16; // the nav pill sliding to another page
-const KMIN: f32 = 440.0; // the narrowest a keys column may get before the page goes down to one column
+const GLIDE_SECS: f32 = 0.16; // the big star moving to another page
+const GAP: f32 = 18.0; // between cards
+const MINCOL: f32 = 320.0; // the narrowest a column of cards may get
+const ROW1: f32 = 43.0; // a keys row with its keycaps beside the words
+const ROW2: f32 = 68.0; // ...and with them under the words, when they do not fit beside
+const CAP_SEP: f32 = 18.0; // between two keycaps (the "+")
 
 pub const PAGES: [&str; 6] = ["keys", "commands", "guide", "recipes", "options", "files"];
 
@@ -215,25 +216,52 @@ pub fn key_items(text: &str) -> Vec<Item> {
     out
 }
 
+/// How the keys page is laid out for the current width.
 struct KeyPlan {
-    col: Vec<usize>,  // the column of each group
-    used: Vec<f32>,   // the height of each column
+    cols: usize,
     col_w: f32,
+    col: Vec<usize>,      // the column of each group
+    used: Vec<f32>,       // the height of each column
+    heights: Vec<f32>,    // the height of each group's card
+    wrap: Vec<Vec<bool>>, // per group, per row: keycaps under the words
+}
+
+/// What a key is called on the page.
+fn shown(k: &str) -> &str {
+    match k {
+        "<Direction>" => "\u{2190} \u{2191} \u{2193} \u{2192}",
+        "<Number>" => "number",
+        _ => k,
+    }
+}
+
+/// The keys page's items as (group, [(keys, what)]).
+fn key_groups(keys: &[Item]) -> Vec<(&str, Vec<(&[String], &str)>)> {
+    let mut groups: Vec<(&str, Vec<(&[String], &str)>)> = vec![];
+    for it in keys {
+        match it {
+            Item::Head(g) => groups.push((g, vec![])),
+            Item::Bind(caps, what) => groups.last_mut().expect("a binding follows its heading").1.push((caps, what)),
+        }
+    }
+    groups
 }
 
 pub struct Ui {
     pub page: usize,
-    pub scroll: usize, // rows scrolled off the top
-    hover: Option<usize>, // the nav entry under the pointer
-    glide: Option<(f32, Instant)>, // the nav pill sliding: the entry it left, and when
+    pub scroll: usize, // steps scrolled off the top
+    hover: Option<usize>, // the page star under the pointer
+    glide: Option<(f32, Instant)>, // the big star moving: the page it left, and when
     stale: bool,                   // what is in `content` is out of date
     content: Option<Canvas>,       // the last frame drawn at full visibility
     back: Option<Canvas>,          // the card's plate, which only changes with the screen size
-    w: f32,            // the card's size: most of the screen
+    body: Option<Canvas>,          // the page's body, which only changes with the page, scroll, keys and size
+    body_stale: bool,
+    w: f32, // the card's size: most of the screen
     h: f32,
     keys: Vec<Item>,
     t22: Text,
-    t17: Text,
+    t15: Text,
     t13: Text,
 }
 
@@ -264,25 +292,49 @@ pub fn keys_path() -> std::path::PathBuf {
 impl Ui {
     pub fn new() -> Ui {
         let font = load_font();
-        let mut ui = Ui { page: 0, scroll: 0, hover: None, glide: None, stale: true, content: None, back: None, w: W0, h: H0, keys: vec![], t22: Text::new(font.clone(), 24.0), t17: Text::new(font.clone(), 17.0), t13: Text::new(font, 13.0) };
+        let mut ui = Ui {
+            page: 0,
+            scroll: 0,
+            hover: None,
+            glide: None,
+            stale: true,
+            content: None,
+            back: None,
+            body: None,
+            body_stale: true,
+            w: W0,
+            h: H0,
+            keys: vec![],
+            t22: Text::new(font.clone(), 24.0),
+            t15: Text::new(font.clone(), 15.0),
+            t13: Text::new(font, 13.0),
+        };
         ui.reload_keys();
         ui
     }
 
     pub fn reload_keys(&mut self) {
-        self.stale = true;
         self.keys = key_items(&std::fs::read_to_string(keys_path()).unwrap_or_default());
+        self.stale = true;
+        self.body_stale = true;
+    }
+
+    fn cw(&self) -> f32 {
+        self.w - 2.0 * PAD
+    }
+
+    fn body_h(&self) -> f32 {
+        self.h - TOP - FOOT
     }
 
     fn key_w(&self) -> f32 {
         match self.page {
-            0 => 230.0,
             3 | 4 => 190.0,
             _ => 250.0,
         }
     }
 
-    /// (left, right, height) lines of the page. A long right side is wrapped onto lines with an empty left;
+    /// (left, right, height) lines of a plain page. A long right side is wrapped onto lines with an empty left;
     /// the last line of a group has room under it, so a one-line group is ROW_H tall as it always was.
     fn rows(&mut self) -> Vec<(String, String, f32)> {
         let table: Vec<(String, String)> = match self.page {
@@ -292,7 +344,7 @@ impl Ui {
             4 => option_rows(),
             _ => FILES.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         };
-        let room = self.w - NAV_W - 72.0 - self.key_w() - 10.0;
+        let room = self.cw() - self.key_w() - 10.0;
         let mut out = vec![];
         for (left, right) in table {
             let mut lines: Vec<String> = vec![];
@@ -314,24 +366,24 @@ impl Ui {
     }
 
     fn visible(&self) -> usize {
-        ((self.h - TOP - 24.0) / ROW_H) as usize
+        (self.body_h() / ROW_H) as usize
     }
 
-    /// (rows in the page, rows that fit); the keys page counts its tallest column in key rows.
+    /// (steps in the page, steps that fit); the keys page counts its tallest column in keys rows.
     fn extent(&mut self) -> (usize, usize) {
         if self.page != 0 {
             return (self.rows().len(), self.visible());
         }
-        let (plan, krow) = (self.key_plan(), self.krow());
-        let tallest = plan.used.iter().cloned().fold(0.0, f32::max);
-        ((tallest / krow).ceil() as usize, (self.keys_room() / krow) as usize)
+        let tallest = self.key_plan().used.iter().cloned().fold(0.0, f32::max);
+        ((tallest / ROW1).ceil() as usize, (self.body_h() / ROW1) as usize)
     }
 
     pub fn scroll_by(&mut self, d: isize) {
         let (total, visible) = self.extent();
-        let d = if self.page == 0 { d * 3 } else { d }; // a keys row is short
+        let d = if self.page == 0 { d * 2 } else { d }; // a keys row is short
         self.scroll = (self.scroll as isize + d).clamp(0, total.saturating_sub(visible) as isize) as usize;
         self.stale = true;
+        self.body_stale = true;
     }
 
     pub fn go(&mut self, page: usize) {
@@ -342,9 +394,10 @@ impl Ui {
         self.page = page;
         self.scroll = 0;
         self.stale = true;
+        self.body_stale = true;
     }
 
-    /// Where the nav pill is, as a (fractional) entry number.
+    /// Where the big star is, as a (fractional) page number.
     fn nav_pos(&self) -> f32 {
         let Some((from, t)) = self.glide else { return self.page as f32 };
         let k = (t.elapsed().as_secs_f32() / GLIDE_SECS).min(1.0);
@@ -355,23 +408,28 @@ impl Ui {
         self.glide.is_some_and(|(_, t)| t.elapsed().as_secs_f32() < GLIDE_SECS)
     }
 
-    /// True while a frame is still owed: the pill is moving, or what is shown is out of date.
+    /// True while a frame is still owed: the star is moving, or what is shown is out of date.
     pub fn pending(&self) -> bool {
         self.stale
     }
 
-    /// Size the card to the screen: about three quarters of it, so the desktop shows around it.
+    /// Size the card to the screen: most of it, so the desktop still shows around it.
     fn fit(&mut self, w: f32, h: f32) {
-        self.w = (w * 0.74).clamp(900.0, 1500.0).min(w - 40.0);
-        self.h = (h * 0.80).clamp(600.0, 900.0).min(h - 40.0);
+        self.w = (w * 0.83).clamp(1000.0, 1700.0).min(w - 40.0);
+        self.h = (h * 0.84).clamp(620.0, 940.0).min(h - 40.0);
     }
 
     /// The card sits a little below the middle, under the bar.
     fn origin(&self, w: f32, h: f32) -> (f32, f32) {
-        ((w - self.w) / 2.0, (h - self.h) / 2.0 + 18.0)
+        (((w - self.w) / 2.0).round(), ((h - self.h) / 2.0 + 18.0).round())
     }
 
-    /// A click: on a nav entry it switches page. Returns true if it closed nothing but changed something.
+    /// The row of page stars across the card's top.
+    fn thread(&self, ox: f32, oy: f32) -> Thread {
+        Thread::new(ox + 170.0, ox + self.w - PAD, oy + 40.0, PAGES.len())
+    }
+
+    /// A click: on a page star it switches page. Returns true if it changed something.
     pub fn press(&mut self, x: f32, y: f32, w: f32, h: f32) -> bool {
         match self.nav_at(x, y, w, h) {
             Some(i) => {
@@ -382,15 +440,11 @@ impl Ui {
         }
     }
 
-    /// The nav entry under (x, y), if any.
+    /// The page star under (x, y), if any.
     fn nav_at(&mut self, x: f32, y: f32, w: f32, h: f32) -> Option<usize> {
         self.fit(w, h);
         let (ox, oy) = self.origin(w, h);
-        let (px, py) = (x - ox, y - oy);
-        (0..PAGES.len()).find(|&i| {
-            let ny = 112.0 + i as f32 * 44.0;
-            px >= 14.0 && px < NAV_W - 14.0 && py >= ny && py < ny + 40.0
-        })
+        self.thread(ox, oy).hit(x, y)
     }
 
     /// The pointer moved to `at` (None: it left); true if the highlight changed and a redraw is due.
@@ -401,90 +455,99 @@ impl Ui {
         changed
     }
 
-    /// One keycap at (x, y), 22 tall; returns where the next thing starts.
-    fn cap(&mut self, cv: &mut Canvas, x: f32, y: f32, label: &str) -> f32 {
-        let p = palette();
-        let w = self.t13.width(label) + 16.0;
-        cv.round_rect(x, y, w, 22.0, 6.0, rgba(p.text, 0.45));
-        cv.round_rect(x + 1.0, y + 1.0, w - 2.0, 20.0, 5.0, rgba(p.panel, 1.0));
-        self.t13.draw(cv, x + 8.0, y + 16.0, label, rgba(p.star, 1.0));
-        x + w
+    /// How wide a row of keycaps is.
+    fn caps_w(&mut self, caps: &[String]) -> f32 {
+        caps.iter().map(|c| kit::keycap_w(&mut self.t13, shown(c))).sum::<f32>() + CAP_SEP * caps.len().saturating_sub(1) as f32
     }
 
-    fn krow(&self) -> f32 {
-        if self.h > 800.0 { 28.0 } else { KROW }
-    }
-
-    /// Height available to the keys page's columns.
-    fn keys_room(&self) -> f32 {
-        self.h - TOP - 36.0
-    }
-
-    /// How the keys page is dealt: as many columns as are wide enough (KMIN) and each group whole, the tallest
+    /// The keys page as cards in as many columns as are wide enough (MINCOL); each group whole, the tallest
     /// first, always into the shortest column; within a column the groups keep their order.
-    fn key_plan(&self) -> KeyPlan {
-        let sizes: Vec<usize> = self.keys.iter().fold(vec![], |mut v, it| {
-            match it {
-                Item::Head(_) => v.push(0),
-                _ => *v.last_mut().expect("a binding follows its heading") += 1,
+    fn key_plan(&mut self) -> KeyPlan {
+        let keys = std::mem::take(&mut self.keys); // so the text can be measured while these are borrowed
+        let groups = key_groups(&keys);
+        let cw = self.cw();
+        let cols = (((cw + GAP) / (MINCOL + GAP)) as usize).clamp(1, 3);
+        let col_w = (cw - GAP * (cols - 1) as f32) / cols as f32;
+        let (mut wrap, mut heights) = (vec![], vec![]);
+        for (_, binds) in &groups {
+            let mut h = kit::CARD_HEAD + 6.0;
+            let mut flags = vec![];
+            for (caps, what) in binds {
+                let under = self.t15.width(what) + 24.0 + self.caps_w(caps) > col_w - 36.0;
+                h += if under { ROW2 } else { ROW1 };
+                flags.push(under);
             }
-            v
-        });
-        let room = self.w - NAV_W - 72.0;
-        let cols = if room >= 2.0 * KMIN + KGAP { 2 } else { 1 };
-        let mut by_size: Vec<usize> = (0..sizes.len()).collect();
-        by_size.sort_by_key(|&i| std::cmp::Reverse(sizes[i]));
-        let (mut col, mut used) = (vec![0usize; sizes.len()], vec![0.0f32; cols]);
-        for i in by_size {
+            wrap.push(flags);
+            heights.push(h);
+        }
+        let mut by_height: Vec<usize> = (0..groups.len()).collect();
+        by_height.sort_by(|&a, &b| heights[b].total_cmp(&heights[a]));
+        let (mut col, mut used) = (vec![0usize; groups.len()], vec![0.0f32; cols]);
+        for i in by_height {
             let c = (0..cols).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
             col[i] = c;
-            used[c] += KHEAD + sizes[i] as f32 * self.krow() + KSKIP;
-        }
-        KeyPlan { col, used, col_w: (room - KGAP * (cols - 1) as f32) / cols as f32 }
-    }
-
-    /// The keys page, scrolled by `self.scroll` key rows; whatever does not fit whole is left out.
-    fn draw_keys(&mut self, cv: &mut Canvas, x0: f32, y0: f32) {
-        let p = palette();
-        let (plan, krow) = (self.key_plan(), self.krow());
-        let keys = std::mem::take(&mut self.keys); // so the text can be drawn while these are borrowed
-        let mut groups: Vec<(&str, Vec<&Item>)> = vec![]; // (heading, bindings)
-        for it in &keys {
-            match it {
-                Item::Head(g) => groups.push((g, vec![])),
-                b => groups.last_mut().expect("a binding follows its heading").1.push(b),
-            }
-        }
-        let room = self.keys_room();
-        let fits = |y: f32, h: f32| y >= y0 && y + h <= y0 + room;
-        let mut y = vec![y0 - self.scroll as f32 * krow; plan.used.len()];
-        for (i, (head, binds)) in groups.iter().enumerate() {
-            let c = plan.col[i];
-            let x = x0 + c as f32 * (plan.col_w + KGAP);
-            if fits(y[c], KHEAD) {
-                self.t17.draw(cv, x, y[c] + 18.0, head, rgba(p.star, 1.0));
-                cv.round_rect(x, y[c] + 25.0, plan.col_w, 1.0, 0.0, rgba(p.text, 0.12));
-            }
-            y[c] += KHEAD;
-            for b in binds {
-                let Item::Bind(caps, what) = b else { continue };
-                if fits(y[c], krow) {
-                    let mut cx = x;
-                    for (k, cap) in caps.iter().enumerate() {
-                        if k > 0 {
-                            self.t13.draw(cv, cx + 4.0, y[c] + 15.0, "+", rgba(p.text, 0.5));
-                            cx += 18.0;
-                        }
-                        cx = self.cap(cv, cx, y[c], cap);
-                    }
-                    self.t13.draw(cv, x + KDESC, y[c] + 15.0, what, rgba(p.text, 0.85));
-                }
-                y[c] += krow;
-            }
-            y[c] += KSKIP;
+            used[c] += heights[i] + GAP;
         }
         drop(groups);
         self.keys = keys;
+        KeyPlan { cols, col_w, col, used, heights, wrap }
+    }
+
+    /// The keys page's cards, scrolled by `self.scroll` steps, drawn at the body's own origin.
+    fn draw_keys(&mut self, cv: &mut Canvas) {
+        let p = palette();
+        let (plan, bh) = (self.key_plan(), self.body_h());
+        let keys = std::mem::take(&mut self.keys);
+        let groups = key_groups(&keys);
+        let mut y = vec![-(self.scroll as f32) * ROW1; plan.cols];
+        for (i, (head, binds)) in groups.iter().enumerate() {
+            let (c, h) = (plan.col[i], plan.heights[i]);
+            let (x, top) = (c as f32 * (plan.col_w + GAP), y[c]);
+            y[c] += h + GAP;
+            if top + h < 0.0 || top > bh {
+                continue; // not on screen
+            }
+            kit::card(cv, &mut self.t13, x, top, plan.col_w, h, &head.to_lowercase());
+            let mut ry = top + kit::CARD_HEAD;
+            for (k, (caps, what)) in binds.iter().enumerate() {
+                let under = plan.wrap[i][k];
+                if k > 0 {
+                    cv.round_rect(x + 1.0, ry, plan.col_w - 2.0, 1.0, 0.0, rgba(p.text, 0.06));
+                }
+                let (word_y, cap_x, cap_y) = if under { (ry + 28.0, x + 18.0, ry + 36.0) } else { (ry + 27.0, x + plan.col_w - 18.0 - self.caps_w(caps), ry + 10.0) };
+                self.t15.draw(cv, x + 18.0, word_y, what, rgba(p.text, 0.92));
+                let mut kx = cap_x;
+                for (j, cap) in caps.iter().enumerate() {
+                    if j > 0 {
+                        self.t13.draw(cv, kx + 5.0, cap_y + 17.0, "+", rgba(p.text, 0.45));
+                        kx += CAP_SEP;
+                    }
+                    kx = kit::keycap(cv, &mut self.t13, kx, cap_y, shown(cap));
+                }
+                ry += if under { ROW2 } else { ROW1 };
+            }
+        }
+        drop(groups);
+        self.keys = keys;
+    }
+
+    /// The plain pages: two columns of text rows.
+    fn draw_rows(&mut self, cv: &mut Canvas) {
+        let p = palette();
+        let (rows, key_w, bh, cw) = (self.rows(), self.key_w(), self.body_h(), self.cw());
+        let mut y = 0.0;
+        for (n, (left, right, h)) in rows.iter().enumerate().skip(self.scroll) {
+            if y + h > bh {
+                break;
+            }
+            if rows.get(n + 1).is_none_or(|r| !r.0.is_empty()) {
+                cv.round_rect(0.0, y + h - 4.0, cw, 1.0, 0.0, rgba(p.text, 0.07)); // under the last line of a row
+            }
+            let base = y + if *h == ROW_H && !left.is_empty() { 20.0 } else { 14.0 }; // a one-line row sits in the middle; wrapped lines are packed
+            self.t13.draw(cv, 0.0, base, left, rgba(p.star, if left.starts_with('[') { 1.0 } else { 0.85 }));
+            self.t13.draw(cv, key_w, base, right, rgba(p.text, 0.85));
+            y += h;
+        }
     }
 
     /// The frame at visibility `e` (0 = gone, 1 = fully there): the card rises from below while it fades in.
@@ -503,38 +566,42 @@ impl Ui {
             return content.clone();
         }
         let dy = ((1.0 - e) * SLIDE).round();
-        let (ox, oy) = self.origin(w as f32, h as f32);
+        let oy = self.origin(w as f32, h as f32).1;
         let mut out = Canvas { w, h, px: vec![0; w * h] };
-        composite(&mut out, content, (0.0, 0.0), 1.0, dy, e.max(0.0), Some((ox - 2.0, oy - 2.0, self.w + 4.0, self.h + 4.0 + dy)));
+        out.over_faded(content, dy as i32, e, (oy as usize).saturating_sub(24)..(oy + self.h) as usize + 24);
         out
+    }
+
+    /// The card's plate: a gold glow and edge round the window, its footer line and the words that never change.
+    fn plate(&mut self, w: usize, h: usize) -> Canvas {
+        let p = palette();
+        let (ox, oy) = self.origin(w as f32, h as f32);
+        let mut b = Canvas { w, h, px: vec![0; w * h] };
+        for k in (1..=3).rev() {
+            let k = k as f32 * 4.0;
+            b.round_rect(ox - 1.0 - k, oy - 1.0 - k, self.w + 2.0 + 2.0 * k, self.h + 2.0 + 2.0 * k, 25.0 + k, rgba(p.star, 0.035));
+        }
+        b.round_rect(ox - 1.0, oy - 1.0, self.w + 2.0, self.h + 2.0, 25.0, rgba(p.star, 0.5));
+        b.round_rect(ox, oy, self.w, self.h, 24.0, rgba(p.panel, 1.0));
+        b.round_rect(ox + 1.0, oy + self.h - FOOT + 8.0, self.w - 2.0, 1.0, 0.0, rgba(p.text, 0.07));
+        self.t22.draw(&mut b, ox + PAD, oy + 46.0, "help", rgba(p.text, 0.95));
+        let base = oy + self.h - 22.0;
+        self.t13.draw(&mut b, ox + PAD, base, "click a star to change page  \u{b7}  Left/Right works too  \u{b7}  Up/Down or wheel scrolls", rgba(p.text, 0.4));
+        let quit = "Esc / q: close";
+        let qw = self.t13.width(quit);
+        self.t13.draw(&mut b, ox + self.w - PAD - qw, base, quit, rgba(p.text, 0.4));
+        b
     }
 
     fn draw_card(&mut self, w: usize, h: usize) -> Canvas {
         let p = palette();
         let (ox, oy) = self.origin(w as f32, h as f32);
         if self.back.as_ref().is_none_or(|b| b.w != w || b.h != h) {
-            let mut b = Canvas { w, h, px: vec![0; w * h] };
-            b.round_rect(ox - 1.0, oy - 1.0, self.w + 2.0, self.h + 2.0, 25.0, rgba(p.star, 0.3));
-            b.round_rect(ox, oy, self.w, self.h, 24.0, rgba(p.panel, 1.0));
-            b.round_rect(ox, oy, NAV_W, self.h, 24.0, rgba(p.sky, 0.45));
-            b.round_rect(ox + NAV_W - 30.0, oy, 30.0, self.h, 0.0, rgba(p.panel, 1.0)); // square the right corners,
-            b.round_rect(ox + NAV_W - 30.0, oy, 30.0, self.h, 0.0, rgba(p.sky, 0.45)); // keeping the tint
-            b.round_rect(ox + NAV_W, oy + 20.0, 1.0, self.h - 40.0, 0.0, rgba(p.text, 0.08));
-            self.back = Some(b);
+            self.back = Some(self.plate(w, h));
         }
         let mut cv = self.back.clone().expect("made above");
-
-        self.t13.draw(&mut cv, ox + 28.0, oy + 52.0, "help", rgba(p.text, 0.45));
-        let pill = oy + 112.0 + self.nav_pos() * 44.0;
-        cv.round_rect(ox + 14.0, pill, NAV_W - 28.0, 40.0, 14.0, rgba(p.dust, 0.9));
-        cv.sparkle(ox + 36.0, pill + 20.0, 6.0, rgba(p.star, 1.0));
-        for (i, name) in PAGES.iter().enumerate() {
-            let y = oy + 112.0 + i as f32 * 44.0;
-            if self.hover == Some(i) && i != self.page {
-                cv.round_rect(ox + 14.0, y, NAV_W - 28.0, 40.0, 14.0, rgba(p.dust, 0.4));
-            }
-            self.t17.draw(&mut cv, ox + 56.0, y + 26.0, name, rgba(p.text, if i == self.page { 1.0 } else if self.hover == Some(i) { 0.85 } else { 0.6 }));
-        }
+        let (pos, hover) = (self.nav_pos(), self.hover);
+        self.thread(ox, oy).draw(&mut cv, &mut self.t13, &PAGES, pos, hover);
 
         let blurb = match self.page {
             0 => format!("live from {}: edit it and this updates.", config::path("keys").display()),
@@ -544,37 +611,29 @@ impl Ui {
             4 => "every setting seiza.kdl takes; seiza-conf docs prints the same.".into(),
             _ => format!("in {}", config::path("").display()),
         };
-        let x = ox + NAV_W + 36.0;
-        self.t22.draw(&mut cv, x, oy + 58.0, PAGES[self.page], rgba(p.text, 1.0));
-        self.t13.draw(&mut cv, x, oy + 84.0, &blurb, rgba(p.text, 0.55));
+        self.t22.draw(&mut cv, ox + PAD, oy + 122.0, PAGES[self.page], rgba(p.text, 1.0));
+        self.t13.draw(&mut cv, ox + PAD, oy + 146.0, &blurb, rgba(p.text, 0.55));
 
-        if self.page == 0 {
-            self.draw_keys(&mut cv, x, oy + TOP);
-        } else {
-            let rows = self.rows();
-            let key_w = self.key_w();
-            let mut y = oy + TOP;
-            for (n, (left, right, h)) in rows.iter().enumerate().skip(self.scroll) {
-                if y + h > oy + self.h - 30.0 {
-                    break;
-                }
-                if rows.get(n + 1).is_none_or(|r| !r.0.is_empty()) {
-                    cv.round_rect(x, y + h - 4.0, self.w - NAV_W - 72.0, 1.0, 0.0, rgba(p.text, 0.07)); // under the last line of a row
-                }
-                let base = y + if *h == ROW_H && !left.is_empty() { 20.0 } else { 14.0 }; // a one-line row sits in the middle; wrapped lines are packed
-                self.t13.draw(&mut cv, x, base, left, rgba(p.star, if left.starts_with('[') { 1.0 } else { 0.85 }));
-                self.t13.draw(&mut cv, x + key_w, base, right, rgba(p.text, 0.85));
-                y += h;
+        let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
+        if self.body_stale || self.body.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
+            let mut body = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
+            if self.page == 0 {
+                self.draw_keys(&mut body);
+            } else {
+                self.draw_rows(&mut body);
             }
+            self.body = Some(body);
+            self.body_stale = false;
         }
+        cv.over(self.body.as_ref().expect("made above"), (ox + PAD) as i32, (oy + TOP) as i32);
+
         let (total, visible) = self.extent();
         if total > visible {
-            let (track, frac) = (self.h - TOP - 24.0, visible as f32 / total as f32);
+            let (track, frac) = (bh as f32, visible as f32 / total as f32);
             let top = self.scroll as f32 / total as f32;
-            cv.round_rect(ox + self.w - 14.0, oy + TOP, 4.0, track, 2.0, rgba(p.dust, 0.9));
+            cv.round_rect(ox + self.w - 14.0, oy + TOP, 4.0, track, 2.0, rgba(p.text, 0.1));
             cv.round_rect(ox + self.w - 14.0, oy + TOP + track * top, 4.0, track * frac, 2.0, rgba(p.star, 0.9));
         }
-        self.t13.draw(&mut cv, x, oy + self.h - 18.0, "Left/Right or click: page    Up/Down or wheel: scroll    Esc / q: close", rgba(p.text, 0.4));
         cv
     }
 }
@@ -610,16 +669,16 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_page_fits_its_columns_to_the_screen() {
+    fn the_keys_page_deals_its_cards_into_as_many_columns_as_fit() {
         let bind = |n: usize| (0..n).map(|i| format!("Super+{}Alt = seiza pan {i} 0\n", i)).collect::<String>();
         let mut ui = Ui::new();
         ui.keys = key_items(&(bind(10) + "Super+h = seiza-help\nSuper+q = seiza close-window\nSuper+m = seiza maximize\nSuper+l = seiza-launcher\n"));
         ui.fit(1920.0, 1080.0);
-        assert_eq!(ui.key_plan().used.len(), 2);
-        ui.fit(1280.0, 720.0);
+        assert_eq!(ui.key_plan().cols, 3);
+        ui.fit(1024.0, 600.0);
         let plan = ui.key_plan();
-        assert_eq!(plan.used.len(), 1);
-        assert!(plan.col_w >= KDESC, "a description needs room beside its keys");
+        assert_eq!(plan.cols, 2);
+        assert!(plan.col_w >= MINCOL);
         ui.go(0);
         let (total, visible) = ui.extent();
         ui.scroll_by(1000);
@@ -627,18 +686,33 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_highlights_a_nav_entry_once() {
+    fn keycaps_that_do_not_fit_beside_the_words_go_under_them() {
+        let mut ui = Ui::new();
+        ui.keys = key_items("Super+Ctrl+Left = seiza resize-window -50 0\nSuper+Ctrl+Right = seiza resize-window 50 0\nSuper+q = seiza close-window\n");
+        ui.w = 1000.0; // wide: one column of 940
+        assert_eq!(ui.key_plan().cols, 2);
+        ui.w = 600.0; // narrow: one column
+        let plan = ui.key_plan();
+        assert_eq!(plan.cols, 1);
+        assert!(plan.wrap[0].iter().all(|&u| !u), "room enough: beside");
+        ui.w = 300.0;
+        assert!(ui.key_plan().wrap[0].iter().any(|&u| u), "no room: under");
+    }
+
+    #[test]
+    fn the_pointer_highlights_a_page_star_once() {
         let mut ui = Ui::new();
         ui.fit(1920.0, 1080.0);
         let (ox, oy) = ui.origin(1920.0, 1080.0);
-        assert!(ui.hover(Some((ox + 60.0, oy + 112.0 + 44.0 + 10.0)), 1920.0, 1080.0));
+        let (sx, sy) = ui.thread(ox, oy).star(1);
+        assert!(ui.hover(Some((sx, sy + 10.0)), 1920.0, 1080.0));
         assert_eq!(ui.hover, Some(1));
-        assert!(!ui.hover(Some((ox + 61.0, oy + 112.0 + 44.0 + 12.0)), 1920.0, 1080.0), "same entry, no redraw");
+        assert!(!ui.hover(Some((sx + 1.0, sy + 12.0)), 1920.0, 1080.0), "same star, no redraw");
         assert!(ui.hover(None, 1920.0, 1080.0));
     }
 
     #[test]
-    fn the_nav_pill_glides_then_settles() {
+    fn the_big_star_glides_then_settles() {
         let mut ui = Ui::new();
         ui.render(1280, 720, 1.0);
         assert!(!ui.pending(), "nothing moving, nothing owed");

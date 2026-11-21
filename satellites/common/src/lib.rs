@@ -7,6 +7,7 @@ pub mod config;
 pub mod constellation;
 pub mod draw;
 pub mod figure;
+pub mod kit;
 pub mod palette;
 pub mod sys;
 

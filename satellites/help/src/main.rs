@@ -316,6 +316,8 @@ fn main() {
         ui: Ui::new(),
     };
     while !app.exit {
-        event_queue.blocking_dispatch(&mut app).unwrap();
+        if event_queue.blocking_dispatch(&mut app).is_err() {
+            break; // the compositor went away
+        }
     }
 }
