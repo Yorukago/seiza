@@ -11,6 +11,7 @@ pub mod figure;
 pub mod kit;
 pub mod palette;
 pub mod sys;
+pub mod voyager;
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
