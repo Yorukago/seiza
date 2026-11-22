@@ -1,6 +1,6 @@
 //! seiza-widgets: a clock with the moon's phase, a calendar, the machine's pulse and what is playing,
 //! as cards on the sky, under your windows. Which ones, and in what order, is
-//! `~/.config/seiza/widgets`: one of clock / calendar / system / media / weather / agenda / updates per line (weather, agenda and updates are only shown when listed)
+//! `~/.config/seiza/widgets`: one of clock / calendar / system / media / weather / agenda / updates / voyager per line (weather, agenda, updates and voyager are only shown when listed)
 //! (an empty file shows nothing; no file shows all four). Drag a card to move it: it is then pinned
 //! to the star you dropped it on and only shows there; cards never dragged sit in a row on the first star.
 //! Right-click a card to send it to the next star. Pins are kept in `~/.config/seiza/widgetpos`; delete that file to put the cards back.
@@ -76,6 +76,13 @@ fn start_feeds(cards: &[String], feeds: std::sync::Arc<std::sync::Mutex<Feeds>>)
                 }
                 std::thread::sleep(FEED_EVERY);
             }
+        });
+    }
+    if cards.iter().any(|c| c == "voyager") {
+        // the card reads the newer vector by itself, a minute later at the latest; a day-old cache makes this a no-op
+        std::thread::spawn(|| loop {
+            seiza_common::voyager::refresh_if_stale();
+            std::thread::sleep(Duration::from_secs(6 * 3600));
         });
     }
     if cards.iter().any(|c| c == "updates") {

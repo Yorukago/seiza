@@ -1,4 +1,5 @@
-//! The Voyager 1 page: where the probe is right now, worked out offline by `seiza_common::voyager`.
+//! The Voyager 1 page: where the probe is right now, worked out on this computer by `seiza_common::voyager`
+//! from NASA's Horizons data (fetched about once a day while online, one built-in vector otherwise).
 //!
 //! This part is the numbers and their wording, which need no drawing to test.
 
@@ -7,7 +8,7 @@ use seiza_common::{
     draw::Canvas,
     kit,
     palette::{palette, rgba},
-    voyager::voyager_at,
+    voyager::{light_text, voyager_at},
 };
 
 const AU_KM: f64 = 149_597_870.7;
@@ -42,15 +43,6 @@ pub fn grouped(n: u64) -> String {
         out.push(c);
     }
     out
-}
-
-/// A light time as hours and minutes, or minutes and seconds under an hour.
-pub fn light_text(secs: f64) -> String {
-    let total = secs.max(0.0).round() as u64;
-    match total {
-        0..=3599 => format!("{} min {:02} s", total / 60, total % 60),
-        _ => format!("{} h {:02} min", total / 3600, total % 3600 / 60),
-    }
 }
 
 /// Right ascension in hours as "17h 16m".
@@ -106,7 +98,9 @@ pub struct Voyager {
 
 impl Voyager {
     pub fn new() -> Voyager {
-        Voyager { r: readout(now_secs()) }
+        let r = readout(now_secs());
+        std::thread::spawn(|| seiza_common::voyager::refresh_if_stale()); // a cache over a day old is renewed for the next opening
+        Voyager { r }
     }
 }
 
@@ -158,7 +152,7 @@ impl Page for Voyager {
         let ruler_h = 170.0;
         let miles_y = ruler_y + ruler_h + CARD_GAP;
         let miles_h = kit::CARD_HEAD + 18.0 + MILESTONES.len() as f32 * 30.0;
-        let note = kit::wrap(f.small, "worked out here from one measured position (november 2026), so it stays within about 0.1 AU for ten years either side. no network involved.", w);
+        let note = kit::wrap(f.small, "worked out here from a position NASA measured (JPL Horizons, fetched about once a day while you are online; november 2026 is built in for when you are not). it flies in a straight line from there, so it stays within about 0.1 AU for ten years either side.", w);
         let height = (miles_y + miles_h + 14.0 + note.len() as f32 * 18.0 + 10.0).ceil();
         let mut c = Canvas { w: cv.w, h: height as usize, px: vec![0; cv.w * height as usize] };
 

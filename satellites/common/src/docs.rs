@@ -93,7 +93,7 @@ pub const FILES: Cards = &[
         ("frame", "window corner radius, border and glow."),
         ("sky", "the starfield: nebula and friends."),
         ("look", "clock format, wallpaper, palette style, slideshow minutes."),
-        ("widgets", "which cards show; weather, agenda and updates are opt-in."),
+        ("widgets", "which cards show; weather, agenda, updates and voyager are opt-in."),
         ("launcher", "style, search and terminal."),
         ("autostart", "programs to start with Seiza, one per line."),
     ]),

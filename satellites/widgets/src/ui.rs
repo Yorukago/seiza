@@ -8,6 +8,7 @@ use seiza_common::{
     draw::{shared_font, Canvas, Text},
     local_time,
     palette::{palette, rgba},
+    voyager::{light_text, voyager_at},
 };
 
 const GAP: f32 = 22.0;
@@ -15,11 +16,11 @@ const TOP: f32 = 64.0; // where the first card sits until it is dragged: under t
 const MARGIN: f32 = 26.0; // from the left edge
 /// Where cards sit until they are dragged: two columns on the left and middle of the sky, so the top-right
 /// stays free for the toasts. Each column lists its cards top to bottom.
-const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda", "updates"]];
+const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda", "updates", "voyager"]];
 const HISTORY: usize = 60;
 const MEDIA_BTN_Y: f32 = 146.0;
 const BUTTONS: [(f32, &str); 3] = [(-44.0, "previous"), (0.0, "play-pause"), (44.0, "next")];
-const CARDS: [&str; 7] = ["clock", "calendar", "system", "media", "weather", "agenda", "updates"];
+const CARDS: [&str; 8] = ["clock", "calendar", "system", "media", "weather", "agenda", "updates", "voyager"];
 
 /// What the system card shows; filled by the main loop once a second.
 #[derive(Default, Clone, PartialEq)]
@@ -298,6 +299,7 @@ impl Ui {
             "weather" => (340.0, 150.0),
             "agenda" => (340.0, 200.0),
             "updates" => (340.0, 150.0),
+            "voyager" => (340.0, 150.0),
             _ => (340.0, 236.0),
         }
     }
@@ -475,6 +477,7 @@ impl Ui {
             "weather" => self.weather_card(&mut cv, x, cw),
             "agenda" => self.agenda_card(&mut cv, x, cw),
             "updates" => self.updates_card(&mut cv, x, cw),
+            "voyager" => self.voyager_card(&mut cv, x, cw),
             _ => self.system(&mut cv, x, cw),
         }
         cv
@@ -609,6 +612,20 @@ impl Ui {
             self.t18.draw(cv, x + cw - 24.0 - w, 78.0 + 26.0 * row as f32, &line, rgba(p.text, if n == 0 { 0.35 } else { 0.85 }));
         }
         self.t14.draw(cv, x + 24.0, 132.0, "click to upgrade", rgba(p.text, 0.45));
+    }
+
+    /// Voyager 1, worked out offline (see seiza_common::voyager); it moves a little every time the minute changes.
+    fn voyager_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
+        let p = palette();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let v = voyager_at(now);
+        self.t14.draw(cv, x + 24.0, 38.0, "voyager 1", rgba(p.text, 0.5));
+        let speed = format!("{:.1} km/s", v.speed_kms);
+        let sw = self.t14.width(&speed);
+        self.t14.draw(cv, x + cw - 24.0 - sw, 38.0, &speed, rgba(p.text, 0.4));
+        let end = self.t64.draw(cv, x + 24.0, 102.0, &format!("{:.2}", v.au), rgba(p.text, 1.0));
+        self.t18.draw(cv, end + 8.0, 102.0, "au", rgba(p.star, 0.9));
+        self.t14.draw(cv, x + 24.0, 126.0, &format!("{} of light away", light_text(v.light_secs)), rgba(p.text, 0.6));
     }
 
     fn agenda_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
