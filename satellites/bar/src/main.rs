@@ -7,7 +7,7 @@ use std::{process::Command, thread, time::{Duration, Instant}};
 
 use seiza_common::{
     local_time,
-    sys::{read_cpu_counters, read_load, read_ram_pct, read_temp},
+    sys::{read_battery, read_cpu_counters, read_load, read_ram_pct, read_temp},
     palette::{palette, rgba},
     draw::{shared_font, Canvas, Rgba, Text},
     State,
@@ -65,13 +65,6 @@ fn time_text() -> String {
 // ---- battery, volume, PC status ---------------------------------------------
 
 /// (percent, charging) of the first battery, if the machine has one.
-fn read_battery() -> Option<(u32, bool)> {
-    let dir = std::fs::read_dir("/sys/class/power_supply").ok()?.filter_map(Result::ok).find(|e| e.file_name().to_string_lossy().starts_with("BAT"))?.path();
-    let pct = std::fs::read_to_string(dir.join("capacity")).ok()?.trim().parse().ok()?;
-    let status = std::fs::read_to_string(dir.join("status")).unwrap_or_default();
-    Some((pct, status.trim() == "Charging"))
-}
-
 /// (percent, muted) of the default output, via PipeWire's wpctl.
 fn read_volume(target: &str) -> Option<(u32, bool)> {
     let out = Command::new("wpctl").args(["get-volume", target]).output().ok()?;
