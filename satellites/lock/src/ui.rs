@@ -33,6 +33,8 @@ pub struct Ui {
     busy: bool,
     lines: bool, // Yoru's lines (the words under the password): `lines` in ~/.config/seiza/yoru
     fast: bool,                       // something quick is moving (a pop, a shake): worth every frame the screen has
+    battery: Option<(u32, bool)>,     // percent and charging, re-read every half minute; None on a desktop
+    battery_read: Option<Instant>,
 }
 
 fn hash(n: u64) -> u64 {
@@ -90,6 +92,25 @@ fn ch(v: f32) -> u32 {
     (v * 255.0) as u32
 }
 
+/// The battery in the bottom right corner: a small outlined pill with a battery and the percentage.
+/// Gold normally, ice while charging, pink when it is nearly empty.
+fn battery_pill(cv: &mut Canvas, text: &mut Text, pct: u32, charging: bool) {
+    let p = palette();
+    let label = format!("{pct}%");
+    let (h, margin) = (40.0, 40.0);
+    let w = 20.0 + 26.0 + 10.0 + text.width(&label) + 20.0;
+    let (x, y) = (cv.w as f32 - margin - w, cv.h as f32 - margin - h);
+    cv.round_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, h / 2.0 + 1.0, rgba(p.star, 0.35));
+    cv.round_rect(x, y, w, h, h / 2.0, rgba(p.panel, 1.0));
+    let fill = if charging { p.ice } else if pct <= 15 { p.pink } else { p.star };
+    let (bx, cy) = (x + 20.0, y + h / 2.0);
+    cv.round_rect(bx, cy - 7.0, 24.0, 14.0, 3.5, rgba(p.text, 0.55)); // shell
+    cv.round_rect(bx + 1.5, cy - 5.5, 21.0, 11.0, 2.5, rgba(p.panel, 1.0));
+    cv.round_rect(bx + 24.0, cy - 3.0, 2.0, 6.0, 1.0, rgba(p.text, 0.55)); // nub
+    cv.round_rect(bx + 2.5, cy - 4.5, 19.0 * pct.min(100) as f32 / 100.0, 9.0, 2.0, rgba(fill, 1.0));
+    text.draw(cv, bx + 26.0 + 10.0, cy + 6.0, &label, rgba(p.text, 0.85));
+}
+
 /// Overshoots well past 1 before settling: a star popping up.
 fn bloom(t: f32) -> f32 {
     let (c1, c3) = (3.2f32, 4.2f32);
@@ -117,6 +138,8 @@ impl Ui {
             busy: true,
             lines: seiza_common::config::flag("yoru", "lines", true),
             fast: false,
+            battery: None,
+            battery_read: None,
         }
     }
 
@@ -182,13 +205,20 @@ impl Ui {
         let quip = match status {
             _ if !self.lines => "", // Yoru's lines are switched off in the settings
             Status::Idle if typed == 0 => "welcome back. i didn't touch anything..",
-            Status::Idle => "",
+            Status::Idle => "take your time..",
             Status::Checking => "one sec..",
             Status::Wrong => "hm. that's not it.. try again?",
         };
-        let key = format!("{w}x{h}|{}|{quip}", local_time(seiza_common::clock_fmt()));
+        if self.battery_read.is_none_or(|t| t.elapsed().as_secs() >= 30) {
+            self.battery = seiza_common::sys::read_battery();
+            self.battery_read = Some(Instant::now());
+        }
+        let key = format!("{w}x{h}|{}|{quip}|{:?}", local_time(seiza_common::clock_fmt()), self.battery);
         if self.base.as_ref().is_none_or(|(k, _)| *k != key) {
             let mut cv = Canvas { w, h, px: self.sky.as_ref().unwrap().px.clone() };
+            if let Some((pct, charging)) = self.battery {
+                battery_pill(&mut cv, &mut self.small, pct, charging);
+            }
             Self::centered(&mut self.big, &mut cv, cx, fh * 0.55, &local_time(seiza_common::clock_fmt()), rgba(p.text, 1.0));
             Self::centered(&mut self.small, &mut cv, cx, fh * 0.55 + 36.0, &local_time(c"%a %d %b").to_lowercase(), rgba(p.text, 0.6));
             Self::centered(&mut self.small, &mut cv, cx, fh * 0.70 + 56.0 + 44.0, quip, rgba(p.text, 0.7));
@@ -267,6 +297,18 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_battery_shows_in_the_corner_only_when_there_is_one() {
+        let corner = |bat: Option<(u32, bool)>| {
+            let mut ui = Ui::new();
+            (ui.battery, ui.battery_read) = (bat, Some(Instant::now())); // a fixed reading, so the test does not depend on the machine
+            let cv = ui.render(640, 360, 0, Status::Idle);
+            (cv.h - 90..cv.h).flat_map(|y| (cv.w - 140..cv.w).map(move |x| (x, y))).map(|(x, y)| cv.px[y * cv.w + x]).collect::<Vec<_>>()
+        };
+        assert_ne!(corner(Some((80, false))), corner(None));
+        assert_ne!(corner(Some((80, false))), corner(Some((10, false))), "a nearly empty battery looks different");
+    }
 
     #[test]
     fn the_lock_screen_is_fully_opaque() {

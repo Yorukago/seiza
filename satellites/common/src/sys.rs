@@ -26,6 +26,14 @@ pub fn read_temp() -> Option<u32> {
     None
 }
 
+/// (percent, charging) of the first battery, if the machine has one.
+pub fn read_battery() -> Option<(u32, bool)> {
+    let dir = std::fs::read_dir("/sys/class/power_supply").ok()?.filter_map(Result::ok).find(|e| e.file_name().to_string_lossy().starts_with("BAT"))?.path();
+    let pct = std::fs::read_to_string(dir.join("capacity")).ok()?.trim().parse().ok()?;
+    let status = std::fs::read_to_string(dir.join("status")).unwrap_or_default();
+    Some((pct, status.trim() == "Charging"))
+}
+
 pub fn read_load() -> Option<f32> {
     std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
 }
