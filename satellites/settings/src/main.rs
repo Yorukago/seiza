@@ -339,7 +339,7 @@ fn main() {
     };
     while !app.exit {
         if event_queue.blocking_dispatch(&mut app).is_err() {
-            break; // the compositor went away
+            return; // the compositor went away: nothing to restart the programs into
         }
     }
     // The sky and widgets read their files at start, so they come back with the new settings.
