@@ -52,12 +52,3 @@ pub trait Page {
 pub fn extra_pages() -> Vec<Box<dyn Page>> {
     vec![Box::new(elements::Elements::new()), Box::new(voyager::Voyager::new()), Box::new(oc::Oc::new())]
 }
-
-/// What a page that is not built yet shows: one card that says so. (The three stubs below use it.)
-pub(crate) fn coming_soon(cv: &mut Canvas, f: &mut Fonts, title: &str, text: &str) -> f32 {
-    use seiza_common::{kit, palette::{palette, rgba}};
-    let w = cv.w as f32;
-    kit::card(cv, f.small, 0.0, 0.0, w, 92.0, title);
-    f.body.draw(cv, 18.0, 70.0, text, rgba(palette().text, 0.7));
-    92.0
-}

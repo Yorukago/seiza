@@ -358,7 +358,11 @@ impl Ui {
         } else {
             self.text_plan().used.iter().cloned().fold(0.0, f32::max)
         };
-        ((tallest / ROW1).ceil() as usize, (self.body_h() / ROW1) as usize)
+        let total = (tallest / ROW1).ceil() as usize;
+        // a page that fits needs no scrolling: compare in pixels, or one that is exactly as tall as the body would
+        // count as a step too long and show a scrollbar
+        let visible = if tallest <= self.body_h() { total } else { (self.body_h() / ROW1) as usize };
+        (total, visible)
     }
 
     /// How tall page `i` of `extra` says it is: what its last draw returned, or one drawn on the side.
@@ -801,7 +805,7 @@ mod tests {
     fn typing_searches_every_page() {
         let (mut ui, _, _, _) = ui_with_probe();
         ui.keys = key_items("Super+q = seiza close-window\nSuper+h = seiza-help\n");
-        ui.type_str("close");
+        ui.type_str("close the window"); // words only this binding has, whatever the other pages say
         let cards = ui.shown_cards();
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0].0, "keybinds");
@@ -856,6 +860,35 @@ mod tests {
         assert_eq!(ui.query, "a");
         assert!(ui.clear_search() && !ui.searching());
         assert!(ui.keys_body(), "back to the page");
+    }
+
+    /// A page of a given height, to try the scrollbar's edge.
+    struct Fixed(f32);
+
+    impl Page for Fixed {
+        fn name(&self) -> &'static str {
+            "fixed"
+        }
+        fn blurb(&self) -> String {
+            String::new()
+        }
+        fn draw(&mut self, _: &mut Canvas, _: &mut Fonts, _: f32) -> f32 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_page_exactly_as_tall_as_its_body_has_nothing_to_scroll() {
+        let mut ui = Ui::new();
+        ui.fit(1920.0, 1080.0);
+        let body = ui.body_h();
+        for (height, scrolls) in [(body - 1.0, false), (body, false), (body + 1.0, true)] {
+            ui.extra = vec![Box::new(Fixed(height))];
+            ui.page_total = None;
+            ui.go(1);
+            let (total, visible) = ui.extent();
+            assert_eq!(total > visible, scrolls, "a page {height} px tall in a body of {body}");
+        }
     }
 
     #[test]
