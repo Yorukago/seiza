@@ -28,7 +28,7 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 
-const W: u32 = 260;
+const W: u32 = 300;
 const PILL_H: u32 = 56;
 const SLIDE: u32 = 16; // the pill rises this far while it fades in
 const H: u32 = PILL_H + SLIDE;
@@ -65,7 +65,7 @@ fn brightness() -> Option<Level> {
 
 /// One frame: `frac` is the level shown now, `vis` how far the pill has faded and risen in (0..=1),
 /// `t` seconds the pill has been up (it turns the sun).
-fn render(l: Level, frac: f32, vis: f32, t: f32) -> Canvas {
+fn render(l: Level, frac: f32, vis: f32, t: f32, text: &mut Text) -> Canvas {
     let (w, h) = (W as usize, H as usize);
     let mut cv = Canvas { w, h, px: vec![0; w * h] };
     if vis <= 0.0 {
@@ -73,24 +73,29 @@ fn render(l: Level, frac: f32, vis: f32, t: f32) -> Canvas {
     }
     let p = palette();
     let y0 = SLIDE as f32 * (1.0 - vis);
-    cv.round_rect(0.0, y0, W as f32, PILL_H as f32, PILL_H as f32 / 2.0, rgba(p.panel, 0.92));
-    let cy = y0 + PILL_H as f32 / 2.0;
-    let dim = if l.2 { 0.5 } else { 1.0 };
-    let (ink, gold) = (rgba(p.text, dim), rgba(p.star, dim));
+    let r = PILL_H as f32 / 2.0;
+    cv.round_rect(0.0, y0, W as f32, PILL_H as f32, r, rgba(p.text, 0.11));
+    cv.round_rect(1.0, y0 + 1.0, W as f32 - 2.0, PILL_H as f32 - 2.0, r - 1.0, rgba(p.panel, 0.92));
+    let cy = y0 + r;
+    let (ink, gold) = if l.2 { (rgba(p.text, 0.5), rgba(p.text, 0.4)) } else { (rgba(p.text, 1.0), rgba(p.star, 1.0)) }; // muted: grey, not gold
     if l.0 == "brightness" {
-        cv.icon_sun(38.0, cy, 14.0, frac * 4.0 * std::f32::consts::PI + t * 0.5, gold);
+        cv.icon_sun(40.0, cy, 14.0, frac * 4.0 * std::f32::consts::PI + t * 0.5, gold);
     } else {
-        cv.icon_speaker(38.0, cy, 13.0, frac * 3.0, l.2, gold);
+        cv.icon_speaker(40.0, cy, 13.0, frac * 3.0, l.2, gold);
     }
-    let (tx, tw) = (68.0, 124.0);
-    cv.round_rect(tx, cy - 3.0, tw, 6.0, 3.0, rgba(p.text, 0.18));
+    let (tx, tw) = (72.0, 140.0);
+    cv.round_rect(tx, cy - 2.0, tw, 4.0, 2.0, rgba(p.text, 0.12));
     let fill = tw * frac.clamp(0.0, 1.0);
     if fill > 0.0 {
-        cv.round_rect(tx, cy - 3.0, fill.max(6.0), 6.0, 3.0, gold);
+        cv.round_rect(tx, cy - 2.0, fill.max(4.0), 4.0, 2.0, gold);
     }
-    cv.star5(tx + fill.max(3.0), cy, 7.0, gold);
+    // the thumb is a little star in a soft glow
+    let thumb = tx + fill.max(2.0);
+    cv.round_rect(thumb - 14.0, cy - 14.0, 28.0, 28.0, 14.0, rgba(p.star, if l.2 { 0.04 } else { 0.10 }));
+    cv.sparkle(thumb, cy, 9.5, if l.2 { rgba(p.text, 0.45) } else { rgba(p.text, 1.0) });
     let label = if l.2 { "muted".to_string() } else { format!("{}", (frac * 100.0).round()) };
-    Text::new(load_font(), 15.0).draw(&mut cv, if l.2 { 200.0 } else { 212.0 }, cy + 5.0, &label, ink);
+    let lw = text.width(&label);
+    text.draw(&mut cv, W as f32 - 32.0 - lw, cy + 5.0, &label, ink);
     let k = (vis.clamp(0.0, 1.0) * 256.0) as u32;
     for px in cv.px.iter_mut() {
         let ch = |shift: u32| (*px >> shift & 0xFF) * k >> 8;
@@ -114,6 +119,7 @@ struct Osd {
     up_for: f32,        // seconds the pill has been up
     last_tick: Instant,
     rx: Receiver<Msg>,
+    text: Text, // kept between frames: parsing the font is the slow part of a frame
 }
 
 impl Osd {
@@ -137,7 +143,7 @@ impl Osd {
         } else {
             self.up_for = 0.0;
         }
-        let cv = render(self.level, self.frac, self.vis, self.up_for);
+        let cv = render(self.level, self.frac, self.vis, self.up_for, &mut self.text);
         let (buffer, canvas) = self.pool.create_buffer(W as i32, H as i32, W as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
         canvas[..bytes.len()].copy_from_slice(bytes);
@@ -227,7 +233,7 @@ fn main() {
         // seiza-osd --dump out.ppm [volume|brightness] [percent] [muted]
         let kind = if args.get(2).map(String::as_str) == Some("brightness") { "brightness" } else { "volume" };
         let frac = args.get(3).and_then(|v| v.parse::<f32>().ok()).unwrap_or(42.0) / 100.0;
-        let cv = render(Level(kind, frac, args.get(4).is_some()), frac, 1.0, 0.0);
+        let cv = render(Level(kind, frac, args.get(4).is_some()), frac, 1.0, 0.0, &mut Text::new(load_font(), 15.0));
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
@@ -286,10 +292,9 @@ fn main() {
         up_for: 0.0,
         last_tick: Instant::now(),
         rx,
+        text: Text::new(load_font(), 15.0),
     };
-    loop {
-        event_queue.blocking_dispatch(&mut app).unwrap();
-    }
+    while event_queue.blocking_dispatch(&mut app).is_ok() {}
 }
 
 #[cfg(test)]
