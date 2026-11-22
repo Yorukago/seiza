@@ -229,14 +229,23 @@ impl Canvas {
 
     /// Like `over`, but shifted down by `dy` and faded to `a` (0..1); only rows `rows` of `src` are read.
     pub fn over_faded(&mut self, src: &Canvas, dy: i32, a: f32, rows: std::ops::Range<usize>) {
+        self.over_faded_xy(src, 0, dy, a, rows);
+    }
+
+    /// `over_faded`, shifted sideways by `dx` too (positive: to the right); what leaves the canvas is cut off.
+    pub fn over_faded_xy(&mut self, src: &Canvas, dx: i32, dy: i32, a: f32, rows: std::ops::Range<usize>) {
         let k = (a.clamp(0.0, 1.0) * 256.0) as u32;
         for sy in rows.start..rows.end.min(src.h) {
             let y = sy as i32 + dy;
             if y < 0 || y >= self.h as i32 {
                 continue;
             }
-            let n = src.w.min(self.w);
-            let (from, to) = (&src.px[sy * src.w..sy * src.w + n], &mut self.px[y as usize * self.w..y as usize * self.w + n]);
+            // the columns of this row that land on the canvas
+            let (c0, c1) = ((-dx).max(0) as usize, (src.w as i32).min(self.w as i32 - dx).max(0) as usize);
+            if c0 >= c1 {
+                continue;
+            }
+            let (from, to) = (&src.px[sy * src.w + c0..sy * src.w + c1], &mut self.px[y as usize * self.w + (c0 as i32 + dx) as usize..][..c1 - c0]);
             for (s, d) in from.iter().zip(to.iter_mut()) {
                 if *s == 0 {
                     continue;

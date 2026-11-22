@@ -113,6 +113,28 @@ pub fn appear(content: &Canvas, e: f32, rows: std::ops::Range<usize>) -> Canvas 
     out
 }
 
+/// `content` at visibility `e` for something that comes in from the right edge (the side panel).
+pub fn appear_x(content: &Canvas, e: f32) -> Canvas {
+    if e >= 1.0 {
+        return content.clone();
+    }
+    let mut out = Canvas { w: content.w, h: content.h, px: vec![0; content.w * content.h] };
+    out.over_faded_xy(content, ((1.0 - e) * 48.0).round() as i32, 0, e, 0..content.h);
+    out
+}
+
+/// An outlined pill button (gold edge, gold text) at (x, y, w, h); `hot` brightens it.
+pub fn pill_button(cv: &mut Canvas, font: &mut Text, (x, y, w, h): (f32, f32, f32, f32), label: &str, hot: bool) {
+    let p = palette();
+    cv.round_rect(x, y, w, h, h / 2.0, rgba(p.star, if hot { 1.0 } else { 0.75 }));
+    cv.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, h / 2.0 - 1.0, rgba(p.panel, 1.0));
+    if hot {
+        cv.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, h / 2.0 - 1.0, rgba(p.star, 0.12));
+    }
+    let tw = font.width(label);
+    font.draw(cv, x + (w - tw) / 2.0, y + h / 2.0 + 4.5, label, rgba(p.star, 1.0));
+}
+
 /// A window's plate on a `w` x `h` canvas: a gold glow and edge round the card at (ox, oy), its fill, and a
 /// hairline `foot` from the bottom for the footer text.
 pub fn window_plate(w: usize, h: usize, (ox, oy): (f32, f32), (cw, ch): (f32, f32), foot: f32) -> Canvas {
@@ -252,6 +274,20 @@ mod tests {
         assert!(a.is_closing() && a.visibility().1);
         std::thread::sleep(std::time::Duration::from_millis((CLOSE_SECS * 1000.0) as u64 + 30));
         assert_eq!(a.visibility(), (0.0, true, true));
+    }
+
+    #[test]
+    fn a_sideways_shift_moves_pixels_and_cuts_what_leaves() {
+        let src = Canvas { w: 4, h: 1, px: vec![0xFF00_00FF, 0xFF00_FF00, 0xFFFF_0000, 0xFFFF_FFFF] };
+        let mut right = Canvas { w: 4, h: 1, px: vec![0; 4] };
+        right.over_faded_xy(&src, 2, 0, 1.0, 0..1);
+        assert_eq!(right.px, vec![0, 0, 0xFF00_00FF, 0xFF00_FF00], "two pixels moved in, two fell off");
+        let mut left = Canvas { w: 4, h: 1, px: vec![0; 4] };
+        left.over_faded_xy(&src, -3, 0, 1.0, 0..1);
+        assert_eq!(left.px, vec![0xFFFF_FFFF, 0, 0, 0]);
+        let mut gone = Canvas { w: 4, h: 1, px: vec![0; 4] };
+        gone.over_faded_xy(&src, 9, 0, 1.0, 0..1);
+        assert_eq!(gone.px, vec![0; 4], "all of it off to the side: nothing, and no panic");
     }
 
     #[test]

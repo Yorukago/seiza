@@ -1,13 +1,14 @@
 //! seiza-panel: a side panel with volume and brightness sliders, Wi-Fi / Bluetooth / microphone toggles
 //! and the notifications seiza-notify has shown. Opens from the top-right hot corner (`panel` in
 //! seiza.kdl) or Super+d; running it again closes it, `seiza-panel open` only opens. Esc, or the pointer
-//! leaving it, closes it. `seiza-panel --dump out.ppm` draws one frame.
+//! leaving it, closes it. `seiza-panel --dump out.ppm [month]` draws one frame.
 //! shortcut: the toggles and sliders are read once on open and after each click (wpctl, nmcli, bluetoothctl,
 //! brightnessctl are run synchronously), so a change made elsewhere while it is open shows next time.
 use std::process::Command;
 
 use seiza_common::{
     draw::{load_font, Canvas, Rgba, Text},
+    kit,
     palette::{palette, rgba},
 };
 use smithay_client_toolkit::{
@@ -39,8 +40,6 @@ const PAD: f32 = 20.0;
 const TRACK_X: f32 = 64.0;
 const TRACK_W: f32 = W as f32 - 64.0 - 56.0;
 const NOTE_H: f32 = 56.0;
-const TILE_H: f32 = 84.0;
-const TILE_PITCH: f32 = 94.0;
 
 fn sh(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
@@ -112,6 +111,7 @@ struct Cal {
     day: u32,
     days: u32,
     first: u32,
+    prev_days: u32, // the month before's length, for the week strip
     title: String,
 }
 
@@ -122,13 +122,29 @@ fn cal_now() -> Option<Cal> {
     Some(cal_of(y, m, d, seiza_common::local_time(c"%B %Y")))
 }
 
-fn cal_of(y: i32, m: u32, d: u32, title: String) -> Cal {
+fn month_days(y: i32, m: u32) -> u32 {
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m as usize - 1];
+    [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m as usize - 1]
+}
+
+fn cal_of(y: i32, m: u32, d: u32, title: String) -> Cal {
+    let days = month_days(y, m);
+    let prev_days = if m == 1 { 31 } else { month_days(y, m - 1) };
     let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]; // Sakamoto: weekday of the 1st, Sunday = 0
     let yy = if m < 3 { y - 1 } else { y };
     let sun0 = (yy + yy / 4 - yy / 100 + yy / 400 + t[m as usize - 1] + 1).rem_euclid(7) as u32;
-    Cal { day: d, days, first: (sun0 + 6) % 7, title }
+    Cal { day: d, days, first: (sun0 + 6) % 7, prev_days, title }
+}
+
+/// The seven days of the week today is in, Monday first: (the day of the month it shows, whether it is today).
+fn week(c: &Cal) -> [(u32, bool); 7] {
+    let slot = c.first + c.day - 1;
+    let monday = slot / 7 * 7;
+    std::array::from_fn(|k| {
+        let s = monday + k as u32;
+        let day = if s < c.first { c.prev_days - (c.first - s) + 1 } else if s - c.first >= c.days { s - c.first - c.days + 1 } else { s - c.first + 1 };
+        (day, s == slot)
+    })
 }
 
 /// The temperature and sky from wttr.in, cached in the runtime dir. A stale cache starts a background
@@ -164,6 +180,7 @@ struct State {
     cal: Option<Cal>,
     hidden: Vec<String>, // tile ids the user hid in edit mode
     edit: bool,
+    month: bool, // the calendar shows the whole month, not this week
 }
 
 impl State {
@@ -186,6 +203,7 @@ impl State {
             cal: if seiza_common::config::flag("panel", "calendar", false) { cal_now() } else { None },
             hidden: seiza_common::config::get("panel", "hidden").unwrap_or_default().split(',').filter(|t| !t.is_empty()).map(String::from).collect(),
             edit: false,
+            month: false,
         }
     }
 
@@ -249,6 +267,7 @@ enum Hit {
     Tile(usize),
     Clear,
     Edit,
+    Month,
 }
 
 type Rect = (f32, f32, f32, f32);
@@ -267,7 +286,7 @@ fn along(x: f32) -> f32 {
 }
 
 /// (id, label). The first three are switches; the rest run `ACTIONS` (same order, from index 3).
-const TILES: [(&str, &str); 8] = [("wifi", "Wi-Fi"), ("bt", "Bluetooth"), ("mic", "Mic"), ("shot", "Screenshot"), ("rec", "Record"), ("clip", "Clipboard"), ("sky", "Overview"), ("reload", "Reload")];
+const TILES: [(&str, &str); 8] = [("wifi", "Wi-Fi"), ("bt", "Bluetooth"), ("mic", "Mic"), ("shot", "screenshot"), ("rec", "record"), ("clip", "clipboard"), ("sky", "overview"), ("reload", "reload")];
 const ACTIONS: [(&str, &[&str]); 5] = [
     ("seiza-shot", &["area"]),
     ("seiza-shot", &["record", "screen"]),
@@ -276,34 +295,68 @@ const ACTIONS: [(&str, &[&str]); 5] = [
     ("seiza", &["reload-config"]),
 ];
 
-fn render(st: &State, h: u32, hover: Option<Hit>) -> (Canvas, Vec<(Rect, Hit)>) {
+/// The three sizes of text the panel draws, loaded once (parsing the font is the slow part of a frame).
+struct Fonts {
+    big: Text,
+    mid: Text,
+    small: Text,
+    tiny: Text, // the names under the round buttons
+}
+
+impl Fonts {
+    fn new() -> Fonts {
+        let f = load_font();
+        Fonts { big: Text::new(f.clone(), 20.0), mid: Text::new(f.clone(), 14.0), small: Text::new(f.clone(), 12.0), tiny: Text::new(f, 11.0) }
+    }
+}
+
+/// Height of the weather and calendar card, 0 if there is neither.
+fn card_height(st: &State) -> f32 {
+    match (&st.cal, st.weather.is_empty()) {
+        (None, true) => 0.0,
+        (None, false) => 64.0,
+        (Some(c), _) if st.month => 94.0 + (c.first + c.days).div_ceil(7) as f32 * 28.0,
+        (Some(_), _) => 134.0,
+    }
+}
+
+/// A rounded plate with a hairline edge, a little lighter than the panel.
+fn plate(cv: &mut Canvas, (x, y, w, h): Rect, r: f32) {
+    let p = palette();
+    cv.round_rect(x, y, w, h, r, rgba(p.text, 0.09));
+    cv.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, r - 1.0, rgba(p.panel, 1.0));
+    cv.round_rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, r - 1.0, rgba(p.text, 0.045));
+}
+
+fn render(st: &State, h: u32, hover: Option<Hit>, fonts: &mut Fonts) -> (Canvas, Vec<(Rect, Hit)>) {
     let (w, hh) = (W as usize, h as usize);
     let mut cv = Canvas { w, h: hh, px: vec![0; w * hh] };
     let p = palette();
     let (ink, dim, gold): (Rgba, Rgba, Rgba) = (rgba(p.text, 1.0), rgba(p.text, 0.55), rgba(p.star, 1.0));
     let mut hits = vec![];
-    let (mut big, mut mid, mut small) = (Text::new(load_font(), 20.0), Text::new(load_font(), 14.0), Text::new(load_font(), 12.0));
-    cv.round_rect(0.0, 0.0, W as f32, h as f32, 24.0, rgba(p.panel, 0.96));
+    let Fonts { big, mid, small, tiny } = fonts;
+    let wf = W as f32;
+    cv.round_rect(0.0, 0.0, wf, h as f32, 24.0, rgba(p.text, 0.10));
+    cv.round_rect(1.0, 1.0, wf - 2.0, h as f32 - 2.0, 23.0, rgba(p.panel, 0.97));
 
-    // header: the clock-ish line and the power button
-    cv.star5(PAD + 8.0, 34.0, 8.0, gold);
+    // header: the mode star, the name, how long it has been up, edit and power
+    cv.sparkle(PAD + 8.0, 34.0, 9.0, rgba(p.pink, 1.0));
     big.draw(&mut cv, PAD + 26.0, 41.0, "seiza", ink);
     mid.draw(&mut cv, PAD + 26.0 + big.width("seiza") + 14.0, 40.0, &uptime(), dim);
-    let eb = (W as f32 - PAD - 40.0 - 8.0 - 56.0, 20.0, 56.0, 28.0);
-    cv.round_rect(eb.0, eb.1, eb.2, eb.3, 14.0, if st.edit { rgba(p.star, 0.35) } else { rgba(p.text, if hover == Some(Hit::Edit) { 0.18 } else { 0.07 }) });
-    let ew = small.width(if st.edit { "done" } else { "edit" });
-    small.draw(&mut cv, eb.0 + (eb.2 - ew) / 2.0, eb.1 + 18.0, if st.edit { "done" } else { "edit" }, ink);
+    let eb = (wf - PAD - 40.0 - 8.0 - 62.0, 20.0, 62.0, 28.0);
+    kit::pill_button(&mut cv, small, eb, if st.edit { "done" } else { "edit" }, st.edit || hover == Some(Hit::Edit));
     hits.push((eb, Hit::Edit));
-    let pw = (W as f32 - PAD - 40.0, 14.0, 40.0, 40.0);
-    cv.round_rect(pw.0, pw.1, pw.2, pw.3, 20.0, rgba(p.text, if hover == Some(Hit::Power) { 0.18 } else { 0.07 }));
+    let pw = (wf - PAD - 40.0, 14.0, 40.0, 40.0);
+    cv.round_rect(pw.0, pw.1, pw.2, pw.3, 20.0, rgba(p.text, if hover == Some(Hit::Power) { 0.45 } else { 0.28 }));
+    cv.round_rect(pw.0 + 1.0, pw.1 + 1.0, pw.2 - 2.0, pw.3 - 2.0, 19.0, rgba(p.panel, 1.0));
     cv.icon_power(pw.0 + 20.0, pw.1 + 20.0, 9.0, ink);
     hits.push((pw, Hit::Power));
 
-    // sliders
+    // sliders: gold up to a white round knob
     let mut y = 80.0;
-    cv.round_rect(10.0, y - 6.0, W as f32 - 20.0, if st.bright.is_some() { 98.0 } else { 52.0 }, 22.0, rgba(p.text, 0.05));
+    plate(&mut cv, (10.0, y - 6.0, wf - 20.0, if st.bright.is_some() { 98.0 } else { 52.0 }), 20.0);
     let mut slider = |cv: &mut Canvas, y: f32, frac: f32, muted: bool, hit: Hit, hits: &mut Vec<(Rect, Hit)>| {
-        let c = if muted { rgba(p.star, 0.4) } else { gold };
+        let c = if muted { rgba(p.text, 0.4) } else { gold };
         let cy = y + 20.0;
         if hit == Hit::Mute {
             cv.icon_speaker(PAD + 14.0, cy, 11.0, frac * 3.0, muted, c);
@@ -311,10 +364,11 @@ fn render(st: &State, h: u32, hover: Option<Hit>) -> (Canvas, Vec<(Rect, Hit)>) 
         } else {
             cv.icon_sun(PAD + 14.0, cy, 11.0, frac * 4.0 * std::f32::consts::PI, c);
         }
-        cv.round_rect(TRACK_X, cy - 3.0, TRACK_W, 6.0, 3.0, rgba(p.text, 0.18));
-        let fill = (TRACK_W * frac).max(6.0);
-        cv.round_rect(TRACK_X, cy - 3.0, fill, 6.0, 3.0, c);
-        cv.star5(TRACK_X + fill, cy, 8.0, c);
+        cv.round_rect(TRACK_X, cy - 2.0, TRACK_W, 4.0, 2.0, rgba(p.text, 0.12));
+        let fill = (TRACK_W * frac).max(4.0);
+        cv.round_rect(TRACK_X, cy - 2.0, fill, 4.0, 2.0, c);
+        cv.round_rect(TRACK_X + fill - 10.0, cy - 10.0, 20.0, 20.0, 10.0, rgba(p.star, if muted { 0.1 } else { 0.25 }));
+        cv.round_rect(TRACK_X + fill - 7.5, cy - 7.5, 15.0, 15.0, 7.5, rgba(p.text, if muted { 0.6 } else { 0.96 }));
         let label = format!("{}", (frac * 100.0).round());
         let lw = small.width(&label);
         small.draw(cv, W as f32 - PAD - lw, cy + 4.0, &label, dim);
@@ -327,107 +381,158 @@ fn render(st: &State, h: u32, hover: Option<Hit>) -> (Canvas, Vec<(Rect, Hit)>) 
         y += 46.0;
     }
 
-    // toggle tiles
-    y += 10.0;
-    let tw = (W as f32 - 2.0 * PAD - 20.0) / 3.0;
+    // the switches: indigo with a gold edge when on
+    y += 12.0;
     let shown = st.shown();
-    for (n, &i) in shown.iter().enumerate() {
-        let (id, name) = TILES[i];
-        let hid = st.hidden.iter().any(|h| h == id);
-        let on = i < 3 && [st.wifi, st.bt, st.mic_on][i];
-        let r = (PAD + (n % 3) as f32 * (tw + 10.0), y + (n / 3) as f32 * TILE_PITCH, tw, TILE_H);
-        let lit = hover == Some(Hit::Tile(i));
-        // a lit switch is solid gold with dark ink, like a pressed key
-        let (base, fg): (Rgba, Rgba) = if on { (rgba(p.star, if lit { 1.0 } else { 0.92 }), rgba(p.sky, 1.0)) } else { (rgba(p.text, if lit { 0.14 } else { 0.07 }), rgba(p.text, if hid { 0.3 } else { 0.85 })) };
-        cv.round_rect(r.0, r.1, r.2, r.3, 20.0, base);
-        let (ix, iy) = (r.0 + tw / 2.0, r.1 + 26.0);
-        match id {
-            "wifi" => cv.icon_wifi(ix, iy, 11.0, fg),
-            "bt" => cv.icon_bluetooth(ix, iy, 11.0, fg),
-            "mic" => cv.icon_mic(ix, iy, 11.0, !on, fg),
-            "shot" => cv.icon_frame(ix, iy, 10.0, fg),
-            "rec" => cv.icon_record(ix, iy, 11.0, fg),
-            "clip" => cv.icon_clipboard(ix, iy, 11.0, fg),
-            "sky" => cv.icon_constellation(ix, iy, 12.0, fg),
-            _ => cv.icon_restart(ix, iy, 11.0, fg),
-        }
-        let nw = mid.width(name);
-        mid.draw(&mut cv, r.0 + (tw - nw) / 2.0, r.1 + 59.0, name, fg);
-        let state = if st.edit { if hid { "hidden" } else { "shown" } } else if i < 3 { if on { "on" } else { "off" } } else { "" };
-        let sw = small.width(state);
-        small.draw(&mut cv, r.0 + (tw - sw) / 2.0, r.1 + 75.0, state, if on { rgba(p.sky, 0.7) } else { dim });
-        hits.push((r, Hit::Tile(i)));
-    }
-    y += (shown.len().div_ceil(3).max(1) as f32) * TILE_PITCH - 10.0 + 22.0;
-
-    // weather
-    if !st.weather.is_empty() {
-        cv.round_rect(PAD, y, W as f32 - 2.0 * PAD, 48.0, 16.0, rgba(p.text, 0.06));
-        let (temp, sky) = st.weather.split_once("  ").unwrap_or((&st.weather, ""));
-        big.draw(&mut cv, PAD + 16.0, y + 32.0, temp, ink);
-        let tw = big.width(temp);
-        let sky = clip(&mut mid, sky, W as f32 - 2.0 * PAD - 48.0 - tw);
-        mid.draw(&mut cv, PAD + 16.0 + tw + 14.0, y + 29.0, &sky, dim);
-        y += 58.0;
-    }
-
-    // calendar: this month, Monday first, today lit
-    if let Some(c) = &st.cal {
-        let cw = (W as f32 - 2.0 * PAD) / 7.0;
-        let tw = mid.width(&c.title);
-        mid.draw(&mut cv, (W as f32 - tw) / 2.0, y + 14.0, &c.title, ink);
-        y += 28.0;
-        for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
-            let dw = small.width(d);
-            small.draw(&mut cv, PAD + i as f32 * cw + (cw - dw) / 2.0, y + 12.0, d, dim);
-        }
-        y += 20.0;
-        for n in 0..c.days {
-            let slot = c.first + n;
-            let (cx, cy) = (PAD + (slot % 7) as f32 * cw + cw / 2.0, y + (slot / 7) as f32 * 26.0 + 12.0);
-            let label = (n + 1).to_string();
-            if n + 1 == c.day {
-                cv.round_rect(cx - 12.0, cy - 12.0, 24.0, 24.0, 12.0, gold);
+    let switches: Vec<usize> = shown.iter().copied().filter(|&i| i < 3).collect();
+    if !switches.is_empty() {
+        let tw = (wf - 2.0 * PAD - 10.0 * (switches.len() - 1) as f32) / switches.len() as f32;
+        for (n, &i) in switches.iter().enumerate() {
+            let (id, name) = TILES[i];
+            let hid = st.hidden.iter().any(|h| h == id);
+            let on = [st.wifi, st.bt, st.mic_on][i];
+            let r = (PAD + n as f32 * (tw + 10.0), y, tw, 78.0);
+            let lit = hover == Some(Hit::Tile(i));
+            cv.round_rect(r.0, r.1, r.2, r.3, 18.0, rgba(if on { p.star } else { p.text }, if on { if lit { 1.0 } else { 0.8 } } else if lit { 0.3 } else { 0.14 }));
+            cv.round_rect(r.0 + 1.0, r.1 + 1.0, r.2 - 2.0, r.3 - 2.0, 17.0, rgba(if on { p.dust } else { p.sky }, 1.0));
+            let fg: Rgba = rgba(p.text, if hid { 0.3 } else if on { 1.0 } else { 0.6 });
+            let (ix, iy) = (r.0 + tw / 2.0, r.1 + 24.0);
+            match id {
+                "wifi" => cv.icon_wifi(ix, iy, 11.0, fg),
+                "bt" => cv.icon_bluetooth(ix, iy, 11.0, fg),
+                _ => cv.icon_mic(ix, iy, 11.0, !on, fg),
             }
-            let lw = small.width(&label);
-            small.draw(&mut cv, cx - lw / 2.0, cy + 4.0, &label, if n + 1 == c.day { rgba(p.sky, 1.0) } else { ink });
+            let nw = mid.width(name);
+            mid.draw(&mut cv, r.0 + (tw - nw) / 2.0, r.1 + 52.0, name, fg);
+            let state = if st.edit { if hid { "hidden" } else { "shown" } } else if on { "on" } else { "off" };
+            let sw = small.width(state);
+            small.draw(&mut cv, r.0 + (tw - sw) / 2.0, r.1 + 68.0, state, dim);
+            hits.push((r, Hit::Tile(i)));
         }
-        y += ((c.first + c.days).div_ceil(7)) as f32 * 26.0 + 14.0;
+        y += 78.0 + 16.0;
     }
 
-    // notifications
-    mid.draw(&mut cv, PAD, y + 14.0, "notifications", ink);
+    // quick actions: round buttons with their name under them
+    let quick: Vec<usize> = shown.iter().copied().filter(|&i| i >= 3).collect();
+    if !quick.is_empty() {
+        let pitch = (wf - 2.0 * PAD) / quick.len() as f32;
+        for (n, &i) in quick.iter().enumerate() {
+            let (id, name) = TILES[i];
+            let hid = st.hidden.iter().any(|h| h == id);
+            let cx = PAD + pitch * (n as f32 + 0.5);
+            let lit = hover == Some(Hit::Tile(i));
+            cv.round_rect(cx - 23.0, y, 46.0, 46.0, 23.0, rgba(if lit { p.star } else { p.text }, if lit { 0.9 } else { 0.22 }));
+            cv.round_rect(cx - 22.0, y + 1.0, 44.0, 44.0, 22.0, rgba(p.panel, 1.0));
+            let fg: Rgba = rgba(p.text, if hid { 0.3 } else { 0.92 });
+            let iy = y + 23.0;
+            match id {
+                "shot" => cv.icon_frame(cx, iy, 10.0, fg),
+                "rec" => cv.icon_record(cx, iy, 11.0, fg),
+                "clip" => cv.icon_clipboard(cx, iy, 11.0, fg),
+                "sky" => cv.icon_constellation(cx, iy, 12.0, fg),
+                _ => cv.icon_restart(cx, iy, 11.0, fg),
+            }
+            let label = if st.edit && hid { "hidden" } else { name };
+            let lw = tiny.width(label);
+            tiny.draw(&mut cv, cx - lw / 2.0, y + 64.0, label, if hid { rgba(p.text, 0.3) } else { dim });
+            hits.push(((cx - pitch / 2.0, y - 2.0, pitch, 74.0), Hit::Tile(i)));
+        }
+        y += 70.0 + 14.0;
+    }
+
+    // notifications: what seiza-notify has shown, newest first
+    mid.draw(&mut cv, PAD, y + 14.0, "notifications", dim);
     if !st.notes.is_empty() {
-        let r = (W as f32 - PAD - 56.0, y - 2.0, 56.0, 24.0);
-        let lit = hover == Some(Hit::Clear);
-        cv.round_rect(r.0, r.1, r.2, r.3, 12.0, rgba(p.text, if lit { 0.18 } else { 0.07 }));
-        let cw = small.width("clear");
-        small.draw(&mut cv, r.0 + (r.2 - cw) / 2.0, r.1 + 16.0, "clear", dim);
+        let r = (wf - PAD - 58.0, y - 2.0, 58.0, 24.0);
+        kit::pill_button(&mut cv, small, r, "clear", hover == Some(Hit::Clear));
         hits.push((r, Hit::Clear));
     }
-    y += 34.0;
-    let room = ((h as f32 - 16.0 - y) / NOTE_H).floor() as usize;
-    if st.notes.is_empty() {
-        cv.round_rect(PAD, y, W as f32 - 2.0 * PAD, 110.0, 20.0, rgba(p.text, 0.04));
-        cv.icon_bell(W as f32 / 2.0, y + 44.0, 20.0, rgba(p.text, 0.35));
-        let nw = small.width("nothing new");
-        small.draw(&mut cv, (W as f32 - nw) / 2.0, y + 94.0, "nothing new", dim);
+    y += 32.0;
+    let card = card_height(st);
+    let room = ((h as f32 - 16.0 - y - if card > 0.0 { card + 10.0 } else { 0.0 }) / NOTE_H).floor().max(0.0) as usize;
+    if st.notes.is_empty() && y + 86.0 + card + 26.0 <= h as f32 {
+        plate(&mut cv, (PAD, y, wf - 2.0 * PAD, 76.0), 16.0);
+        cv.icon_bell(wf / 2.0 - 40.0, y + 38.0, 16.0, rgba(p.text, 0.35));
+        small.draw(&mut cv, wf / 2.0 - 16.0, y + 42.0, "nothing new", dim);
+        y += 86.0;
     }
     for n in st.notes.iter().take(room) {
-        cv.round_rect(PAD, y, W as f32 - 2.0 * PAD, NOTE_H - 8.0, 14.0, rgba(p.text, 0.06));
-        cv.star5(PAD + 16.0, y + 17.0, 5.0, gold);
+        plate(&mut cv, (PAD, y, wf - 2.0 * PAD, NOTE_H - 8.0), 14.0);
+        cv.sparkle(PAD + 16.0, y + 17.0, 6.0, gold);
         let when = ago(st.now.saturating_sub(n.at));
         let ww = small.width(&when);
-        small.draw(&mut cv, W as f32 - PAD - 12.0 - ww, y + 20.0, &when, dim);
-        let head = clip(&mut mid, &n.summary, W as f32 - 2.0 * PAD - 40.0 - 44.0);
+        small.draw(&mut cv, wf - PAD - 12.0 - ww, y + 20.0, &when, dim);
+        let head = clip(mid, &n.summary, wf - 2.0 * PAD - 40.0 - 44.0);
         mid.draw(&mut cv, PAD + 30.0, y + 22.0, &head, ink);
-        let body = clip(&mut small, &format!("{}  {}", n.app, n.body), W as f32 - 2.0 * PAD - 40.0);
+        let body = clip(small, &format!("{}  {}", n.app, n.body), wf - 2.0 * PAD - 40.0);
         small.draw(&mut cv, PAD + 30.0, y + 40.0, &body, dim);
         y += NOTE_H;
     }
     if st.notes.len() > room && room > 0 {
-        let more = format!("+{} more", st.notes.len() - room);
-        small.draw(&mut cv, PAD, h as f32 - 14.0, &more, dim);
+        small.draw(&mut cv, PAD, y + 8.0, &format!("+{} more", st.notes.len() - room), dim);
+        y += 22.0;
+    }
+
+    // weather and calendar in one card: this week, or the whole month
+    if card > 0.0 {
+        y += 10.0;
+        let cr = (PAD, y, wf - 2.0 * PAD, card);
+        plate(&mut cv, cr, 18.0);
+        let top = y + 16.0;
+        match (&st.cal, st.weather.is_empty()) {
+            (_, false) => {
+                let (temp, sky) = st.weather.split_once("  ").unwrap_or((&st.weather, ""));
+                big.draw(&mut cv, PAD + 16.0, top + 22.0, temp, ink);
+                let tw = big.width(temp);
+                let sky = clip(mid, sky, wf - 2.0 * PAD - 32.0 - tw - 90.0);
+                mid.draw(&mut cv, PAD + 16.0 + tw + 12.0, top + 20.0, &sky, dim);
+            }
+            (Some(c), true) => {
+                mid.draw(&mut cv, PAD + 16.0, top + 20.0, &c.title.to_lowercase(), ink);
+            }
+            _ => {}
+        }
+        if let Some(c) = &st.cal {
+            let mb = (wf - PAD - 16.0 - 70.0, top, 70.0, 26.0);
+            kit::pill_button(&mut cv, small, mb, if st.month { "week" } else { "month" }, hover == Some(Hit::Month));
+            hits.push((mb, Hit::Month));
+            let colw = (wf - 2.0 * PAD - 20.0) / 7.0;
+            let col = |k: u32| PAD + 10.0 + (k as f32 + 0.5) * colw;
+            let today = |cv: &mut Canvas, cx: f32, cy: f32| {
+                cv.round_rect(cx - 14.0, cy - 14.0, 28.0, 28.0, 14.0, rgba(p.star, 0.85));
+                cv.round_rect(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0, rgba(p.dust, 1.0));
+            };
+            let head_y = if st.month { top + 50.0 } else { top + 76.0 };
+            if !st.month {
+                small.draw(&mut cv, PAD + 16.0, top + 52.0, "this week", dim);
+            }
+            for (k, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+                let dw = small.width(d);
+                small.draw(&mut cv, col(k as u32) - dw / 2.0, head_y, d, dim);
+            }
+            if st.month {
+                for n in 0..c.days {
+                    let slot = c.first + n;
+                    let (cx, cy) = (col(slot % 7), head_y + 22.0 + (slot / 7) as f32 * 28.0);
+                    if n + 1 == c.day {
+                        today(&mut cv, cx, cy);
+                    }
+                    let label = (n + 1).to_string();
+                    let lw = small.width(&label);
+                    small.draw(&mut cv, cx - lw / 2.0, cy + 4.0, &label, ink);
+                }
+            } else {
+                for (k, (day, is_today)) in week(c).into_iter().enumerate() {
+                    let (cx, cy) = (col(k as u32), head_y + 26.0);
+                    if is_today {
+                        today(&mut cv, cx, cy);
+                    }
+                    let label = day.to_string();
+                    let lw = small.width(&label);
+                    small.draw(&mut cv, cx - lw / 2.0, cy + 4.0, &label, ink);
+                }
+            }
+        }
     }
     (cv, hits)
 }
@@ -451,16 +556,36 @@ struct Panel {
     hits: Vec<(Rect, Hit)>,
     hover: Option<Hit>,
     drag: Option<Hit>,
+    fonts: Fonts,
+    anim: kit::Anim,
+    shown: f32,             // the visibility last drawn
+    content: Option<Canvas>, // the last frame rendered at full visibility
 }
 
 impl Panel {
+    /// Slide out and fade, then quit.
+    fn close(&mut self) {
+        self.anim.close();
+        self.dirty = true;
+    }
+
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        if !self.configured || self.frame_pending || !self.dirty {
+        if !self.configured || self.frame_pending {
             return;
         }
-        self.dirty = false;
-        let (cv, hits) = render(&self.st, self.height, self.hover);
-        self.hits = hits;
+        let (e, moving, done) = self.anim.visibility();
+        self.exit |= done;
+        if self.exit || !(self.dirty || moving || e != self.shown) {
+            return;
+        }
+        if self.dirty || self.content.is_none() {
+            self.dirty = false;
+            let (cv, hits) = render(&self.st, self.height, self.hover, &mut self.fonts);
+            self.hits = hits;
+            self.content = Some(cv);
+        }
+        self.shown = e;
+        let cv = kit::appear_x(self.content.as_ref().expect("rendered above"), e);
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
         canvas[..bytes.len()].copy_from_slice(bytes);
@@ -485,7 +610,7 @@ impl Panel {
         match hit {
             Some(Hit::Power) => {
                 let _ = Command::new("seiza-session").spawn();
-                self.exit = true;
+                self.close();
             }
             Some(Hit::Mute) => {
                 run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
@@ -500,12 +625,16 @@ impl Panel {
                 if self.st.edit {
                     self.st.flip_hidden(i);
                 } else if self.st.toggle(i) {
-                    self.exit = true;
+                    self.close();
                 }
                 self.dirty = true;
             }
             Some(Hit::Edit) => {
                 self.st.edit = !self.st.edit;
+                self.dirty = true;
+            }
+            Some(Hit::Month) => {
+                self.st.month = !self.st.month;
                 self.dirty = true;
             }
             Some(Hit::Clear) => {
@@ -549,6 +678,7 @@ impl LayerShellHandler for Panel {
         }
         self.height = h;
         self.configured = true;
+        self.anim.open();
         self.dirty = true;
         self.draw(qh);
     }
@@ -576,7 +706,7 @@ impl KeyboardHandler for Panel {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
         if event.keysym == Keysym::Escape {
-            self.exit = true;
+            self.close();
         }
     }
     fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
@@ -594,7 +724,7 @@ impl PointerHandler for Panel {
             let hit = find(&self.hits, x, y);
             match e.kind {
                 PointerEventKind::Enter { .. } => self.entered = true,
-                PointerEventKind::Leave { .. } if self.entered && self.drag.is_none() => self.exit = true,
+                PointerEventKind::Leave { .. } if self.entered && self.drag.is_none() => self.close(),
                 PointerEventKind::Motion { .. } => {
                     if let Some(d) = self.drag {
                         self.slide(d, x);
@@ -660,8 +790,9 @@ fn main() {
             cal: Some(cal_of(2026, 11, 2, "November 2026".into())),
             hidden: vec![],
             edit: false,
+            month: args.get(2).map(String::as_str) == Some("month"),
         };
-        let (cv, _) = render(&st, 960, None);
+        let (cv, _) = render(&st, 960, None, &mut Fonts::new());
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
@@ -704,9 +835,15 @@ fn main() {
         hits: vec![],
         hover: None,
         drag: None,
+        fonts: Fonts::new(),
+        anim: Default::default(),
+        shown: -1.0,
+        content: None,
     };
     while !app.exit {
-        event_queue.blocking_dispatch(&mut app).unwrap();
+        if event_queue.blocking_dispatch(&mut app).is_err() {
+            break; // the compositor went away
+        }
     }
     let _ = std::fs::remove_file(format!("{}/seiza-panel.pid", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())));
 }
@@ -725,9 +862,24 @@ mod tests {
     #[test]
     fn calendar_knows_the_weekday_and_leap_years() {
         let c = cal_of(2026, 11, 2, String::new());
-        assert_eq!((c.first, c.days), (6, 30)); // 1 Nov 2026 is a Sunday: last column
+        assert_eq!((c.first, c.days, c.prev_days), (6, 30, 31)); // 1 Nov 2026 is a Sunday: last column; October has 31
         assert_eq!(cal_of(2024, 2, 1, String::new()).days, 29);
         assert_eq!(cal_of(2024, 2, 1, String::new()).first, 3); // Thursday
+    }
+
+    #[test]
+    fn the_week_strip_runs_monday_to_sunday_around_today_and_across_month_ends() {
+        let days = |c: &Cal| week(c).map(|(d, _)| d);
+        let c = cal_of(2026, 11, 21, String::new()); // the day in the design
+        assert_eq!(days(&c), [16, 17, 18, 19, 20, 21, 22]);
+        assert_eq!(week(&c).iter().position(|w| w.1), Some(5));
+        // 2 Nov 2026 is a Monday and 1 Nov the Sunday before it: the week is wholly in November
+        assert_eq!(days(&cal_of(2026, 11, 2, String::new())), [2, 3, 4, 5, 6, 7, 8]);
+        // 1 Nov is in the week that began in October
+        assert_eq!(days(&cal_of(2026, 11, 1, String::new())), [26, 27, 28, 29, 30, 31, 1]);
+        // and a week that runs into the next month
+        assert_eq!(days(&cal_of(2026, 11, 30, String::new())), [30, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(days(&cal_of(2027, 1, 1, String::new()))[0], 28, "December has 31 days: the week starts on the 28th");
     }
 
     #[test]
@@ -739,7 +891,7 @@ mod tests {
 
     #[test]
     fn hidden_tiles_leave_the_grid_until_editing() {
-        let mut st = State { vol: 0.5, muted: false, bright: None, wifi: false, bt: false, mic_on: true, notes: vec![], now: 0, weather: String::new(), cal: None, hidden: vec!["rec".into()], edit: false };
+        let mut st = State { vol: 0.5, muted: false, bright: None, wifi: false, bt: false, mic_on: true, notes: vec![], now: 0, weather: String::new(), cal: None, hidden: vec!["rec".into()], edit: false, month: false };
         assert_eq!(st.shown().len(), TILES.len() - 1);
         st.edit = true;
         assert_eq!(st.shown().len(), TILES.len());
@@ -748,8 +900,8 @@ mod tests {
 
     #[test]
     fn clicks_land_on_the_right_control() {
-        let st = State { vol: 0.5, muted: false, bright: Some(0.5), wifi: false, bt: false, mic_on: true, notes: parse_notes("1\ta\ts\tb"), now: 5, weather: String::new(), cal: None, hidden: vec!["rec".into()], edit: false };
-        let (_, hits) = render(&st, 960, None);
+        let st = State { vol: 0.5, muted: false, bright: Some(0.5), wifi: false, bt: false, mic_on: true, notes: parse_notes("1\ta\ts\tb"), now: 5, weather: String::new(), cal: None, hidden: vec!["rec".into()], edit: false, month: false };
+        let (_, hits) = render(&st, 960, None, &mut Fonts::new());
         let at = |h: Hit| hits.iter().find(|(_, x)| *x == h).map(|(r, _)| (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0)).unwrap();
         for h in [Hit::Power, Hit::Mute, Hit::Volume, Hit::Brightness, Hit::Tile(0), Hit::Tile(2), Hit::Tile(3), Hit::Clear, Hit::Edit] {
             let (x, y) = at(h);
