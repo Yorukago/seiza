@@ -1,5 +1,6 @@
 //! seiza-help: the key bindings (live), the commands, the words Seiza uses and its config
 //! files. `seiza-help --dump out.ppm [page [width height [visibility 0..1 [search]]]]` draws one frame to a file.
+mod pages;
 mod ui;
 
 use std::time::SystemTime;
@@ -248,6 +249,10 @@ impl Dispatch<wl_callback::WlCallback, Tick> for Help {
             state.refresh_keys();
             state.draw(qh);
         }
+        if state.ui.tick() {
+            state.dirty = true; // a page that moves by itself (the distance to Voyager)
+            state.draw(qh);
+        }
     }
 }
 
@@ -266,7 +271,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new();
-        ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0).min(ui::PAGES.len() - 1);
+        ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0).min(ui.page_count() - 1);
         let size = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
         if let Some(q) = args.get(6) {
             ui.type_str(q);

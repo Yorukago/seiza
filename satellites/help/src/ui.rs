@@ -9,6 +9,8 @@ use seiza_common::{
     palette::{palette, rgba},
 };
 
+use crate::pages::{self, Fonts, Page};
+
 /// The card's size before the first draw; after that it follows the screen (see `fit`).
 const W0: f32 = 1240.0;
 const H0: f32 = 740.0;
@@ -20,8 +22,6 @@ const MINCOL: f32 = 320.0; // the narrowest a column of cards may get
 const ROW1: f32 = 43.0; // a keys row with its keycaps beside the words
 const ROW2: f32 = 68.0; // ...and with them under the words, when they do not fit beside
 const CAP_SEP: f32 = 18.0; // between two keycaps (the "+")
-
-pub const PAGES: [&str; 6] = ["keys", "commands", "guide", "recipes", "options", "files"];
 
 /// What a binding's command does and which group it is listed under, by the start of the command. First match wins.
 const WHAT: &[(&str, &str, &str)] = &[
@@ -66,108 +66,6 @@ const WHAT: &[(&str, &str, &str)] = &[
 
 /// The order the groups are listed in; a command no row above knows goes under "Other".
 const GROUPS: [&str; 7] = ["Sky", "Windows", "Apps", "Capture", "Media", "Session", "Other"];
-
-type Cards = &'static [(&'static str, &'static [(&'static str, &'static str)])];
-
-const COMMANDS: Cards = &[
-    ("sky", &[
-        ("seiza overview", "zoom out over every star"),
-        ("seiza pan DX DY", "move the camera by that many pixels"),
-        ("seiza zoom-reset", "back to full size"),
-        ("seiza goto N", "fly to star number N"),
-        ("seiza new-star", "make a star next to the current one"),
-        ("seiza delete-star [N]", "delete star N (default: current); it must be empty"),
-        ("seiza rename-star N NAME", "give star N a name"),
-        ("seiza add-star X Y", "a star centered there"),
-        ("seiza move-star N X Y", "move a star"),
-        ("seiza link A B", "toggle a thread between two stars"),
-        ("seiza figure NAME|none", "lay the stars out on a template"),
-    ]),
-    ("constellations", &[
-        ("seiza save NAME / load NAME", "keep or open a constellation"),
-        ("seiza new-constellation NAME", "a fresh one with a single star"),
-    ]),
-    ("windows", &[
-        ("seiza move-window DX DY", "move the focused window"),
-        ("seiza resize-window DW DH", "grow or shrink it"),
-        ("seiza focus DX DY", "focus the nearest window that way"),
-        ("seiza maximize / close-window", "the focused window"),
-        ("seiza tile", "tile or untile this star (remembered)"),
-        ("seiza switch", "the window switcher (Super+Tab)"),
-        ("seiza cycle-window", "focus the next window"),
-    ]),
-    ("session", &[
-        ("seiza reload-config", "re-read keys, motion and the frame"),
-        ("seiza relaunch", "restart the satellites"),
-        ("seiza quit", "leave Seiza"),
-        ("anything else", "runs as a shell command"),
-    ]),
-];
-
-const GUIDE: Cards = &[
-    ("the sky", &[
-        ("star", "a place on the big canvas. Windows live in a star."),
-        ("constellation", "a set of stars you can save and come back to."),
-        ("overview", "zoom out to see every star; click one to fly in."),
-        ("thread", "a line you draw between two stars, just for you."),
-    ]),
-    ("programs", &[
-        ("satellite", "a small program Seiza starts: bar, sky, launcher..."),
-        ("launcher", "type to find an app; Tab flips list and stars."),
-        ("quick answers", "launcher: 2*(3+4), 5 km to mi, :moon. Enter copies."),
-        ("settings", "colors, frame, bar, sky and motion; most apply at once."),
-        ("lock", "the lock screen; it asks for your normal password."),
-    ]),
-    ("windows and cards", &[
-        ("tiling", "a tiled star arranges its windows; Super+t flips it."),
-        ("rules", "rule in seiza.kdl: send an app to a star, size it."),
-        ("cards", "drag to pin a card to a star; right-click moves it on."),
-        ("every window", "can be moved and resized from the keyboard too."),
-    ]),
-];
-
-/// Copy these into ~/.config/seiza/seiza.kdl.
-const RECIPES: Cards = &[
-    ("look", &[
-        ("hide the bar", "bar { autohide on }  The bar becomes a thin strip at the top edge and grows when the pointer touches it."),
-        ("change the wallpaper by itself", "look { slideshow 30 }  Every 30 minutes the next picture in the wallpaper's folder recolors the sky. 0 is off."),
-        ("see the weather", "weather { place \"Lisbon\" }, then turn on the weather card in settings, widgets. Without a place it guesses from your address."),
-        ("see what is coming up", "calendar { source \"~/cal.ics\" }, then turn on the agenda card. A calendar's private address works too."),
-    ]),
-    ("windows", &[
-        ("tile every star", "layout { tile on; max 3; gap 10 }  The first 3 windows of a star are laid out for you. Super+t flips one star."),
-        ("send an app to a star", "rule app=\"steam\" star=\"games\" mode=\"maximize\"  The first rule that matches wins. seiza debug-windows shows app ids."),
-        ("size a window", "rule app=\"pavucontrol\" w=700 h=500  Give both w and h. title=\"part of the title\" matches by title instead."),
-    ]),
-    ("session", &[
-        ("lock when you leave", "idle { dim 120; lock 300; off 600 }  Seconds without input. 0 is never. Anything watching video keeps it awake."),
-        ("choose what starts", "autostart { spawn \"seiza-bar\"; spawn \"seiza-starfield\" }  Leave it out to get the usual ones. An empty block starts nothing."),
-        ("check your file", "seiza-conf check  names mistakes by line. Saving the file reloads it by itself."),
-    ]),
-    ("keys", &[
-        ("bind a key", "binds { Super+Return { spawn \"kitty\" } }  Several actions: Super+g { goto 1; spawn \"kitty\"; }"),
-        ("name a few actions", "def my-thing { goto 1; spawn \"notify-send hi\"; }  then use my-thing in a bind."),
-    ]),
-];
-
-const FILES: Cards = &[
-    ("in ~/.config/seiza", &[
-        ("seiza.kdl", "most settings in one file; seiza-conf docs lists them."),
-        ("keys", "Mods+Key = command. Yours add to the defaults. Saved = shown here."),
-        ("motion", "how the camera glides: pan_secs, easing, reduce."),
-        ("palette", "the sky's colors (role=#hex). seiza-wallpaper writes it."),
-        ("frame", "window corner radius, border and glow."),
-        ("sky", "the starfield: nebula and friends."),
-        ("look", "clock format, wallpaper, palette style, slideshow minutes."),
-        ("widgets", "which cards show; weather and agenda are opt-in."),
-        ("launcher", "style, search and terminal."),
-        ("autostart", "programs to start with Seiza, one per line."),
-    ]),
-    ("yours to make", &[
-        ("figures/NAME.fig", "your own constellation templates."),
-        ("*.const", "saved constellations."),
-    ]),
-];
 
 /// One line of the keys page: a group heading, or a binding drawn as keycaps (the last is the key itself)
 /// with what it does.
@@ -283,43 +181,11 @@ pub struct Ui {
     w: f32, // the card's size: most of the screen
     h: f32,
     keys: Vec<Item>,
+    extra: Vec<Box<dyn Page>>, // the pages after the keybinds
+    page_total: Option<f32>,   // how tall the current extra page said it is
     t22: Text,
     t15: Text,
     t13: Text,
-}
-
-/// The options table as cards: one per section, its blurb first, then each option with its range and default.
-fn options_cards() -> Vec<(String, Vec<(String, String)>)> {
-    use seiza_common::conf::{Kind, OPTS, SECTIONS};
-    SECTIONS
-        .iter()
-        .map(|(sec, what)| {
-            let mut rows = vec![(String::new(), what.to_string())];
-            for o in OPTS.iter().filter(|o| o.section == *sec) {
-                let hint = match &o.kind {
-                    Kind::Flag => "on or off".to_string(),
-                    Kind::Num(lo, hi) => format!("{lo} to {hi}"),
-                    Kind::Pick(list) => list.join(", "),
-                    Kind::Text => "text".to_string(),
-                };
-                let default = if o.default.is_empty() { "empty".to_string() } else { o.default.to_string() };
-                rows.push((o.key.to_string(), format!("{}  ({hint}; default {default})", o.doc)));
-            }
-            (sec.to_string(), rows)
-        })
-        .collect()
-}
-
-/// The cards of a text page (every page but keys).
-fn text_cards(page: usize) -> Vec<(String, Vec<(String, String)>)> {
-    let own = |g: Cards| g.iter().map(|(t, rows)| (t.to_string(), rows.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect())).collect();
-    match page {
-        1 => own(COMMANDS),
-        2 => own(GUIDE),
-        3 => own(RECIPES),
-        4 => options_cards(),
-        _ => own(FILES),
-    }
 }
 
 /// Deal cards of these heights into `cols` columns, each into the shortest column: the tallest first when
@@ -371,6 +237,8 @@ impl Ui {
             w: W0,
             h: H0,
             keys: vec![],
+            extra: pages::extra_pages(),
+            page_total: None,
             t22: Text::new(font.clone(), 24.0),
             t15: Text::new(font.clone(), 15.0),
             t13: Text::new(font, 13.0),
@@ -391,6 +259,20 @@ impl Ui {
 
     fn body_h(&self) -> f32 {
         self.h - TOP - FOOT
+    }
+
+    pub fn page_count(&self) -> usize {
+        1 + self.extra.len()
+    }
+
+    /// The label under each star: the keybinds, then the other pages.
+    fn names(&self) -> Vec<&'static str> {
+        std::iter::once("keybinds").chain(self.extra.iter().map(|p| p.name())).collect()
+    }
+
+    /// The index in `extra` of the page being shown, if it is one of those (and not the search results).
+    fn extra_index(&self) -> Option<usize> {
+        (self.page > 0 && !self.searching()).then(|| self.page - 1)
     }
 
     pub fn searching(&self) -> bool {
@@ -434,31 +316,28 @@ impl Ui {
             .flat_map(|(_, binds)| binds)
             .map(|(caps, what)| (what.to_string(), caps.iter().map(|c| shown(c)).collect::<Vec<_>>().join(" + ")));
         let mut out = vec![];
-        for page in 0..PAGES.len() {
-            let rows: Vec<(String, String)> = if page == 0 { keys.clone().collect() } else { text_cards(page).into_iter().flat_map(|(_, r)| r).collect() };
+        for page in 0..self.page_count() {
+            let (name, rows): (&str, Vec<(String, String)>) = if page == 0 { ("keybinds", keys.clone().collect()) } else { (self.extra[page - 1].name(), self.extra[page - 1].rows()) };
             let hits: Vec<(String, String)> = rows
                 .into_iter()
                 .filter(|(n, d)| {
-                    if n.is_empty() && page != 0 {
-                        return false; // a section's blurb, not a thing to find
-                    }
                     let hay = format!("{n} {d}").to_lowercase();
                     words.iter().all(|w| hay.contains(w.as_str()))
                 })
                 .collect();
             if !hits.is_empty() {
-                out.push((PAGES[page].to_string(), hits));
+                out.push((name.to_string(), hits));
             }
         }
         out
     }
 
-    /// The cards of the text layout: the search results, else the page's own.
+    /// The cards of the text layout, which only the search results use.
     fn shown_cards(&self) -> Vec<(String, Vec<(String, String)>)> {
-        if self.searching() { self.search_cards() } else { text_cards(self.page) }
+        if self.searching() { self.search_cards() } else { vec![] }
     }
 
-    /// Whether the body is the keycap cards of the keys page (not a text layout).
+    /// Whether the body is the keycap cards of the keybinds page (not a text layout or another page).
     fn keys_body(&self) -> bool {
         self.page == 0 && !self.searching()
     }
@@ -472,9 +351,26 @@ impl Ui {
 
     /// (steps in the page, steps that fit); a step is one keys row, and the page is as tall as its tallest column.
     fn extent(&mut self) -> (usize, usize) {
-        let used = if self.keys_body() { self.key_plan().used } else { self.text_plan().used };
-        let tallest = used.iter().cloned().fold(0.0, f32::max);
+        let tallest = if self.keys_body() {
+            self.key_plan().used.iter().cloned().fold(0.0, f32::max)
+        } else if let Some(i) = self.extra_index() {
+            self.extra_total(i)
+        } else {
+            self.text_plan().used.iter().cloned().fold(0.0, f32::max)
+        };
         ((tallest / ROW1).ceil() as usize, (self.body_h() / ROW1) as usize)
+    }
+
+    /// How tall page `i` of `extra` says it is: what its last draw returned, or one drawn on the side.
+    fn extra_total(&mut self, i: usize) -> f32 {
+        if let Some(t) = self.page_total {
+            return t;
+        }
+        let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
+        let mut scratch = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
+        let t = self.extra[i].draw(&mut scratch, &mut Fonts { title: &mut self.t22, body: &mut self.t15, small: &mut self.t13 }, 0.0);
+        self.page_total = Some(t);
+        t
     }
 
     pub fn scroll_by(&mut self, d: isize) {
@@ -486,12 +382,13 @@ impl Ui {
     }
 
     pub fn go(&mut self, page: usize) {
-        let page = page.min(PAGES.len() - 1);
+        let page = page.min(self.page_count() - 1);
         if page != self.page {
             self.glide.start(self.nav_pos());
         }
         self.page = page;
         self.scroll = 0;
+        self.page_total = None;
         self.stale = true;
         self.body_stale = true;
     }
@@ -519,7 +416,7 @@ impl Ui {
 
     /// The row of page stars across the card's top.
     fn thread(&self, ox: f32, oy: f32) -> Thread {
-        Thread::new(ox + 170.0, ox + self.w - PAD - PILL_W - 30.0, oy + 40.0, PAGES.len())
+        Thread::new(ox + 170.0, ox + self.w - PAD - PILL_W - 30.0, oy + 40.0, self.page_count())
     }
 
     /// A click: on a page star it switches page. Returns true if it changed something.
@@ -529,7 +426,7 @@ impl Ui {
                 self.go(i);
                 true
             }
-            None => false,
+            None => self.pointer(x, y, true, w, h),
         }
     }
 
@@ -545,6 +442,36 @@ impl Ui {
         let now = at.and_then(|(x, y)| self.nav_at(x, y, w, h));
         let changed = std::mem::replace(&mut self.hover, now) != now;
         self.stale |= changed;
+        let page = at.is_some_and(|(x, y)| self.pointer(x, y, false, w, h)); // a page may react to the pointer too
+        changed || page
+    }
+
+    /// The pointer at a screen point, passed to the page being shown if the point is over its body: in content
+    /// coordinates (the scroll added). True if the page needs drawing again.
+    pub fn pointer(&mut self, x: f32, y: f32, press: bool, w: f32, h: f32) -> bool {
+        let Some(i) = self.extra_index() else { return false };
+        self.fit(w, h);
+        let (ox, oy) = self.origin(w, h);
+        let (bx, by) = (x - ox - PAD, y - oy - TOP);
+        if bx < 0.0 || bx >= self.cw() || by < 0.0 || by >= self.body_h() {
+            return false;
+        }
+        let changed = self.extra[i].pointer(bx, by + self.scroll as f32 * ROW1, press);
+        if changed {
+            self.stale = true;
+            self.body_stale = true;
+        }
+        changed
+    }
+
+    /// About twice a second: the page being shown says whether it changed by itself. True if a frame is due.
+    pub fn tick(&mut self) -> bool {
+        let Some(i) = self.extra_index() else { return false };
+        let changed = self.extra[i].tick();
+        if changed {
+            self.stale = true;
+            self.body_stale = true;
+        }
         changed
     }
 
@@ -704,22 +631,18 @@ impl Ui {
         }
         let mut cv = self.back.clone().expect("made above");
         let (pos, hover) = (if self.searching() { -9.0 } else { self.nav_pos() }, self.hover); // no big star: the results are not one page
-        self.thread(ox, oy).draw(&mut cv, &mut self.t13, &PAGES, pos, hover);
+        let names = self.names();
+        self.thread(ox, oy).draw(&mut cv, &mut self.t13, &names, pos, hover);
 
         let (title, blurb) = if self.searching() {
             let n: usize = self.search_cards().iter().map(|(_, r)| r.len()).sum();
             let found = if n == 0 { "nothing matches that".to_string() } else { format!("{n} match{} across every page", if n == 1 { "" } else { "es" }) };
             ("search".to_string(), found)
         } else {
-            let blurb = match self.page {
-                0 => format!("live from {}: edit it and this updates.", config::path("keys").display()),
-                1 => "type these in a terminal, or bind them to a key.".into(),
-                2 => "the words Seiza uses.".into(),
-                3 => format!("copy a line into {}.", config::path("seiza.kdl").display()),
-                4 => "every setting seiza.kdl takes; seiza-conf docs prints the same.".into(),
-                _ => format!("in {}", config::path("").display()),
-            };
-            (PAGES[self.page].to_string(), blurb)
+            match self.extra_index() {
+                Some(i) => (self.extra[i].name().to_string(), self.extra[i].blurb()),
+                None => ("keybinds".to_string(), format!("live from {}: edit it and this updates.", config::path("keys").display())),
+            }
         };
         self.t22.draw(&mut cv, ox + PAD, oy + 122.0, &title, rgba(p.text, 1.0));
         self.t13.draw(&mut cv, ox + PAD, oy + 146.0, &blurb, rgba(p.text, 0.55));
@@ -730,6 +653,9 @@ impl Ui {
             let mut body = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
             if self.keys_body() {
                 self.draw_keys(&mut body);
+            } else if let Some(i) = self.extra_index() {
+                let total = self.extra[i].draw(&mut body, &mut Fonts { title: &mut self.t22, body: &mut self.t15, small: &mut self.t13 }, self.scroll as f32 * ROW1);
+                self.page_total = Some(total);
             } else {
                 self.draw_text(&mut body);
             }
@@ -765,32 +691,6 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, ["# Sky", "Super+<Direction> = pan the camera", "Super+3 = fly to star 3", "# Apps", "Super+h = this help", "# Other", "Super+t = my-terminal"]);
-    }
-
-    #[test]
-    fn the_options_page_lists_every_setting_with_its_default() {
-        let cards = options_cards();
-        let rows: Vec<&(String, String)> = cards.iter().flat_map(|(_, r)| r).collect();
-        for key in ["autohide", "slideshow", "place", "source", "tile"] {
-            assert!(rows.iter().any(|(l, _)| l == key), "{key} missing");
-        }
-        assert!(rows.iter().any(|(l, r)| l == "radius" && r.contains("default 14")));
-        let mut ui = Ui::new();
-        ui.go(4);
-        let plan = ui.text_plan();
-        assert!(plan.heights.iter().all(|h| *h > kit::CARD_HEAD));
-        assert_eq!(plan.lines.len(), cards.len());
-    }
-
-    #[test]
-    fn every_text_page_has_cards_whose_rows_all_get_a_line() {
-        let mut ui = Ui::new();
-        for page in 1..PAGES.len() {
-            ui.go(page);
-            let plan = ui.text_plan();
-            assert!(!plan.cards.is_empty(), "page {page}");
-            assert!(plan.lines.iter().flatten().all(|l| !l.is_empty()), "page {page}: a row with no text");
-        }
     }
 
     #[test]
@@ -850,21 +750,101 @@ mod tests {
         assert!(!ui.pending() && ui.nav_pos() == 2.0, "the last frame lands on the entry");
     }
 
+    /// A page the tests control: tall, with a searchable row, and it records what the pointer did and how often it was ticked.
+    struct Probe {
+        seen: std::rc::Rc<std::cell::RefCell<Vec<(f32, f32, bool)>>>,
+        ticks: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Page for Probe {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+        fn blurb(&self) -> String {
+            "a page for the tests".into()
+        }
+        fn draw(&mut self, _: &mut Canvas, _: &mut Fonts, _: f32) -> f32 {
+            3000.0
+        }
+        fn rows(&self) -> Vec<(String, String)> {
+            vec![("a probing thing".into(), "found by the search".into())]
+        }
+        fn tick(&mut self) -> bool {
+            self.ticks.set(self.ticks.get() + 1);
+            true
+        }
+        fn pointer(&mut self, x: f32, y: f32, press: bool) -> bool {
+            self.seen.borrow_mut().push((x, y, press));
+            press
+        }
+    }
+
+    /// A Ui with a Probe as its last page, fitted to 1920x1080; returns it, the probe's page number and its records.
+    fn ui_with_probe() -> (Ui, usize, std::rc::Rc<std::cell::RefCell<Vec<(f32, f32, bool)>>>, std::rc::Rc<std::cell::Cell<u32>>) {
+        let (seen, ticks) = (Default::default(), Default::default());
+        let mut ui = Ui::new();
+        ui.extra.push(Box::new(Probe { seen: std::rc::Rc::clone(&seen), ticks: std::rc::Rc::clone(&ticks) }));
+        ui.fit(1920.0, 1080.0);
+        let page = ui.page_count() - 1;
+        (ui, page, seen, ticks)
+    }
+
+    #[test]
+    fn help_has_the_keybinds_and_the_pages_after_them() {
+        let ui = Ui::new();
+        assert_eq!(ui.names()[0], "keybinds");
+        assert_eq!(&ui.names()[1..], &["elements", "voyager", "yoru & seiza"]);
+        assert_eq!(ui.page_count(), 4);
+    }
+
     #[test]
     fn typing_searches_every_page() {
-        let mut ui = Ui::new();
+        let (mut ui, _, _, _) = ui_with_probe();
         ui.keys = key_items("Super+q = seiza close-window\nSuper+h = seiza-help\n");
         ui.type_str("close");
         let cards = ui.shown_cards();
-        let titles: Vec<&str> = cards.iter().map(|(t, _)| t.as_str()).collect();
-        assert!(titles.contains(&"keys") && titles.contains(&"commands"), "{titles:?}");
-        let keys = &cards.iter().find(|(t, _)| t == "keys").unwrap().1;
-        assert_eq!(keys, &[("close the window".to_string(), "Super + q".to_string())]);
-        ui.type_str(" window");
-        assert!(ui.search_cards().iter().all(|(_, r)| r.iter().all(|(n, d)| format!("{n} {d}").to_lowercase().contains("window"))), "every word must match");
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].0, "keybinds");
+        assert_eq!(cards[0].1, [("close the window".to_string(), "Super + q".to_string())]);
+        ui.clear_search();
+        ui.type_str("probing");
+        let cards = ui.shown_cards();
+        assert_eq!(cards.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["probe"], "a page's rows are found too");
         ui.type_str(" zzzz");
         assert!(ui.search_cards().is_empty());
         assert!(ui.text_plan().cards.is_empty(), "nothing found lays out nothing");
+    }
+
+    #[test]
+    fn a_page_gets_the_pointer_in_content_coordinates_and_only_over_its_body() {
+        let (mut ui, page, seen, _) = ui_with_probe();
+        ui.go(page);
+        let (ox, oy) = ui.origin(1920.0, 1080.0);
+        let (bx, by) = (ox + PAD, oy + TOP);
+        assert!(ui.press(bx + 100.0, by + 50.0, 1920.0, 1080.0), "the probe asks for a redraw on a click");
+        assert_eq!(seen.borrow().last(), Some(&(100.0, 50.0, true)));
+        ui.scroll_by(1); // two steps of ROW1
+        ui.hover(Some((bx + 100.0, by + 50.0)), 1920.0, 1080.0);
+        assert_eq!(seen.borrow().last(), Some(&(100.0, 50.0 + 2.0 * ROW1, false)), "the scroll is added to y");
+        let n = seen.borrow().len();
+        ui.hover(Some((bx - 5.0, by + 50.0)), 1920.0, 1080.0); // left of the body
+        ui.hover(Some((bx + 100.0, by - 5.0)), 1920.0, 1080.0); // above it
+        assert_eq!(seen.borrow().len(), n, "outside the body the page hears nothing");
+        ui.go(0);
+        let n = seen.borrow().len();
+        ui.press(bx + 100.0, by + 50.0, 1920.0, 1080.0);
+        assert_eq!(seen.borrow().len(), n, "a page that is not showing hears nothing");
+    }
+
+    #[test]
+    fn only_the_page_being_shown_is_ticked() {
+        let (mut ui, page, _, ticks) = ui_with_probe();
+        assert!(!ui.tick() && ticks.get() == 0, "the keybinds page has no clock");
+        ui.go(page);
+        assert!(ui.tick() && ui.pending(), "a page that changed asks for a frame");
+        assert_eq!(ticks.get(), 1);
+        ui.type_str("x"); // the search results are showing, not the page
+        assert!(!ui.tick() && ticks.get() == 1);
     }
 
     #[test]
@@ -879,12 +859,13 @@ mod tests {
     }
 
     #[test]
-    fn scroll_stays_in_range() {
-        let mut ui = Ui::new();
+    fn scroll_stays_in_range_on_a_page_that_says_how_tall_it_is() {
+        let (mut ui, page, _, _) = ui_with_probe();
         ui.fit(1280.0, 720.0);
-        ui.go(1);
+        ui.go(page);
         let (total, visible) = ui.extent();
-        assert!(total > visible, "the commands page does not fit 1280x720");
+        assert_eq!(total, (3000.0 / ROW1).ceil() as usize, "the height the page returned");
+        assert!(total > visible);
         ui.scroll_by(1000);
         assert_eq!(ui.scroll, total - visible);
         ui.scroll_by(-1000);

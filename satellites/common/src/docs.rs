@@ -125,3 +125,28 @@ pub fn options_cards() -> Vec<(String, Vec<(String, String)>)> {
         .collect()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_options_list_every_setting_with_its_default() {
+        let cards = options_cards();
+        let rows: Vec<&(String, String)> = cards.iter().flat_map(|(_, r)| r).collect();
+        for key in ["autohide", "slideshow", "place", "source", "tile"] {
+            assert!(rows.iter().any(|(l, _)| l == key), "{key} missing");
+        }
+        assert!(rows.iter().any(|(l, r)| l == "radius" && r.contains("default 14")));
+    }
+
+    #[test]
+    fn every_documentation_row_says_something() {
+        for set in [COMMANDS, GUIDE, RECIPES, FILES] {
+            for (title, rows) in set {
+                assert!(!title.is_empty() && !rows.is_empty());
+                assert!(rows.iter().all(|(name, what)| !name.is_empty() && !what.is_empty()), "{title}");
+            }
+        }
+    }
+}
