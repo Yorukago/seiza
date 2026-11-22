@@ -59,7 +59,15 @@ impl Settings {
         match effect {
             Effect::None => {}
             Effect::ReloadConfig => {
-                let _ = seiza_common::command("seiza reload-config");
+                // A slider asks on every pointer move and a reload is slow: one in the background at a time. What gets skipped
+                // is picked up by the compositor's own hot-reload, which runs ~200 ms after the last write to the config.
+                static RELOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !RELOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::spawn(|| {
+                        let _ = seiza_common::command("seiza reload-config");
+                        RELOADING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
             }
             Effect::Run(cmd) => {
                 let _ = seiza_common::command(cmd);
