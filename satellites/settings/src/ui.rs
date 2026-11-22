@@ -29,6 +29,7 @@ pub enum Ctl {
     Path,
     Button(&'static str),
     Swatches, // the palette's colors, read-only
+    None,     // no control: a documentation row, all words
 }
 
 pub struct Row {
@@ -133,7 +134,35 @@ pub fn pages() -> Vec<Page> {
                 row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
             ]),
         ]},
+        docs_page(),
     ]
+}
+
+/// The documentation page: the commands, the words Seiza uses, config recipes, every option and every file,
+/// as cards of rows with no control (they are found by the search like any setting).
+/// shortcut: the titles and ids are built at run time and leaked, once, because `Row` holds `&'static str`;
+/// this program lives for one visit, so that is a few kilobytes until it closes.
+fn docs_page() -> Page {
+    use seiza_common::docs;
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let n = std::cell::Cell::new(0); // numbers the rows across the whole page, so no two share an id
+    let row = |label: &'static str, hint: &'static str| {
+        n.set(n.get() + 1);
+        Row { id: leak(format!("doc/{}", n.get())), label, hint, ctl: Ctl::None, default: "" }
+    };
+    let mut cards = vec![];
+    for (kind, set) in [("commands", docs::COMMANDS), ("guide", docs::GUIDE), ("recipes", docs::RECIPES)] {
+        for (title, rows) in set {
+            cards.push(Card { title: leak(format!("{kind} \u{b7} {title}")), rows: rows.iter().map(|(a, b)| row(a, b)).collect() });
+        }
+    }
+    for (section, rows) in docs::options_cards() {
+        cards.push(Card { title: leak(format!("options \u{b7} {section}")), rows: rows.into_iter().map(|(a, b)| row(leak(a), leak(b))).collect() });
+    }
+    for (title, rows) in docs::FILES {
+        cards.push(Card { title: leak(format!("files \u{b7} {title}")), rows: rows.iter().map(|(a, b)| row(a, b)).collect() });
+    }
+    Page { name: "documentation", blurb: "how Seiza works: the commands, the words it uses, recipes for the config file, every option and every file.", cards }
 }
 
 /// ysh reads YSH_VOICE from its own config file, so that is where the setting lives.
@@ -206,12 +235,18 @@ fn thumbnail(path: &str) -> Option<(usize, usize, Vec<u32>)> {
 
 type Rect = (f32, f32, f32, f32); // x, y, w, h
 
+/// Where a row's first line of hint sits: under its label, or at the label's place if it has none.
+fn hint_y(r: &Row) -> f32 {
+    if r.label.is_empty() { 25.0 } else { 44.0 }
+}
+
 /// One row, placed: where it is and where its control is, relative to the page body.
 struct Placed {
     id: &'static str,
     ctl: Ctl,
     label: &'static str,
     lines: Vec<String>, // the hint, wrapped
+    hint_y: f32,        // where its first line sits, from the row's top
     row: Rect,
     ctl_box: Rect,
     first: bool,
@@ -259,6 +294,7 @@ fn ctl_size(ctl: Ctl, t13: &mut Text) -> (f32, f32) {
         Ctl::Path => (300.0, 36.0),
         Ctl::Button(t) => ((t13.width(t) + 44.0).max(90.0), 34.0),
         Ctl::Swatches => (6.0 * 30.0, 24.0),
+        Ctl::None => (0.0, 0.0),
     }
 }
 
@@ -281,8 +317,12 @@ fn layout(view: &[(String, Vec<&Row>)], t15: &mut Text, t13: &mut Text, thumb: b
                     }
                     let crowded = !matches!(r.ctl, Ctl::Path) && label_w + w + 24.0 > inner;
                     let under = matches!(r.ctl, Ctl::Slider(..)) || (matches!(r.ctl, Ctl::Choice(_)) && w > inner * 0.35) || crowded;
-                    let lines = kit::wrap(t13, r.hint, if under { inner } else { inner - w - 16.0 });
+                    let words_only = matches!(r.ctl, Ctl::None);
+                    let lines = kit::wrap(t13, r.hint, if under || words_only { inner } else { inner - w - 16.0 });
                     let mut rh = if under { 58.0 + h + 12.0 } else { ROW } + 16.0 * (lines.len() - 1) as f32;
+                    if words_only {
+                        rh = hint_y(r) + 16.0 * (lines.len() - 1) as f32 + 14.0; // the words, and a little air under them
+                    }
                     if thumb && r.id == "look/wallpaper" {
                         rh += 62.0;
                     }
@@ -309,7 +349,7 @@ fn layout(view: &[(String, Vec<&Row>)], t15: &mut Text, t13: &mut Text, thumb: b
             } else {
                 (x + col_w - INNER - w, ry + (ROW - h) / 2.0, w, h)
             };
-            out.rows.push(Placed { id: r.id, ctl: r.ctl, label: r.label, lines, row: (x, ry, col_w, rh), ctl_box, first: k == 0, thumb: thumb && r.id == "look/wallpaper" });
+            out.rows.push(Placed { id: r.id, ctl: r.ctl, label: r.label, lines, hint_y: hint_y(r), row: (x, ry, col_w, rh), ctl_box, first: k == 0, thumb: thumb && r.id == "look/wallpaper" });
             ry += rh;
         }
     }
@@ -354,7 +394,7 @@ impl Ui {
         let pages = pages();
         let mut values = HashMap::new();
         let widgets = std::fs::read_to_string(config::path("widgets")).ok();
-        for r in pages.iter().flat_map(|p| p.cards.iter().flat_map(|c| &c.rows)) {
+        for r in pages.iter().flat_map(|p| p.cards.iter().flat_map(|c| &c.rows)).filter(|r| !matches!(r.ctl, Ctl::None)) {
             let v = match (r.id.split_once('/'), &widgets) {
                 (Some(("widgets", name)), Some(text)) => if text.lines().any(|l| l.trim() == name) { "1" } else { "0" }.to_string(),
                 (Some(("ysh", _)), _) => ysh_voice(&std::fs::read_to_string(ysh_rc()).unwrap_or_default()).unwrap_or(r.default).to_string(),
@@ -556,7 +596,7 @@ impl Ui {
             return Effect::None;
         }
         let lay = self.lay();
-        for p in &lay.rows {
+        for p in lay.rows.iter().filter(|p| !matches!(p.ctl, Ctl::None)) {
             let (cx, cy, cw, ch) = p.ctl_box;
             if !(bx >= cx - 6.0 && bx < cx + cw + 6.0 && by >= cy - 6.0 && by < cy + ch + 6.0) {
                 continue;
@@ -590,7 +630,7 @@ impl Ui {
                     Effect::None
                 }
                 Ctl::Button(_) => self.set(p.id, "1".into()),
-                Ctl::Swatches => Effect::None,
+                Ctl::Swatches | Ctl::None => Effect::None,
             };
         }
         Effect::None
@@ -671,7 +711,7 @@ impl Ui {
 
         let (title, blurb) = if self.searching() {
             let n: usize = view(&self.pages, self.page, &self.query).iter().map(|(_, r)| r.len()).sum();
-            let found = if n == 0 { "nothing matches that".to_string() } else { format!("{n} setting{} across every page", if n == 1 { "" } else { "s" }) };
+            let found = if n == 0 { "nothing matches that".to_string() } else { format!("{n} result{} across every page", if n == 1 { "" } else { "s" }) };
             ("search", found)
         } else {
             (self.pages[self.page].name, self.pages[self.page].blurb.to_string())
@@ -726,9 +766,10 @@ impl Ui {
             if !r.first {
                 cv.round_rect(x + 1.0, y, w - 2.0, 1.0, 0.0, rgba(p.text, 0.06));
             }
-            self.t15.draw(&mut cv, x + INNER, y + 25.0, r.label, rgba(p.text, 0.95));
+            let words_only = matches!(r.ctl, Ctl::None);
+            self.t15.draw(&mut cv, x + INNER, y + 25.0, r.label, if words_only { rgba(p.star, 0.9) } else { rgba(p.text, 0.95) });
             for (i, line) in r.lines.iter().enumerate() {
-                self.t13.draw(&mut cv, x + INNER, y + 44.0 + 16.0 * i as f32, line, rgba(p.text, 0.5));
+                self.t13.draw(&mut cv, x + INNER, y + r.hint_y + 16.0 * i as f32, line, rgba(p.text, if words_only { 0.72 } else { 0.5 }));
             }
             if let (true, Some((tw, th, px))) = (r.thumb, &self.thumb) {
                 let (tx, ty) = ((x + INNER) as i32, (y + 56.0 + 16.0 * (r.lines.len() - 1) as f32) as i32);
@@ -746,6 +787,9 @@ impl Ui {
     }
 
     fn draw_ctl(&mut self, cv: &mut Canvas, r: &Placed) {
+        if matches!(r.ctl, Ctl::None) {
+            return;
+        }
         let p = palette();
         let (cx, cy, cw, ch) = r.ctl_box;
         let val = self.values[r.id].clone();
@@ -804,6 +848,7 @@ impl Ui {
                     cv.round_rect(x + 1.0, cy + 2.0, 22.0, 22.0, 11.0, rgba(c, 1.0));
                 }
             }
+            Ctl::None => {}
             Ctl::Button(text) => {
                 cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.star, 0.85));
                 cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(p.panel, 1.0));
@@ -965,6 +1010,37 @@ mod tests {
             assert_eq!(config::get("frame", "glow").as_deref(), Some("off"), "a found control is live");
             ui.type_text(" zzzz");
             assert!(view(&ui.pages, ui.page, &ui.query).is_empty());
+        });
+    }
+
+    #[test]
+    fn the_documentation_page_is_all_words_and_found_by_the_search() {
+        with_config(|| {
+            let mut ui = Ui::new();
+            let docs = ui.pages.iter().position(|p| p.name == "documentation").expect("a documentation page");
+            assert_eq!(docs, ui.page_count() - 1, "it is the last page");
+            let rows: Vec<&Row> = ui.pages[docs].cards.iter().flat_map(|c| &c.rows).collect();
+            assert!(rows.len() > 60 && rows.iter().all(|r| matches!(r.ctl, Ctl::None)), "every row is words only");
+            let mut ids: Vec<&str> = rows.iter().map(|r| r.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), rows.len(), "every row has its own id");
+            assert!(ui.values.keys().all(|k| !k.starts_with("doc/")), "no value is read or saved for them");
+            for t in ["commands", "guide", "recipes", "options", "files"] {
+                assert!(ui.pages[docs].cards.iter().any(|c| c.title.starts_with(t)), "{t}");
+            }
+            // searching "tile" finds a setting and the documentation about tiling
+            ui.type_text("tile");
+            let found = view(&ui.pages, ui.page, &ui.query);
+            assert!(found.iter().any(|(_, r)| r.iter().any(|r| matches!(r.ctl, Ctl::None))), "docs rows are found");
+            // and clicking on words does nothing, anywhere on the page
+            ui.escape();
+            ui.go(docs);
+            let (w, h) = SCREEN;
+            for (x, y) in [(300.0, 300.0), (700.0, 400.0), (1200.0, 500.0), (900.0, 700.0)] {
+                assert!(matches!(ui.press(x, y, w, h, false), Effect::None));
+            }
+            assert!(!config::path("look").exists(), "nothing was written");
         });
     }
 

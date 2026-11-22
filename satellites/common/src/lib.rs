@@ -5,6 +5,7 @@ pub mod art;
 pub mod conf;
 pub mod config;
 pub mod constellation;
+pub mod docs;
 pub mod draw;
 pub mod figure;
 pub mod kit;
