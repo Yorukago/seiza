@@ -7,7 +7,7 @@ use crate::{
     place::{self, hex},
 };
 use seiza_common::{
-    draw::{composite, load_font, Canvas, Text},
+    draw::{composite, shared_font, Canvas, Text},
     palette::{palette, rgba},
 };
 
@@ -49,7 +49,7 @@ fn c4(c: [u8; 3], a: f32) -> [f32; 4] {
 
 impl Ui {
     pub fn new(pals: Vec<Pal>, w: f32, h: f32) -> Ui {
-        let mut ui = Ui { query: String::new(), sel: 0, scroll: 0, w, h, msg: None, pals, shown: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None };
+        let mut ui = Ui { query: String::new(), sel: 0, scroll: 0, w, h, msg: None, pals, shown: vec![], t17: Text::new(shared_font(), 17.0), t13: Text::new(shared_font(), 13.0), content: None };
         ui.refresh();
         ui
     }

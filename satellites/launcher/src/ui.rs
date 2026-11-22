@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use seiza_common::{
     apps::{rank, App, Group, GROUPS},
-    draw::{composite, load_font, Canvas, Rgba, Text},
+    draw::{composite, shared_font, Canvas, Rgba, Text},
     palette::{palette, rgba},
 };
 
@@ -91,7 +91,7 @@ fn fit(t: &mut Text, s: &str, max: f32) -> String {
 
 impl Ui {
     pub fn new(apps: Vec<App>, style: Style, w: f32, h: f32) -> Ui {
-        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, picker: false, apps, items: vec![], t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0), content: None, lines: seiza_common::config::flag("yoru", "lines", true), glide: None, born: Instant::now() };
+        let mut ui = Ui { style, query: String::new(), sel: 0, scroll: 0, w, h, error: None, picker: false, apps, items: vec![], t17: Text::new(shared_font(), 17.0), t13: Text::new(shared_font(), 13.0), content: None, lines: seiza_common::config::flag("yoru", "lines", true), glide: None, born: Instant::now() };
         ui.refresh();
         ui
     }
