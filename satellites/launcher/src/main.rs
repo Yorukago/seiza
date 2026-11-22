@@ -4,8 +4,10 @@
 //!
 //! Starting goes through Seiza's socket, so the app gets Seiza's environment and
 //! opens in the current star. SEIZA_LAUNCHER_DRY=1 prints the command instead.
-//! `seiza-launcher --dump out.ppm [list|stars] [query]` draws one frame to a file.
+//! `seiza-launcher --dump out.ppm [list|stars] [query]` draws one frame to a file; `--dump out.ppm clip [query]`
+//! draws the clipboard picker (`seiza-launcher --clip`, see clip.rs) from $XDG_RUNTIME_DIR/seiza-clip.
 mod calc;
+mod clip;
 mod emoji;
 mod ui;
 
@@ -33,6 +35,7 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 use std::time::Instant;
+use clip::{ClipUi, Hit};
 use ui::{Style, Ui};
 
 const OPEN_SECS: f32 = 0.35;
@@ -86,6 +89,7 @@ struct Launcher {
     closing: Option<Instant>,
     shown: f32, // the visibility last drawn
     ui: Ui,
+    clip: Option<ClipUi>, // `--clip`: the clipboard picker takes the place of `ui`
 }
 
 impl Launcher {
@@ -107,20 +111,85 @@ impl Launcher {
     }
 
     fn launch(&mut self, i: usize) {
-        let Some(line) = self.ui.item(i).map(|it| it.line.clone()) else { return };
+        if let Some(line) = self.ui.item(i).map(|it| it.line.clone()) {
+            self.send(line);
+        }
+    }
+
+    /// Hand a command line to Seiza and close.
+    fn send(&mut self, line: String) {
         if std::env::var_os("SEIZA_LAUNCHER_DRY").is_some() {
             println!("would send: {line}");
             self.close();
         } else {
             match seiza_common::command(&line) {
                 Ok(_) => self.close(),
-                Err(e) => self.ui.error = Some(format!("couldn't reach seiza: {e}")),
+                Err(e) => {
+                    let msg = format!("couldn't reach seiza: {e}");
+                    match self.clip.as_mut() {
+                        Some(c) => c.error = Some(msg),
+                        None => self.ui.error = Some(msg),
+                    }
+                }
             }
         }
         self.dirty = true;
     }
 
+    /// Put the selected clipboard entry back on the clipboard.
+    fn paste(&mut self) {
+        if let Some(e) = self.clip.as_ref().and_then(|c| c.selected()) {
+            let line = format!("wl-copy < '{}'", e.path.display().to_string().replace('\'', "'\\''"));
+            self.send(line);
+        }
+    }
+
+    fn clip_key(&mut self, event: &KeyEvent) {
+        let Some(c) = self.clip.as_mut() else { return };
+        c.error = None;
+        match event.keysym {
+            Keysym::Escape => return self.close(),
+            Keysym::Return | Keysym::KP_Enter => return self.paste(),
+            Keysym::Tab => c.toggle_pin(),
+            Keysym::Delete => c.forget(),
+            Keysym::BackSpace => c.backspace(),
+            Keysym::Up => c.step(-1),
+            Keysym::Down => c.step(1),
+            _ => match event.utf8.as_deref() {
+                Some(s) if !self.chord && !s.is_empty() && !s.chars().any(char::is_control) => c.type_str(s),
+                _ => return,
+            },
+        }
+        self.dirty = true;
+    }
+
+    fn clip_pointer(&mut self, e: &PointerEvent) {
+        let Some(c) = self.clip.as_mut() else { return };
+        let hit = c.hit(e.position.0 as f32, e.position.1 as f32);
+        match e.kind {
+            PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
+                if let Hit::Row(k) = hit {
+                    c.select(k);
+                }
+            }
+            PointerEventKind::Press { button: BTN_LEFT, .. } => match hit {
+                Hit::Outside => return self.close(), // a click off the panel closes it
+                Hit::Row(k) => c.select(k),
+                Hit::Paste => return self.paste(),
+                Hit::Pin => c.toggle_pin(),
+                Hit::Forget => c.forget(),
+                Hit::Inside => {}
+            },
+            PointerEventKind::Axis { vertical, .. } => c.scroll_by(if vertical.absolute > 0.0 { 1 } else { -1 }),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
     fn key(&mut self, event: &KeyEvent) {
+        if self.clip.is_some() {
+            return self.clip_key(event);
+        }
         self.ui.error = None;
         let stars = self.ui.style == Style::Stars;
         match event.keysym {
@@ -158,13 +227,16 @@ impl Launcher {
             return;
         }
         let (e, moving) = self.visibility();
-        let moving = moving || self.ui.gliding();
+        let moving = moving || self.ui.gliding() || self.clip.as_ref().is_some_and(ClipUi::gliding);
         if self.exit || !(self.dirty || moving || e != self.shown) {
             return;
         }
         self.dirty = false;
         self.shown = e;
-        let cv = self.ui.render(e);
+        let cv = match self.clip.as_mut() {
+            Some(c) => c.render(e),
+            None => self.ui.render(e),
+        };
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         // shortcut: assumes a little-endian host, which Argb8888 in memory then matches.
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
@@ -209,6 +281,9 @@ impl LayerShellHandler for Launcher {
             return;
         }
         (self.ui.w, self.ui.h) = size;
+        if let Some(c) = self.clip.as_mut() {
+            c.resize(size.0, size.1);
+        }
         self.configured = true;
         self.opened.get_or_insert_with(Instant::now);
         self.dirty = true;
@@ -273,6 +348,10 @@ impl PointerHandler for Launcher {
             if &e.surface != self.layer.wl_surface() {
                 continue;
             }
+            if self.clip.is_some() {
+                self.clip_pointer(e);
+                continue;
+            }
             let hit = self.ui.hit(e.position.0 as f32, e.position.1 as f32);
             match e.kind {
                 PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
@@ -326,23 +405,6 @@ impl ProvidesRegistryState for Launcher {
 
 smithay_client_toolkit::delegate_dispatch2!(Launcher);
 
-/// The clipboard history that scripts/seiza-clip-store keeps in $XDG_RUNTIME_DIR/seiza-clip, newest first, as
-/// "apps" whose command puts the entry back on the clipboard.
-fn load_clip(dir: &std::path::Path) -> Vec<seiza_common::apps::App> {
-    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
-    files.sort_by(|a, b| b.cmp(a)); // names are millisecond stamps
-    files
-        .into_iter()
-        .filter_map(|p| {
-            let text = std::fs::read_to_string(&p).ok()?;
-            let first = text.lines().find(|l| !l.trim().is_empty())?.trim();
-            let name: String = first.chars().take(90).collect();
-            let more = if text.trim().lines().count() > 1 || first.chars().count() > 90 { "…" } else { "" };
-            Some(seiza_common::apps::App { name: format!("{name}{more}"), exec: format!("wl-copy < '{}'", p.display()), extra: String::new(), group: seiza_common::apps::Group::System })
-        })
-        .collect()
-}
-
 /// The window list `seiza switch` writes, most recent first: `star<TAB>app<TAB>title` a line.
 fn load_windows(file: &std::path::Path) -> Vec<seiza_common::apps::App> {
     std::fs::read_to_string(file)
@@ -367,11 +429,19 @@ fn clip_dir() -> std::path::PathBuf {
 }
 
 fn dump(path: &str, args: &[String]) {
-    let style = args.first().and_then(|a| style_arg(a)).unwrap_or(Style::List);
-    let mut ui = Ui::new(load_apps(), style, 1920.0, 1080.0);
-    ui.query = args.get(1).cloned().unwrap_or_default();
-    ui.refresh();
-    let cv: Canvas = ui.render(args.get(2).and_then(|e| e.parse().ok()).unwrap_or(1.0));
+    let cv: Canvas = if args.first().map(String::as_str) == Some("clip") {
+        let mut ui = ClipUi::new(clip::load(&clip_dir()), 1920.0, 1080.0);
+        if let Some(q) = args.get(1) {
+            ui.type_str(q);
+        }
+        ui.render(args.get(2).and_then(|e| e.parse().ok()).unwrap_or(1.0))
+    } else {
+        let style = args.first().and_then(|a| style_arg(a)).unwrap_or(Style::List);
+        let mut ui = Ui::new(load_apps(), style, 1920.0, 1080.0);
+        ui.query = args.get(1).cloned().unwrap_or_default();
+        ui.refresh();
+        ui.render(args.get(2).and_then(|e| e.parse().ok()).unwrap_or(1.0))
+    };
     let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
     ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
     std::fs::write(path, ppm).unwrap();
@@ -429,7 +499,8 @@ fn main() {
         opened: None,
         closing: None,
         shown: 0.0,
-        ui: Ui::new(if clip { load_clip(&clip_dir()) } else if windows { load_windows(&windows_file()) } else { load_apps() }, style, 1.0, 1.0),
+        ui: Ui::new(if windows { load_windows(&windows_file()) } else if clip { vec![] } else { load_apps() }, style, 1.0, 1.0),
+        clip: clip.then(|| ClipUi::new(clip::load(&clip_dir()), 1.0, 1.0)),
     };
     app.ui.picker = clip || windows;
     app.ui.refresh();
@@ -453,18 +524,5 @@ mod tests {
         assert_eq!((apps[0].name.as_str(), apps[0].exec.as_str()), ("fish  ·  star 1", "seiza focus-window 1"));
         assert_eq!((apps[1].name.as_str(), apps[1].extra.as_str()), ("Firefox  ·  star 2", "firefox"));
         std::fs::remove_file(f).unwrap();
-    }
-
-    #[test]
-    fn clip_history_is_newest_first_and_puts_the_text_back() {
-        let d = std::env::temp_dir().join(format!("seiza-clip-test-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("1000.txt"), "old").unwrap();
-        std::fs::write(d.join("2000.txt"), "\nnew line\nsecond").unwrap();
-        let apps = super::load_clip(&d);
-        assert_eq!(apps[0].name, "new line…");
-        assert_eq!(apps[1].name, "old");
-        assert_eq!(apps[1].exec, format!("wl-copy < '{}'", d.join("1000.txt").display()));
-        std::fs::remove_dir_all(d).unwrap();
     }
 }
