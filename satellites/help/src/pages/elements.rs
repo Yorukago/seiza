@@ -5,6 +5,13 @@
 //! shortcut: masses are the standard atomic weights to the usual five figures; an element with no
 //! stable isotope shows the mass number of its longest-lived isotope in brackets, as printed tables do.
 
+use super::{Fonts, Page};
+use seiza_common::{
+    draw::Canvas,
+    kit,
+    palette::{palette, rgba, Rgb},
+};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cat {
     AlkaliMetal,
@@ -175,6 +182,16 @@ impl Grid {
         Grid { cell, x0: ((width - w) / 2.0).max(0.0), y0: top }
     }
 
+    /// Like `fit`, but also small enough that the whole table is `height` tall, down to a 30 px cell
+    /// (below that the page scrolls instead).
+    pub fn fit_in(width: f32, height: f32, top: f32) -> Grid {
+        let by_width = Grid::fit(width, top);
+        let by_height = ((height - top - 8.0 + GAP) / 9.5 - GAP).clamp(30.0, MAX_CELL); // the table is 9.5 steps tall
+        let cell = by_width.cell.min(by_height);
+        let w = 18.0 * (cell + GAP) - GAP;
+        Grid { cell, x0: ((width - w) / 2.0).max(0.0), y0: top }
+    }
+
     /// The rectangle (x, y, w, h) of grid cell (row, col), rows and columns from 1. Row 8 is half a cell: the gap.
     pub fn rect(&self, row: u8, col: u8) -> (f32, f32, f32, f32) {
         let step = self.cell + GAP;
@@ -207,6 +224,183 @@ impl Grid {
         let (x, y, ..) = self.rect(1, 3);
         let (x2, _, w2, h3) = self.rect(3, 12);
         (x, y, x2 + w2 - x, self.rect(3, 12).1 + h3 - y)
+    }
+}
+
+fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+/// A category's colour, mixed from the palette's own roles so a new wallpaper recolours the table.
+pub fn tint(c: Cat) -> Rgb {
+    let p = palette();
+    match c {
+        Cat::AlkaliMetal => p.pink,
+        Cat::AlkalineEarth => p.star,
+        Cat::Transition => mix(p.glow, p.text, 0.2),
+        Cat::PostTransition => mix(p.mist, p.text, 0.45),
+        Cat::Metalloid => p.ice,
+        Cat::Nonmetal => p.text,
+        Cat::NobleGas => mix(p.glow, p.ice, 0.55),
+        Cat::Lanthanide => mix(p.star, p.pink, 0.5),
+        Cat::Actinide => mix(p.glow, p.pink, 0.55),
+        Cat::Unknown => mix(p.text, p.sky, 0.6),
+    }
+}
+
+/// Where the legend's chips go on a row `width` wide: (x, y, category) and the height they take.
+fn legend_layout(small: &mut seiza_common::draw::Text, width: f32) -> (Vec<(f32, f32, Cat)>, f32) {
+    let (mut x, mut y, mut chips) = (0.0, 0.0, vec![]);
+    for c in Cat::ALL {
+        let need = 16.0 + small.width(c.label()) + 22.0;
+        if x > 0.0 && x + need > width {
+            (x, y) = (0.0, y + 24.0);
+        }
+        chips.push((x, y, c));
+        x += need;
+    }
+    (chips, y + 22.0)
+}
+
+pub struct Elements {
+    grid: Grid,
+    sel: Option<u8>,   // clicked: stays on show
+    hover: Option<u8>, // pointed at: shows while the pointer is on it
+}
+
+impl Elements {
+    pub fn new() -> Elements {
+        Elements { grid: Grid::fit(900.0, 0.0), sel: None, hover: None }
+    }
+
+    /// The card for the element on show: its tile, its name and its numbers.
+    fn card(&self, c: &mut Canvas, f: &mut Fonts, (x, y, w, h): (f32, f32, f32, f32)) {
+        let p = palette();
+        let short = h < 140.0; // a small window: no room for the tile and the facts, so two lines
+        let Some(n) = self.hover.or(self.sel) else {
+            kit::card(c, f.small, x, y, w, h, "elements");
+            if short {
+                f.body.draw(c, x + 18.0, y + kit::CARD_HEAD + 30.0, "point at one, click to keep it", rgba(p.text, 0.75));
+            } else {
+                f.body.draw(c, x + 18.0, y + kit::CARD_HEAD + 32.0, "point at an element to see it here,", rgba(p.text, 0.75));
+                f.body.draw(c, x + 18.0, y + kit::CARD_HEAD + 56.0, "click one to keep it on show.", rgba(p.text, 0.75));
+            }
+            return;
+        };
+        let (e, cat) = (element(n).unwrap(), category(n));
+        let t = tint(cat);
+        kit::card(c, f.small, x, y, w, h, cat.label());
+        if short {
+            f.title.draw(c, x + 18.0, y + kit::CARD_HEAD + 30.0, &format!("{}  {}", e.symbol, e.name), rgba(p.text, 1.0));
+            let line = format!("number {}  ·  weight {}  ·  {}", n, e.mass, state(n));
+            f.small.draw(c, x + 18.0, y + kit::CARD_HEAD + 50.0, &line, rgba(p.text, 0.6));
+            return;
+        }
+        let (tx, ty, ts) = (x + 18.0, y + kit::CARD_HEAD + 14.0, 84.0_f32.min(h - kit::CARD_HEAD - 28.0));
+        c.round_rect(tx, ty, ts, ts, 12.0, rgba(t, 0.8));
+        c.round_rect(tx + 1.0, ty + 1.0, ts - 2.0, ts - 2.0, 11.0, rgba(p.panel, 1.0));
+        c.round_rect(tx + 1.0, ty + 1.0, ts - 2.0, ts - 2.0, 11.0, rgba(t, 0.2));
+        f.small.draw(c, tx + 8.0, ty + 18.0, &n.to_string(), rgba(p.text, 0.6));
+        let sw = f.title.width(e.symbol);
+        f.title.draw(c, tx + (ts - sw) / 2.0, ty + ts * 0.66, e.symbol, rgba(p.text, 1.0));
+        let nx = tx + ts + 22.0;
+        f.title.draw(c, nx, ty + 22.0, e.name, rgba(p.text, 1.0));
+        let group_text = group(n).map_or("f-block".to_string(), |g| g.to_string());
+        let facts = [("atomic number", n.to_string()), ("atomic weight", e.mass.to_string()), ("period", period(n).to_string()), ("group", group_text), ("at room temperature", state(n).to_string())];
+        let two = w >= 560.0 && h >= 150.0;
+        let per_col = if two { 3 } else { 5 };
+        let col_w = ((x + w - 18.0) - nx) / if two { 2.0 } else { 1.0 };
+        for (i, (label, value)) in facts.iter().enumerate() {
+            let (col, row) = (i / per_col, i % per_col);
+            let (fx, fy) = (nx + col as f32 * col_w, ty + 50.0 + row as f32 * 22.0);
+            if fy > y + h - 10.0 {
+                continue; // a card too short for every fact shows the first ones
+            }
+            f.small.draw(c, fx, fy, label, rgba(p.text, 0.5));
+            let (vx, vw) = (fx + f.small.width("at room temperature") + 12.0, f.body.width(value));
+            f.body.draw(c, if two { vx.min(fx + col_w - vw - 8.0) } else { vx }, fy, value, rgba(p.text, 0.95));
+        }
+    }
+}
+
+impl Page for Elements {
+    fn name(&self) -> &'static str {
+        "elements"
+    }
+
+    fn blurb(&self) -> String {
+        "all 118, by number. point at one, click to keep it on show.".into()
+    }
+
+    fn rows(&self) -> Vec<(String, String)> {
+        (1..=COUNT).map(|n| {
+            let e = element(n).unwrap();
+            (e.name.to_string(), format!("{}, {}", describe(n), e.mass))
+        }).collect()
+    }
+
+    fn pointer(&mut self, x: f32, y: f32, press: bool) -> bool {
+        let hit = self.grid.hit(x, y);
+        if press {
+            if hit.is_none() {
+                return false;
+            }
+            self.sel = if self.sel == hit { None } else { hit }; // a second click lets go
+            true
+        } else if self.hover != hit {
+            self.hover = hit;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn draw(&mut self, cv: &mut Canvas, f: &mut Fonts, scroll: f32) -> f32 {
+        let (w, p) = (cv.w as f32, palette());
+        let (chips, legend_h) = legend_layout(f.small, w);
+        let top = legend_h + 14.0;
+        self.grid = Grid::fit_in(w, cv.h as f32, top);
+        let g = self.grid;
+        let height = (top + g.height() + 8.0).ceil();
+        let mut c = Canvas { w: cv.w, h: height as usize, px: vec![0; cv.w * height as usize] };
+
+        for (x, y, cat) in chips {
+            let t = tint(cat);
+            c.round_rect(x, y + 5.0, 10.0, 10.0, 5.0, rgba(t, 0.95));
+            f.small.draw(&mut c, x + 16.0, y + 15.0, cat.label(), rgba(p.text, 0.6));
+        }
+
+        for n in 1..=COUNT {
+            let (x, y, s, _) = g.rect_of(n);
+            let t = tint(category(n));
+            let (sel, hot) = (self.sel == Some(n), self.hover == Some(n));
+            c.round_rect(x, y, s, s, 8.0, rgba(t, if sel { 1.0 } else if hot { 0.9 } else { 0.55 }));
+            c.round_rect(x + 1.0, y + 1.0, s - 2.0, s - 2.0, 7.0, rgba(p.panel, 1.0));
+            c.round_rect(x + 1.0, y + 1.0, s - 2.0, s - 2.0, 7.0, rgba(t, if sel { 0.45 } else if hot { 0.34 } else { 0.2 }));
+            let e = element(n).unwrap();
+            if s >= 44.0 {
+                f.small.draw(&mut c, x + 5.0, y + 14.0, &n.to_string(), rgba(p.text, 0.5));
+            }
+            let sw = f.body.width(e.symbol);
+            f.body.draw(&mut c, x + (s - sw) / 2.0, y + s * 0.66 + 4.0, e.symbol, rgba(p.text, 1.0));
+        }
+        // the two cells that say where the lanthanides and actinides went
+        for (row, text, cat) in [(6, "57-71", Cat::Lanthanide), (7, "89-103", Cat::Actinide)] {
+            let (x, y, s, _) = g.rect(row, 3);
+            c.round_rect(x, y, s, s, 8.0, rgba(tint(cat), 0.3));
+            c.round_rect(x + 1.0, y + 1.0, s - 2.0, s - 2.0, 7.0, rgba(p.panel, 1.0));
+            if s >= 44.0 {
+                let tw = f.small.width(text);
+                f.small.draw(&mut c, x + (s - tw) / 2.0, y + s / 2.0 + 5.0, text, rgba(p.text, 0.45));
+            }
+        }
+        let (ax, ay, aw, ah) = g.card_area();
+        if aw >= 300.0 && ah >= 96.0 {
+            self.card(&mut c, f, (ax, ay, aw, ah));
+        }
+
+        cv.over(&c, 0, -(scroll as i32));
+        height
     }
 }
 
@@ -305,5 +499,81 @@ mod tests {
     fn describe_is_searchable() {
         assert_eq!(describe(26), "Fe, 26, transition metal, solid");
         assert_eq!(describe(35), "Br, 35, nonmetal, liquid");
+    }
+
+    fn fonts() -> (seiza_common::draw::Text, seiza_common::draw::Text, seiza_common::draw::Text) {
+        let font = seiza_common::draw::shared_font();
+        (seiza_common::draw::Text::new(font.clone(), 24.0), seiza_common::draw::Text::new(font.clone(), 15.0), seiza_common::draw::Text::new(font, 13.0))
+    }
+
+    fn draw(page: &mut Elements, w: usize, h: usize, scroll: f32) -> (Canvas, f32) {
+        let (mut t, mut b, mut s) = fonts();
+        let mut cv = Canvas { w, h, px: vec![0; w * h] };
+        let height = page.draw(&mut cv, &mut Fonts { title: &mut t, body: &mut b, small: &mut s }, scroll);
+        (cv, height)
+    }
+
+    #[test]
+    fn the_page_draws_at_every_size_and_scrolls_when_it_cannot_fit() {
+        let mut page = Elements::new();
+        for (w, h) in [(1420, 760), (900, 500), (640, 300), (2400, 1300)] {
+            let (cv, height) = draw(&mut page, w, h, 0.0);
+            assert!(height > 100.0, "{w}x{h}");
+            assert!(cv.px.iter().any(|&p| p != 0), "something is drawn at {w}x{h}");
+            if h >= 500 {
+                assert!(height <= h as f32 + 1.0, "{w}x{h} fits without scrolling: {height}");
+            }
+        }
+        let (_, tall) = draw(&mut page, 640, 300, 0.0);
+        assert!(tall > 300.0, "a small body scrolls");
+        let (_, _) = draw(&mut page, 640, 300, 120.0); // scrolled: no panic, blitted higher
+    }
+
+    #[test]
+    fn pointing_hovers_and_clicking_pins_then_lets_go() {
+        let mut page = Elements::new();
+        draw(&mut page, 1420, 760, 0.0);
+        let g = page.grid;
+        let (x, y, s, _) = g.rect_of(26); // iron
+        let (cx, cy) = (x + s / 2.0, y + s / 2.0);
+        assert!(page.pointer(cx, cy, false), "hover changes");
+        assert!(!page.pointer(cx, cy, false), "the same hover is not a change");
+        assert_eq!(page.hover, Some(26));
+        assert!(page.pointer(cx, cy, true));
+        assert_eq!(page.sel, Some(26));
+        assert!(page.pointer(cx, cy, true));
+        assert_eq!(page.sel, None, "clicking it again lets go");
+        assert!(!page.pointer(2.0, 2.0, true), "a click on nothing changes nothing");
+        // with one on show the card draws, hovered or pinned, at a small size too
+        page.pointer(cx, cy, true);
+        for (w, h) in [(1420, 760), (900, 420)] {
+            draw(&mut page, w, h, 0.0);
+        }
+    }
+
+    #[test]
+    fn the_search_finds_elements_by_name_symbol_number_and_kind() {
+        let rows = Elements::new().rows();
+        assert_eq!(rows.len(), 118);
+        let find = |q: &str| rows.iter().filter(|(n, d)| format!("{n} {d}").to_lowercase().contains(q)).count();
+        assert_eq!(find("iron"), 1);
+        assert_eq!(find("noble gas"), 6);
+        assert_eq!(find("liquid"), 2);
+        assert!(find("55.845") >= 1, "by weight");
+    }
+
+    #[test]
+    fn every_category_has_its_own_colour() {
+        let colours: Vec<[u32; 3]> = Cat::ALL.iter().map(|&c| tint(c).map(|v| (v * 255.0) as u32)).collect();
+        let distinct: std::collections::HashSet<_> = colours.iter().collect();
+        assert_eq!(distinct.len(), 10, "{colours:?}");
+    }
+
+    #[test]
+    fn a_short_body_makes_a_smaller_table_not_a_scrolling_one() {
+        let (tall, short) = (Grid::fit_in(1400.0, 900.0, 40.0), Grid::fit_in(1400.0, 460.0, 40.0));
+        assert!(short.cell < tall.cell);
+        assert!(short.y0 + short.height() <= 460.0 + 1.0, "{}", short.y0 + short.height());
+        assert_eq!(Grid::fit_in(1400.0, 100.0, 40.0).cell, 30.0, "never below 30 px");
     }
 }
