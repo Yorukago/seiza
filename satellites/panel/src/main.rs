@@ -7,7 +7,7 @@
 use std::process::Command;
 
 use seiza_common::{
-    draw::{load_font, Canvas, Rgba, Text},
+    draw::{shared_font, Canvas, Rgba, Text},
     kit,
     palette::{palette, rgba},
 };
@@ -305,7 +305,7 @@ struct Fonts {
 
 impl Fonts {
     fn new() -> Fonts {
-        let f = load_font();
+        let f = shared_font();
         Fonts { big: Text::new(f.clone(), 20.0), mid: Text::new(f.clone(), 14.0), small: Text::new(f.clone(), 12.0), tiny: Text::new(f, 11.0) }
     }
 }

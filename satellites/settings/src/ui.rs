@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use seiza_common::{
     config,
-    draw::{load_font, Canvas, Text},
+    draw::{shared_font, Canvas, Text},
     kit::{self, Thread, PILL_W},
     palette::{palette, rgba},
 };
@@ -364,7 +364,7 @@ impl Ui {
             };
             values.insert(r.id, v);
         }
-        let font = load_font();
+        let font = shared_font();
         let mut ui = Ui {
             pages,
             page: 0,

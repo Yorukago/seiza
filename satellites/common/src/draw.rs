@@ -15,9 +15,21 @@ fn font_file(family: &str) -> Option<String> {
     found.split(',').any(|f| f.trim().eq_ignore_ascii_case(family)).then(|| file.to_string())
 }
 
+/// The font, parsed once per process and shared: parsing a Nerd Font takes ~100 ms, so every `Text` of a
+/// satellite should be made from this (`Text::new` takes it as it is) instead of from `load_font`.
+pub fn shared_font() -> std::sync::Arc<Font> {
+    static F: std::sync::OnceLock<std::sync::Arc<Font>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::sync::Arc::new(parse_font())).clone()
+}
+
+/// An owned copy of the shared font (copying it still costs a few tens of ms: prefer `shared_font`).
+pub fn load_font() -> Font {
+    (*shared_font()).clone()
+}
+
 /// First usable font: the one named by `look { font }` (Maple Mono NF unless set), else the system sans,
 /// else a few well-known paths.
-pub fn load_font() -> Font {
+fn parse_font() -> Font {
     let family = config::get("look", "font").unwrap_or_else(|| "Maple Mono NF".into());
     let from_fc = font_file(&family).or_else(|| {
         let o = std::process::Command::new("fc-match").args(["-f", "%{file}", "sans"]).output().ok()?;
@@ -367,15 +379,15 @@ fn is_joiner(c: char) -> bool {
 
 #[derive(Clone)]
 pub struct Text {
-    font: Font,
+    font: std::sync::Arc<Font>,
     px: f32,
     cache: HashMap<char, (fontdue::Metrics, Vec<u8>)>,
     emoji: HashMap<char, Option<Sprite>>,
 }
 
 impl Text {
-    pub fn new(font: Font, px: f32) -> Text {
-        Text { font, px, cache: HashMap::new(), emoji: HashMap::new() }
+    pub fn new(font: impl Into<std::sync::Arc<Font>>, px: f32) -> Text {
+        Text { font: font.into(), px, cache: HashMap::new(), emoji: HashMap::new() }
     }
 
     pub fn glyph(&mut self, ch: char) -> &(fontdue::Metrics, Vec<u8>) {

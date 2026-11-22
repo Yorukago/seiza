@@ -7,7 +7,7 @@ use std::{
 };
 
 use seiza_common::{
-    draw::{load_font, Canvas, Text},
+    draw::{shared_font, Canvas, Text},
     palette::{palette, rgba},
 };
 use smithay_client_toolkit::{
@@ -233,7 +233,7 @@ fn main() {
         // seiza-osd --dump out.ppm [volume|brightness] [percent] [muted]
         let kind = if args.get(2).map(String::as_str) == Some("brightness") { "brightness" } else { "volume" };
         let frac = args.get(3).and_then(|v| v.parse::<f32>().ok()).unwrap_or(42.0) / 100.0;
-        let cv = render(Level(kind, frac, args.get(4).is_some()), frac, 1.0, 0.0, &mut Text::new(load_font(), 15.0));
+        let cv = render(Level(kind, frac, args.get(4).is_some()), frac, 1.0, 0.0, &mut Text::new(shared_font(), 15.0));
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
@@ -292,7 +292,7 @@ fn main() {
         up_for: 0.0,
         last_tick: Instant::now(),
         rx,
-        text: Text::new(load_font(), 15.0),
+        text: Text::new(shared_font(), 15.0),
     };
     while event_queue.blocking_dispatch(&mut app).is_ok() {}
 }

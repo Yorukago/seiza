@@ -9,7 +9,7 @@ use seiza_common::{
     local_time,
     sys::{read_cpu_counters, read_load, read_ram_pct, read_temp},
     palette::{palette, rgba},
-    draw::{load_font, Canvas, Rgba, Text},
+    draw::{shared_font, Canvas, Rgba, Text},
     State,
 };
 use smithay_client_toolkit::{
@@ -676,7 +676,7 @@ fn main() {
         exit: false,
         state: None,
         clock: String::new(),
-        text: Text::new(load_font(), FONT_PX),
+        text: Text::new(shared_font(), FONT_PX),
         hits: Vec::new(),
         battery: None,
         volume: None,

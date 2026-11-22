@@ -4,7 +4,7 @@
 
 use seiza_common::{
     config,
-    draw::{load_font, Canvas, Text},
+    draw::{shared_font, Canvas, Text},
     kit::{self, Thread, PILL_W},
     palette::{palette, rgba},
 };
@@ -356,7 +356,7 @@ pub fn keys_path() -> std::path::PathBuf {
 
 impl Ui {
     pub fn new() -> Ui {
-        let font = load_font();
+        let font = shared_font();
         let mut ui = Ui {
             page: 0,
             scroll: 0,
