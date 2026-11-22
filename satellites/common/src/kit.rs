@@ -145,6 +145,21 @@ pub fn search_pill(cv: &mut Canvas, font: &mut Text, x: f32, y: f32, query: &str
     cv.round_rect(end + 1.0, y + 9.0, 1.5, 16.0, 0.0, rgba(p.star, 0.9));
 }
 
+/// `text` broken at spaces into lines no wider than `room` (a single longer word keeps its own line).
+pub fn wrap(font: &mut Text, text: &str, room: f32) -> Vec<String> {
+    let mut lines: Vec<String> = vec![];
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(l) if font.width(&format!("{l} {word}")) <= room => {
+                l.push(' ');
+                l.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
+}
+
 /// A row of pages drawn as stars `pos` is the (fractional) page the big star is at, so
 /// it can glide; stars grow and glow as it nears them.
 pub struct Thread {
@@ -237,6 +252,16 @@ mod tests {
         assert!(a.is_closing() && a.visibility().1);
         std::thread::sleep(std::time::Duration::from_millis((CLOSE_SECS * 1000.0) as u64 + 30));
         assert_eq!(a.visibility(), (0.0, true, true));
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_and_never_loses_a_word() {
+        let mut t = Text::new(crate::draw::load_font(), 13.0);
+        let text = "the quick brown fox jumps over the lazy dog";
+        let lines = wrap(&mut t, text, 100.0);
+        assert!(lines.len() > 1 && lines.iter().all(|l| t.width(l) <= 100.0 || !l.contains(' ')));
+        assert_eq!(lines.join(" "), text);
+        assert_eq!(wrap(&mut t, "unbreakablewordthatislong", 10.0).len(), 1);
     }
 
     #[test]

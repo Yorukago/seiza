@@ -470,21 +470,6 @@ impl Ui {
         (cols, (cw - GAP * (cols - 1) as f32) / cols as f32)
     }
 
-    /// `text` broken into lines no wider than `room`.
-    fn wrap(&mut self, text: &str, room: f32) -> Vec<String> {
-        let mut lines: Vec<String> = vec![];
-        for word in text.split(' ') {
-            match lines.last_mut() {
-                Some(l) if self.t13.width(&format!("{l} {word}")) <= room => {
-                    l.push(' ');
-                    l.push_str(word);
-                }
-                _ => lines.push(word.to_string()),
-            }
-        }
-        lines
-    }
-
     /// (steps in the page, steps that fit); a step is one keys row, and the page is as tall as its tallest column.
     fn extent(&mut self) -> (usize, usize) {
         let used = if self.keys_body() { self.key_plan().used } else { self.text_plan().used };
@@ -639,7 +624,7 @@ impl Ui {
             let mut h = kit::CARD_HEAD + 4.0;
             let mut card_lines = vec![];
             for (name, desc) in rows {
-                let l = self.wrap(desc, col_w - 36.0);
+                let l = kit::wrap(&mut self.t13, desc, col_w - 36.0);
                 h += 12.0 + if name.is_empty() { 0.0 } else { 24.0 } + l.len() as f32 * 18.0 + 12.0;
                 card_lines.push(l);
             }
