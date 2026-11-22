@@ -375,8 +375,10 @@ pub struct Ui {
     stale: bool,         // what is in `content` is out of date
     content: Option<Canvas>,
     back: Option<Canvas>, // the card's plate
-    body: Option<Canvas>, // the page's body
-    body_stale: bool,
+    body: Option<Canvas>, // the page's body: `base` plus the controls
+    base: Option<Canvas>, // the body without its controls; they are the only thing a drag or a knob changes
+    body_stale: bool,     // `base` is out of date
+    ctl_stale: bool,      // `body` is out of date, `base` is fine
     w: f32, // the card's size: most of the screen
     h: f32,
     t22: Text,
@@ -425,7 +427,9 @@ impl Ui {
             content: None,
             back: None,
             body: None,
+            base: None,
             body_stale: true,
+            ctl_stale: true,
             w: 1200.0,
             h: 740.0,
             t22: Text::new(font.clone(), 24.0),
@@ -518,7 +522,7 @@ impl Ui {
     pub fn set(&mut self, id: &'static str, val: String) -> Effect {
         self.values.insert(id, val.clone());
         self.stale = true;
-        self.body_stale = true;
+        self.ctl_stale = true;
         let (file, key) = id.split_once('/').unwrap();
         let saved = match file {
             "widgets" => {
@@ -631,7 +635,7 @@ impl Ui {
                 Ctl::Path => {
                     self.focus = Some(p.id);
                     self.stale = true;
-                    self.body_stale = true;
+                    self.ctl_stale = true;
                     Effect::None
                 }
                 Ctl::Button(_) => self.set(p.id, "1".into()),
@@ -691,7 +695,7 @@ impl Ui {
         self.fit(w as f32, h as f32);
         let knobs = self.knobs.values().any(|t| t.elapsed().as_secs_f32() < KNOB_SECS);
         if knobs {
-            self.body_stale = true; // the body is cached: a moving knob needs it redrawn
+            self.ctl_stale = true; // the body is cached: a moving knob needs its controls redrawn
         } else {
             self.knobs.clear();
         }
@@ -732,9 +736,16 @@ impl Ui {
         kit::search_pill(&mut cv, &mut self.t15, ox + self.w - PAD - PILL_W, oy + 23.0, &self.query, "find a setting..");
 
         let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
-        if self.body_stale || self.body.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
-            self.body = Some(self.draw_body());
+        if self.body_stale || self.base.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
+            self.base = Some(self.draw_base());
             self.body_stale = false;
+            self.ctl_stale = true;
+        }
+        if self.ctl_stale || self.body.is_none() {
+            let mut body = self.base.clone().expect("made above");
+            self.draw_ctls(&mut body);
+            self.body = Some(body);
+            self.ctl_stale = false;
         }
         cv.over(self.body.as_ref().expect("made above"), (ox + PAD) as i32, (oy + TOP) as i32);
 
@@ -758,8 +769,8 @@ impl Ui {
         cv
     }
 
-    /// The page's cards and their rows, at the body's own origin.
-    fn draw_body(&mut self) -> Canvas {
+    /// The page's cards and the words of their rows, at the body's own origin. The controls come on top (`draw_ctls`).
+    fn draw_base(&mut self) -> Canvas {
         let p = palette();
         let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
         let mut cv = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
@@ -792,9 +803,18 @@ impl Ui {
                     }
                 }
             }
-            self.draw_ctl(&mut cv, r);
         }
         cv
+    }
+
+    fn draw_ctls(&mut self, cv: &mut Canvas) {
+        let bh = cv.h as f32;
+        for r in &self.lay().rows {
+            let (_, y, _, h) = r.row;
+            if y + h >= 0.0 && y <= bh {
+                self.draw_ctl(cv, r);
+            }
+        }
     }
 
     fn draw_ctl(&mut self, cv: &mut Canvas, r: &Placed) {
