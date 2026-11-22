@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Seiza
+Comment=A Wayland compositor with stars for workspaces
+Exec=@BIN@/seiza
+Type=Application
+Keywords=wayland;compositor;

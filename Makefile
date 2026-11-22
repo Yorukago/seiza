@@ -4,6 +4,7 @@
 #   make clipboard   same as run, with the clipboard shared with the host
 #   make test   build and run tests/test_*.c
 #   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor, constellation view) into $(PREFIX)/bin; Seiza autostarts them
+#   make install-session   list Seiza as a session in SDDM/GDM (asks for sudo: it writes /usr/share/wayland-sessions)
 
 PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
@@ -85,7 +86,11 @@ install: seiza
 	install -Dm644 scripts/wallust/wallust.toml $(PREFIX)/share/seiza/wallust/wallust.toml
 	install -Dm644 scripts/wallust/templates/seiza-palette $(PREFIX)/share/seiza/wallust/templates/seiza-palette
 
+# The session entry names the installed binary by its full path, since a display manager's PATH may not have $(PREFIX)/bin.
+install-session:
+	sed 's|@BIN@|$(abspath $(PREFIX))/bin|' scripts/seiza.desktop.in | sudo tee /usr/share/wayland-sessions/seiza.desktop >/dev/null
+
 clean:
 	rm -f seiza src/figures-builtin.h src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h; rm -rf tests/bin
 
-.PHONY: all run clipboard test smoke install clean
+.PHONY: all run clipboard test smoke install install-session clean
