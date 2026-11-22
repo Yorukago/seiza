@@ -76,6 +76,7 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-conf $(PREFIX)/bin/seiza-conf
 	install -Dm755 satellites/target/release/seiza-help $(PREFIX)/bin/seiza-help
 	install -Dm755 satellites/target/release/seiza-hh $(PREFIX)/bin/seiza-hh
+	install -Dm755 satellites/target/release/seiza-sleep $(PREFIX)/bin/seiza-sleep
 	install -Dm644 portals/seiza-portals.conf $(HOME)/.config/xdg-desktop-portal/seiza-portals.conf
 	test -e $(HOME)/.config/xdg-desktop-portal-wlr/config || install -Dm644 portals/xdpw.conf $(HOME)/.config/xdg-desktop-portal-wlr/config
 	install -Dm755 scripts/seiza-shot $(PREFIX)/bin/seiza-shot

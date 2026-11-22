@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "starfield", "bar", "session", "launcher", "lock", "widgets", "settings", "constellations", "carousel", "help", "conf", "osd", "notify", "panel", "diary", "hh"]
+members = ["common", "starfield", "bar", "session", "launcher", "lock", "widgets", "settings", "constellations", "carousel", "help", "conf", "osd", "notify", "panel", "diary", "hh", "sleep"]
 resolver = "3"
 
 # Software rendering: unoptimised builds are far too slow, so `cargo run` is always fast.

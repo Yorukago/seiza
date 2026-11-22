@@ -1723,7 +1723,7 @@ static void op_spawn(void *ud, const char *cmdline);
  * ('#' comments). With no such file the satellites that ship with Seiza start;
  * an empty file starts nothing. Only run at startup, never on reload-config. */
 static void autostart(struct tinywl_server *server) {
-	static char text[8192] = "seiza-starfield\nseiza-bar\nseiza-widgets\nseiza-osd\nseiza-notify\nwl-paste --type text --watch seiza-clip-store\nseiza-conf slideshow\n";
+	static char text[8192] = "seiza-starfield\nseiza-bar\nseiza-widgets\nseiza-osd\nseiza-notify\nseiza-sleep\nwl-paste --type text --watch seiza-clip-store\nseiza-conf slideshow\n";
 	char path[512];
 	snprintf(path, sizeof(path), "%s/autostart", server->cfg_dir);
 	FILE *f = fopen(path, "r");

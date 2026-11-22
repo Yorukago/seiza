@@ -2994,6 +2994,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-sleep"
+version = "0.1.0"
+dependencies = [
+ "zbus",
+]
+
+[[package]]
 name = "seiza-starfield"
 version = "0.1.0"
 dependencies = [
