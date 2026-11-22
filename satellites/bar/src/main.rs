@@ -1,5 +1,6 @@
-//! seiza-bar: a top bar for Seiza. Shows the constellation, one pill per star
-//! (click or Super+1..9 to fly there; dots count its windows) and the clock.
+//! seiza-bar: a top bar for Seiza, as three floating islands: the mode star, the clock and what is playing
+//! on the left; one star per star of the sky in the middle (click or Super+1..9 to fly there; the bright one
+//! is where you are; pointing at one names it); the PC status, sound, battery and network on the right.
 mod tray;
 
 use std::{process::Command, thread, time::{Duration, Instant}};
@@ -9,7 +10,7 @@ use seiza_common::{
     sys::{read_cpu_counters, read_load, read_ram_pct, read_temp},
     palette::{palette, rgba},
     draw::{load_font, Canvas, Rgba, Text},
-    State, STAR_COLORS,
+    State,
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
@@ -41,8 +42,11 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 
-const BAR_H: u32 = 32;
-const HIDDEN_H: u32 = 3; // autohide: the strip that still feels the pointer
+const ISLAND_H: u32 = 38;
+const TIP_H: u32 = 30; // room under the islands for the name of the star the pointer is on
+const SURF_H: u32 = ISLAND_H + TIP_H;
+const HIDDEN_H: u32 = 6; // autohide: the strip that still feels the pointer
+const STAR_PITCH: f32 = 34.0;
 const HIDE_AFTER: Duration = Duration::from_millis(600);
 const FONT_PX: f32 = 15.0;
 const BTN_LEFT: u32 = 0x110;
@@ -124,6 +128,12 @@ fn wpctl(args: &'static [&'static str]) {
     });
 }
 
+/// Where a star's name goes: (x, width) of its pill, centred under the star but kept on the bar.
+fn tip_box(star_x: f32, text_w: f32, bar_w: f32) -> (f32, f32) {
+    let w = text_w + 24.0;
+    ((star_x - w / 2.0).clamp(0.0, (bar_w - w).max(0.0)), w)
+}
+
 // ---- the app ----------------------------------------------------------------
 
 /// Which modules of the bar are shown: `date`, `stats`, `volume`, `battery` in ~/.config/seiza/bar, each on unless switched off.
@@ -154,6 +164,7 @@ struct Bar {
     shm: Shm,
     pool: SlotPool,
     layer: LayerSurface,
+    compositor: CompositorState,
     pointer: Option<wl_pointer::WlPointer>,
     width: u32,
     configured: bool,
@@ -171,6 +182,8 @@ struct Bar {
     last_poll: Option<Instant>,
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
     mode_hit: (f32, f32), // the mode icon: opens the constellation view
+    hover_star: Option<usize>, // the star the pointer is on, to name it
+    star_x: Vec<f32>,          // where each star is drawn
     tray: Option<tray::Tray>,
     tray_hits: Vec<(f32, f32)>, // x range of each tray icon
     cpu: Option<u32>,
@@ -187,204 +200,236 @@ struct Bar {
 }
 
 impl Bar {
-    /// A rounded capsule behind one group of widgets.
-    fn module(cv: &mut Canvas, x: f32, w: f32) {
-        cv.round_rect(x, 4.0, w, BAR_H as f32 - 8.0, (BAR_H as f32 - 8.0) / 2.0, rgba(palette().dust, 0.55));
+    /// A short vertical line between two groups inside an island.
+    fn divider(cv: &mut Canvas, x: f32) {
+        cv.round_rect(x, (ISLAND_H as f32 - 16.0) / 2.0, 1.0, 16.0, 0.5, rgba(palette().text, 0.16));
     }
 
-    /// A capsule holding `w` pixels of clickable stuff: remember it as one hit.
+    /// An island: a rounded capsule with a hairline edge, `w` wide from `x`.
+    fn island(cv: &mut Canvas, x: f32, w: f32) {
+        let (p, h) = (palette(), ISLAND_H as f32);
+        cv.round_rect(x, 0.0, w, h, h / 2.0, rgba(p.text, 0.11));
+        cv.round_rect(x + 1.0, 1.0, w - 2.0, h - 2.0, h / 2.0 - 1.0, rgba(p.panel, 0.88));
+    }
+
+    /// A clickable stretch of an island: remember it as one hit.
     fn hit(&mut self, x: f32, w: f32, a: Act) {
         self.hits.push((x, x + w, a));
     }
 
     fn render(&mut self) -> Canvas {
-        let (w, h) = (self.width as usize, BAR_H as usize);
-        let mut cv = Canvas { w, h, px: vec![0; w * h] };
-        cv.round_rect(0.0, 0.0, w as f32, h as f32, h as f32 / 2.0, rgba(palette().panel, 0.78)); // the floating pill
+        let (w, h) = (self.width as usize, SURF_H as usize);
+        let blank = || Canvas { w, h, px: vec![0; w * h] };
+        let mut cv = blank();
         self.hits.clear();
-        let base = h as f32 / 2.0 + FONT_PX * 0.33;
-        let cy = h as f32 / 2.0;
-        let ink: Rgba = rgba(palette().text, 1.0);
-        let dim: Rgba = rgba(palette().text, 0.65);
-        let accent: Rgba = rgba(palette().star, 1.0);
+        let cy = ISLAND_H as f32 / 2.0;
+        let base = cy + FONT_PX * 0.33;
+        let p = palette();
+        let ink: Rgba = rgba(p.text, 1.0);
+        let dim: Rgba = rgba(p.text, 0.62);
+        let accent: Rgba = rgba(p.star, 1.0);
 
         let Some(st) = self.state.clone() else {
+            let tw = self.text.width("waiting for seiza...");
+            Self::island(&mut cv, 0.0, tw + 32.0);
             self.text.draw(&mut cv, 16.0, base, "waiting for seiza...", dim);
             return cv;
         };
 
-        // left: mode icon (the constellation: crescent for "chill", star otherwise), date, time
-        let mut x = 6.0;
-        Self::module(&mut cv, x, 30.0);
+        // left island: the mode star, the date and time, what is playing
+        let mut lc = blank();
+        let mut x = 14.0;
         if st.constellation == "chill" {
-            cv.crescent(x + 15.0, cy, 8.0, accent);
+            lc.crescent(x + 8.0, cy, 8.0, rgba(p.pink, 1.0));
         } else {
-            cv.star5(x + 15.0, cy, 9.0, accent);
+            lc.sparkle(x + 8.0, cy, 9.5, rgba(p.pink, 1.0));
         }
-        self.mode_hit = (x, x + 30.0);
-        x += 30.0 + 6.0;
+        x += 16.0 + 12.0;
+        self.mode_hit = (0.0, x + 6.0);
+        Self::divider(&mut lc, x);
+        x += 13.0;
         let (date, time) = (if self.show.date { date_text() } else { String::new() }, time_text());
-        let (dw, tw) = (self.text.width(&date), self.text.width(&time));
-        if date.is_empty() {
-            Self::module(&mut cv, x, tw + 28.0);
-            self.text.draw(&mut cv, x + 14.0, base, &time, ink);
-        } else {
-            Self::module(&mut cv, x, dw + tw + 46.0);
-            self.text.draw(&mut cv, x + 14.0, base, &date, ink);
-            cv.round_rect(x + 14.0 + dw + 8.0, cy - 6.0, 1.0, 12.0, 0.5, dim);
-            self.text.draw(&mut cv, x + 14.0 + dw + 18.0, base, &time, ink);
+        if !date.is_empty() {
+            x = self.text.draw(&mut lc, x, base, &date, ink) + 9.0;
         }
-
-        x += if date.is_empty() { tw + 28.0 } else { dw + tw + 46.0 } + 6.0;
+        x = self.text.draw(&mut lc, x, base, &time, if date.is_empty() { ink } else { dim });
         if let Some((playing, what)) = self.media.clone().filter(|_| self.show.media) {
+            x += 12.0;
+            Self::divider(&mut lc, x);
+            let start = x;
+            x += 13.0;
             let what = clip(&mut self.text, &what, 240.0);
-            let mw = 12.0 + 14.0 + self.text.width(&what) + 14.0;
-            Self::module(&mut cv, x, mw);
-            let c = if playing { accent } else { dim };
-            if playing { // play triangle
-                cv.shape(x + 19.0, cy, 5.0, c, |u, v| u > -0.8 && u < 0.8 - v.abs() * 1.6);
-            } else { // pause bars
-                cv.round_rect(x + 14.0, cy - 5.0, 3.0, 10.0, 1.0, c);
-                cv.round_rect(x + 20.0, cy - 5.0, 3.0, 10.0, 1.0, c);
-            }
-            self.text.draw(&mut cv, x + 12.0 + 14.0, base, &what, if playing { ink } else { dim });
-            self.hit(x, mw, Act::Media);
+            lc.icon_note(x + 7.0, cy, 7.5, if playing { accent } else { dim });
+            x = self.text.draw(&mut lc, x + 20.0, base, &what, if playing { ink } else { dim });
+            self.hit(start, x + 14.0 - start, Act::Media);
         }
+        Self::island(&mut cv, 0.0, x + 14.0);
+        cv.over(&lc, 0, 0);
 
-        // center: one dot per star. Lit with the star's colour when it holds windows, the current one ringed.
+        // middle island: one star per star of the sky; the bright one is where you are
+        self.star_x.clear();
         if self.show.dots && !st.stars.is_empty() {
             let n = st.stars.len().min(12);
-            let span = n as f32 * 20.0 + 12.0;
+            let span = n as f32 * STAR_PITCH + 12.0;
             let x0 = (w as f32 - span) / 2.0;
-            Self::module(&mut cv, x0, span);
+            Self::island(&mut cv, x0, span);
             let cur = st.stars.iter().position(|s| s.name == st.current).unwrap_or(0);
             for (i, s) in st.stars.iter().take(n).enumerate() {
-                let (dx, col) = (x0 + 16.0 + i as f32 * 20.0, STAR_COLORS[i % 6]);
-                let c: Rgba = if s.windows > 0 { [col[0], col[1], col[2], 1.0] } else { rgba(palette().text, 0.3) };
+                let sx = x0 + 6.0 + STAR_PITCH * (i as f32 + 0.5);
+                self.star_x.push(sx);
+                let lift = if self.hover_star == Some(i) { 1.0 } else { 0.0 };
                 if i == cur {
-                    cv.round_rect(dx - 8.0, cy - 8.0, 16.0, 16.0, 8.0, [c[0], c[1], c[2], 0.35]);
+                    cv.round_rect(sx - 17.0, cy - 17.0, 34.0, 34.0, 17.0, rgba(p.star, 0.06));
+                    cv.round_rect(sx - 12.0, cy - 12.0, 24.0, 24.0, 12.0, rgba(p.star, 0.10));
+                    cv.sparkle(sx, cy, 11.5, rgba(p.text, 1.0));
+                } else {
+                    let halo = 0.03 + 0.012 * ((i * 5) % 4) as f32; // each one a slightly different halo
+                    cv.round_rect(sx - 9.0, cy - 9.0, 18.0, 18.0, 9.0, rgba(p.star, halo + 0.03 * lift));
+                    cv.sparkle(sx, cy, 5.5 + 1.5 * lift, rgba(p.text, if lift > 0.0 { 0.95 } else if s.windows > 0 { 0.8 } else { 0.55 }));
                 }
-                cv.round_rect(dx - 4.0, cy - 4.0, 8.0, 8.0, 4.0, c);
-                self.hit(dx - 10.0, 20.0, Act::Goto(i));
+                self.hit(sx - STAR_PITCH / 2.0, STAR_PITCH, Act::Goto(i));
             }
         }
 
-        // right, from the edge inward: PC status, then volume and battery
-        let mut rx = w as f32 - 8.0;
+        // right island, from the edge inward: tray, network, quick buttons, battery, sound, weather, status
+        let mut rc = blank();
+        let mut rx = w as f32 - 14.0;
+        let mut any = false;
+        let seg = |rx: &mut f32, any: &mut bool, rc: &mut Canvas, sw: f32| -> f32 {
+            if *any {
+                *rx -= 12.0;
+                Self::divider(rc, *rx);
+                *rx -= 13.0;
+            }
+            *any = true;
+            *rx -= sw;
+            *rx
+        };
         self.tray_hits.clear();
         let icons = self.tray.as_ref().map(|t| t.items.lock().unwrap().clone()).unwrap_or_default();
         if !icons.is_empty() {
-            let tw = icons.len() as f32 * (tray::ICON as f32 + 6.0) + 12.0;
-            rx -= tw;
-            Self::module(&mut cv, rx, tw);
+            let tw = icons.len() as f32 * (tray::ICON as f32 + 6.0) - 6.0;
+            let x = seg(&mut rx, &mut any, &mut rc, tw);
             for (i, it) in icons.iter().enumerate() {
-                let ix = rx + 9.0 + i as f32 * (tray::ICON as f32 + 6.0);
+                let ix = x + i as f32 * (tray::ICON as f32 + 6.0);
                 self.tray_hits.push((ix - 3.0, ix + tray::ICON as f32 + 3.0));
                 if it.px.is_empty() { // no icon found: a disc with the app's first letter
-                    cv.round_rect(ix, cy - 9.0, 18.0, 18.0, 9.0, rgba(palette().text, 0.3));
+                    rc.round_rect(ix, cy - 9.0, 18.0, 18.0, 9.0, rgba(p.text, 0.3));
                     let letter = it.label.chars().next().unwrap_or('?').to_uppercase().to_string();
                     let lw = self.text.width(&letter);
-                    self.text.draw(&mut cv, ix + (18.0 - lw) / 2.0, base, &letter, ink);
+                    self.text.draw(&mut rc, ix + (18.0 - lw) / 2.0, base, &letter, ink);
                     continue;
                 }
-                for (j, &p) in it.px.iter().enumerate() { // premultiplied source-over
-                    let (x, y) = (ix as usize + j % tray::ICON, (cy - 9.0) as usize + j / tray::ICON);
-                    let d = &mut cv.px[y * cv.w + x];
-                    let inv = 255 - (p >> 24);
-                    let ch = |s: u32| ((p >> s & 255) + (*d >> s & 255) * inv / 255).min(255) << s;
+                for (j, &px) in it.px.iter().enumerate() { // premultiplied source-over
+                    let (px_x, px_y) = (ix as usize + j % tray::ICON, (cy - 9.0) as usize + j / tray::ICON);
+                    let d = &mut rc.px[px_y * rc.w + px_x];
+                    let inv = 255 - (px >> 24);
+                    let ch = |s: u32| ((px >> s & 255) + (*d >> s & 255) * inv / 255).min(255) << s;
                     *d = ch(24) | ch(16) | ch(8) | ch(0);
                 }
             }
-            rx -= 6.0;
         }
         if self.show.net {
-            let nw = 78.0;
-            rx -= nw;
-            Self::module(&mut cv, rx, nw);
-            let dimc = rgba(palette().text, 0.3);
+            let x = seg(&mut rx, &mut any, &mut rc, 40.0);
+            let off = rgba(p.text, 0.3);
             match self.net {
-                "eth" => cv.icon_ethernet(rx + 24.0, cy, 8.0, ink),
-                "wifi" => cv.icon_wifi(rx + 24.0, cy - 1.0, 6.5, ink),
-                _ => cv.icon_wifi(rx + 24.0, cy - 1.0, 6.5, dimc),
+                "eth" => rc.icon_ethernet(x + 8.0, cy, 8.0, ink),
+                "wifi" => rc.icon_wifi(x + 8.0, cy - 1.0, 7.0, ink),
+                _ => rc.icon_wifi(x + 8.0, cy - 1.0, 7.0, off),
             }
-            cv.icon_bluetooth(rx + 54.0, cy, 8.0, if self.bt { accent } else { dimc });
-            self.hit(rx, nw, Act::Panel);
-            rx -= 6.0;
+            rc.icon_bluetooth(x + 32.0, cy, 8.0, if self.bt { accent } else { off });
+            self.hit(x - 12.0, 64.0, Act::Panel);
         }
         if self.show.quick {
-            rx -= 66.0;
-            Self::module(&mut cv, rx, 66.0);
-            cv.icon_frame(rx + 16.5, cy, 7.5, ink);
-            self.hit(rx, 33.0, Act::Shot);
+            let x = seg(&mut rx, &mut any, &mut rc, 42.0);
+            rc.icon_frame(x + 8.0, cy, 7.5, ink);
+            self.hit(x - 12.0, 32.0, Act::Shot);
             let muted = self.mic.is_none_or(|(_, m)| m);
-            let mc = if muted { rgba(palette().text, 0.3) } else { accent };
-            cv.icon_mic(rx + 49.0, cy, 7.5, muted, mc);
-            self.hit(rx + 33.0, 33.0, Act::Mic);
-            rx -= 6.0;
-        }
-        let temp = self.weather.lock().unwrap().clone();
-        if self.show.weather && !temp.is_empty() {
-            let ww = self.text.width(&temp) + 28.0;
-            rx -= ww;
-            Self::module(&mut cv, rx, ww);
-            self.text.draw(&mut cv, rx + 14.0, base, &temp, ink);
-            rx -= 6.0;
-        }
-        let mut stats = Vec::new();
-        if self.show.stats {
-            if let Some(c) = self.cpu { stats.push(format!("cpu {c}%")); }
-            if let Some(r) = self.ram { stats.push(format!("ram {r}%")); }
-            if let Some(t) = self.temp { stats.push(format!("{t}°C")); }
-            if let Some(l) = self.load { stats.push(format!("load {l:.2}")); }
-        }
-        let widths: Vec<f32> = stats.iter().map(|t| self.text.width(t)).collect();
-        let sw: f32 = widths.iter().sum::<f32>() + 14.0 * stats.len().saturating_sub(1) as f32 + 28.0;
-        if !stats.is_empty() {
-            rx -= sw;
-            Self::module(&mut cv, rx, sw);
-            let mut tx = rx + 14.0;
-            for (t, tw) in stats.iter().zip(&widths) {
-                self.text.draw(&mut cv, tx, base, t, dim);
-                tx += tw + 14.0;
-            }
-            rx -= 6.0;
+            rc.icon_mic(x + 34.0, cy, 7.5, muted, if muted { rgba(p.text, 0.35) } else { accent });
+            self.hit(x + 20.0, 34.0, Act::Mic);
         }
         if let Some((pct, charging)) = self.battery.filter(|_| self.show.battery) {
             let label = format!("{pct}%");
-            let bw = 24.0 + 8.0 + self.text.width(&label) + 24.0;
-            rx -= bw;
-            Self::module(&mut cv, rx, bw);
-            let fill: Rgba = if charging { [0.45, 0.90, 0.95, 1.0] } else if pct <= 15 { [1.0, 0.35, 0.40, 1.0] } else if pct <= 30 { [1.0, 0.80, 0.40, 1.0] } else { [0.55, 0.95, 0.70, 1.0] };
-            let bx = rx + 12.0;
-            cv.round_rect(bx, cy - 6.0, 22.0, 12.0, 3.0, rgba(palette().text, 0.55)); // shell
-            cv.round_rect(bx + 1.5, cy - 4.5, 19.0, 9.0, 2.0, rgba(palette().panel, 1.0));
-            cv.round_rect(bx + 22.0, cy - 2.5, 2.0, 5.0, 1.0, rgba(palette().text, 0.55)); // nub
-            cv.round_rect(bx + 2.5, cy - 3.5, 17.0 * pct as f32 / 100.0, 7.0, 1.5, fill);
-            self.text.draw(&mut cv, bx + 24.0 + 8.0, base, &label, ink);
-            rx -= 6.0;
+            let x = seg(&mut rx, &mut any, &mut rc, 28.0 + 8.0 + self.text.width(&label));
+            let fill: Rgba = if charging { rgba(p.ice, 1.0) } else if pct <= 15 { rgba(p.pink, 1.0) } else { accent };
+            rc.round_rect(x, cy - 6.0, 22.0, 12.0, 3.0, rgba(p.text, 0.6)); // shell
+            rc.round_rect(x + 1.5, cy - 4.5, 19.0, 9.0, 2.0, rgba(p.panel, 1.0));
+            rc.round_rect(x + 22.0, cy - 2.5, 2.0, 5.0, 1.0, rgba(p.text, 0.6)); // nub
+            rc.round_rect(x + 2.5, cy - 3.5, (17.0 * pct as f32 / 100.0).max(1.0), 7.0, 1.5, fill);
+            self.text.draw(&mut rc, x + 32.0, base, &label, ink);
         }
         self.vol_hit = (0.0, 0.0);
         if let Some((pct, muted)) = self.volume.filter(|_| self.show.volume) {
-            let label = if muted { "muted".to_string() } else { format!("{pct}%") };
-            let vw = 18.0 + 8.0 + self.text.width(&label) + 24.0;
-            rx -= vw;
-            Self::module(&mut cv, rx, vw);
-            for i in 0..4 {
-                let lit = !muted && (pct as f32) > i as f32 * 25.0;
-                let bh = 4.0 + 3.0 * i as f32;
-                cv.round_rect(rx + 12.0 + i as f32 * 4.5, cy + 6.0 - bh, 3.0, bh, 1.0, if lit { accent } else { rgba(palette().text, 0.25) });
+            let label = if muted { "muted".to_string() } else { format!("{pct}") };
+            let vw = 18.0 + 8.0 + self.text.width(&label);
+            let x = seg(&mut rx, &mut any, &mut rc, vw);
+            rc.icon_speaker(x + 7.0, cy, 8.5, pct as f32 / 100.0 * 3.0, muted, if muted { rgba(p.text, 0.4) } else { ink });
+            self.text.draw(&mut rc, x + 26.0, base, &label, if muted { dim } else { ink });
+            self.vol_hit = (x - 12.0, x + vw + 12.0);
+        }
+        let temp = self.weather.lock().unwrap().clone();
+        if self.show.weather && !temp.is_empty() {
+            let x = seg(&mut rx, &mut any, &mut rc, self.text.width(&temp));
+            self.text.draw(&mut rc, x, base, &temp, ink);
+        }
+        let mut stats = Vec::new();
+        if self.show.stats {
+            if let Some(c) = self.cpu { stats.push((format!("cpu {c}%"), ink)); }
+            if let Some(r) = self.ram { stats.push((format!("ram {r}%"), ink)); }
+            if let Some(t) = self.temp { stats.push((format!("{t}°C"), ink)); }
+            if let Some(l) = self.load { stats.push((format!("load {l:.2}"), dim)); }
+        }
+        if !stats.is_empty() {
+            let widths: Vec<f32> = stats.iter().map(|(t, _)| self.text.width(t)).collect();
+            let sw = widths.iter().sum::<f32>() + 12.0 * (stats.len() - 1) as f32;
+            let mut tx = seg(&mut rx, &mut any, &mut rc, sw);
+            for ((t, c), tw) in stats.iter().zip(&widths) {
+                self.text.draw(&mut rc, tx, base, t, *c);
+                tx += tw + 12.0;
             }
-            self.text.draw(&mut cv, rx + 12.0 + 18.0 + 8.0, base, &label, if muted { dim } else { ink });
-            self.vol_hit = (rx, rx + vw);
+        }
+        if any {
+            let left = (rx - 14.0).max(0.0);
+            Self::island(&mut cv, left, w as f32 - left);
+            cv.over(&rc, 0, 0);
+        }
+
+        // the name of the star the pointer is on, floating under it
+        if let Some(i) = self.hover_star.filter(|&i| i < st.stars.len() && i < self.star_x.len()) {
+            let label = format!("star {} \u{b7} {}", i + 1, st.stars[i].name);
+            let (tx, tw) = tip_box(self.star_x[i], self.text.width(&label), w as f32);
+            let ty = ISLAND_H as f32 + 4.0;
+            cv.round_rect(tx, ty, tw, 24.0, 12.0, rgba(p.text, 0.12));
+            cv.round_rect(tx + 1.0, ty + 1.0, tw - 2.0, 22.0, 11.0, rgba(p.panel, 0.92));
+            self.text.draw(&mut cv, tx + 12.0, ty + 17.0, &label, ink);
         }
         cv
+    }
+
+    /// Autohide's strip: a short line at the top edge until the pointer touches it.
+    fn strip(&self) -> Canvas {
+        let (w, h) = (self.width as usize, HIDDEN_H as usize);
+        let mut cv = Canvas { w, h, px: vec![0; w * h] };
+        let p = palette();
+        let x = (w as f32 - 440.0).max(0.0) / 2.0;
+        cv.round_rect(x, 0.0, 440.0_f32.min(w as f32), 5.0, 2.5, rgba(p.text, 0.18));
+        cv.round_rect(x + 1.0, 1.0, 440.0_f32.min(w as f32) - 2.0, 3.0, 1.5, rgba(p.panel, 0.95));
+        cv
+    }
+
+    /// The pointer is on star `i` (or none): redraw if that changed.
+    fn set_hover(&mut self, i: Option<usize>) {
+        if self.hover_star != i {
+            self.hover_star = i;
+            self.dirty = true;
+        }
     }
 
     /// Autohide: shrink to the strip at the top edge, or grow back to the pill. The buffer follows the next configure.
     fn set_hidden(&mut self, hidden: bool) {
         self.hidden = hidden;
         self.left_at = None;
-        self.layer.set_size(0, if hidden { HIDDEN_H } else { BAR_H });
+        self.layer.set_size(0, if hidden { HIDDEN_H } else { SURF_H });
         self.layer.set_margin(if hidden { 0 } else { 8 }, 12, 0, 12);
         self.layer.commit();
         self.dirty = true;
@@ -424,7 +469,7 @@ impl Bar {
             return;
         }
         self.dirty = false;
-        let cv = if self.hidden { Canvas { w: self.width as usize, h: HIDDEN_H as usize, px: vec![0; self.width as usize * HIDDEN_H as usize] } } else { self.render() };
+        let cv = if self.hidden { self.strip() } else { self.render() };
         if let (Ok(path), Some(_)) = (std::env::var("SEIZA_BAR_DUMP"), &self.state) { // debugging aid: write the bar as PPM and quit
             let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
             ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
@@ -475,6 +520,13 @@ impl LayerShellHandler for Bar {
         self.width = c.new_size.0.max(1);
         self.configured = true;
         self.dirty = true;
+        // only the islands take the pointer: what floats under them (a star's name) lets clicks through
+        if !self.hidden {
+            if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
+                region.add(0, 0, self.width as i32, ISLAND_H as i32);
+                self.layer.wl_surface().set_input_region(Some(region.wl_region()));
+            }
+        }
     }
 }
 
@@ -499,7 +551,7 @@ impl SeatHandler for Bar {
 }
 
 impl PointerHandler for Bar {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+    fn pointer_frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         for e in events {
             if &e.surface != self.layer.wl_surface() {
                 continue;
@@ -507,7 +559,18 @@ impl PointerHandler for Bar {
             match e.kind {
                 PointerEventKind::Enter { .. } if self.hidden => self.set_hidden(false),
                 PointerEventKind::Enter { .. } => self.left_at = None,
-                PointerEventKind::Leave { .. } => self.left_at = Some(Instant::now()),
+                PointerEventKind::Leave { .. } => {
+                    self.left_at = Some(Instant::now());
+                    self.set_hover(None);
+                }
+                PointerEventKind::Motion { .. } => {
+                    let x = e.position.0 as f32;
+                    let on = self.hits.iter().find_map(|&(a, b, act)| match act {
+                        Act::Goto(i) if x >= a && x < b => Some(i),
+                        _ => None,
+                    });
+                    self.set_hover(on);
+                }
                 _ => {}
             }
             let x = e.position.0 as f32;
@@ -552,6 +615,9 @@ impl PointerHandler for Bar {
                 _ => {}
             }
         }
+        if self.dirty {
+            self.tick(qh); // draw now, not at the next tick
+        }
     }
 }
 
@@ -583,10 +649,10 @@ fn main() {
 
     let layer = layer_shell.create_layer_surface(&qh, compositor.create_surface(&qh), Layer::Top, Some("seiza-bar"), None);
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_margin(8, 12, 0, 12); // a floating pill, not an edge-to-edge strip
+    layer.set_margin(8, 12, 0, 12); // islands floating off the edges, not an edge-to-edge strip
     let autohide = seiza_common::config::flag("bar", "autohide", false);
-    layer.set_exclusive_zone(if autohide { 0 } else { BAR_H as i32 + 8 }); // a hiding bar floats over the windows
-    layer.set_size(0, if autohide { HIDDEN_H } else { BAR_H });
+    layer.set_exclusive_zone(if autohide { 0 } else { ISLAND_H as i32 + 8 }); // a hiding bar floats over the windows; the room for a star's name is not reserved
+    layer.set_size(0, if autohide { HIDDEN_H } else { SURF_H });
     if autohide {
         layer.set_margin(0, 12, 0, 12);
     }
@@ -599,6 +665,7 @@ fn main() {
         pool: SlotPool::new(4096, &shm).expect("shm pool"),
         shm,
         layer,
+        compositor,
         pointer: None,
         width: 1,
         configured: false,
@@ -616,6 +683,8 @@ fn main() {
         last_poll: None,
         vol_hit: (0.0, 0.0),
         mode_hit: (0.0, 0.0),
+        hover_star: None,
+        star_x: Vec::new(),
         tray: None,
         tray_hits: Vec::new(),
         cpu: None,
@@ -679,4 +748,16 @@ fn main() {
             }
         })
         .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stars_name_stays_on_the_bar() {
+        assert_eq!(tip_box(500.0, 76.0, 1000.0), (450.0, 100.0), "centred under the star");
+        assert_eq!(tip_box(10.0, 76.0, 1000.0).0, 0.0, "not off the left edge");
+        assert_eq!(tip_box(995.0, 76.0, 1000.0).0, 900.0, "not off the right edge");
+    }
 }

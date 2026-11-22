@@ -497,6 +497,13 @@ impl Canvas {
     }
 
     /// A ring open at the top, with a bar through the gap.
+    /// A music note: a head, a stem and a flag.
+    pub fn icon_note(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        let k = r / 7.0;
+        self.round_rect(cx - 4.5 * k, cy + 2.0 * k, 5.5 * k, 4.4 * k, 2.2 * k, c);
+        self.polyline(&[(cx + 0.7 * k, cy + 4.0 * k), (cx + 0.7 * k, cy - 6.0 * k), (cx + 5.0 * k, cy - 3.0 * k)], 1.5 * k, c);
+    }
+
     pub fn icon_power(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
         let t = (r * 0.2).max(1.6);
         self.ring(cx, cy, r, t, c, |a| (-125.0..-55.0).contains(&a));
