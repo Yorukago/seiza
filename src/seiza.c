@@ -2976,6 +2976,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	place_corners(output);
 }
 
+static bool g_lost_all_outputs; /* the last monitor went away, taking the satellites' layer surfaces with it */
 static void output_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_output *output = wl_container_of(listener, output, destroy);
 
@@ -2994,6 +2995,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	wl_list_remove(&output->link);
+	g_lost_all_outputs = wl_list_empty(&output->server->outputs);
 	free(output);
 }
 
@@ -3082,6 +3084,13 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	place_corners(output);
 	if (g_env_ready) {
 		start_starfield(server, output);
+	}
+	if (g_lost_all_outputs && g_env_ready) { /* e.g. after suspend the panel reappears: the satellites exited when it went */
+		g_lost_all_outputs = false;
+		/* shortcut: a fixed list, not the user's autostart (which also holds programs that survive), when it needs to follow a custom autostart */
+		for (const char *sat[] = {"seiza-starfield", "seiza-bar", "seiza-widgets", "seiza-osd", "seiza-notify", NULL}, **c = sat; *c; c++) {
+			op_spawn(server, *c);
+		}
 	}
 }
 
