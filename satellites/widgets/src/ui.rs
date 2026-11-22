@@ -564,9 +564,11 @@ impl Ui {
             return;
         };
         self.t64.draw(cv, x + 24.0, 102.0, &w.temp, rgba(p.text, 1.0));
-        let sky = fit(&mut self.t18, &w.sky, cw - 48.0 - 130.0);
-        let sw = self.t18.width(&sky);
-        self.t18.draw(cv, x + cw - 24.0 - sw, 90.0, &sky, rgba(p.text, 0.85));
+        let room = (cw - 48.0 - self.t64.width(&w.temp) - 14.0).max(40.0); // what the temperature leaves, and a gap
+        let t = if self.t18.width(&w.sky) <= room { &mut self.t18 } else { &mut self.t14 }; // small text before an ellipsis
+        let sky = fit(t, &w.sky, room);
+        let sw = t.width(&sky);
+        t.draw(cv, x + cw - 24.0 - sw, 90.0, &sky, rgba(p.text, 0.85));
         let place = fit(&mut self.t14, &w.place, cw - 48.0);
         self.t14.draw(cv, x + 24.0, 126.0, &place, rgba(p.text, 0.6));
         let extra = fit(&mut self.t14, &w.extra, cw - 48.0);
