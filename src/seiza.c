@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <sys/wait.h>
@@ -3861,6 +3862,38 @@ int main(int argc, char *argv[]) {
 	 * backend. */
 	wl_list_init(&server.outputs);
 	server.new_output.notify = server_new_output;
+/* Sends stderr (ours and every program we spawn) to <state dir>/seiza/seiza.log, keeping the
+ * previous run as seiza.log.old. SEIZA_LOG=stderr opts out. Failure leaves stderr untouched. */
+static void log_to_file(void) {
+	const char *opt = getenv("SEIZA_LOG");
+	if (opt && !strcmp(opt, "stderr")) {
+		return;
+	}
+	const char *state = getenv("XDG_STATE_HOME"), *home = getenv("HOME");
+	char dir[512], path[600], old[610];
+	if (state && state[0]) {
+		snprintf(dir, sizeof dir, "%s/seiza", state);
+	} else if (home && home[0]) {
+		snprintf(dir, sizeof dir, "%s/.local/state/seiza", home);
+	} else {
+		return;
+	}
+	char parent[512];
+	snprintf(parent, sizeof parent, "%s", dir);
+	char *slash = strrchr(parent, '/');
+	if (slash) {
+		*slash = 0;
+		mkdir(parent, 0755); /* shortcut: only the last two levels are created */
+	}
+	mkdir(dir, 0755);
+	snprintf(path, sizeof path, "%s/seiza.log", dir);
+	snprintf(old, sizeof old, "%s.old", path);
+	rename(path, old);
+	if (freopen(path, "w", stderr)) {
+		setvbuf(stderr, NULL, _IOLBF, 0);
+	}
+}
+
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
 
 	/* Create a scene graph. This is a wlroots abstraction that handles all
@@ -3872,6 +3905,7 @@ int main(int argc, char *argv[]) {
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 	server.layers[0] = wlr_scene_tree_create(&server.scene->tree);
+	log_to_file();
 	server.layers[1] = wlr_scene_tree_create(&server.scene->tree);
 	server.canvas = wlr_scene_tree_create(&server.scene->tree);
 	server.xtop = wlr_scene_tree_create(server.canvas);
