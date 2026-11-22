@@ -3,7 +3,7 @@
 //! is where you are; pointing at one names it); the PC status, sound, battery and network on the right.
 mod tray;
 
-use std::{process::Command, thread, time::{Duration, Instant}};
+use std::{process::Command, sync::{Arc, Mutex, mpsc}, thread, time::{Duration, Instant}};
 
 use seiza_common::{
     local_time,
@@ -101,6 +101,32 @@ fn read_bt() -> bool {
     Command::new("bluetoothctl").arg("show").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
 }
 
+/// What the bar learns by running programs. They take a few ms each, so a worker thread reads them
+/// and the bar only looks at the latest result; run on the bar's own thread they stalled its animations every poll.
+#[derive(Clone)]
+struct Polled {
+    volume: Option<(u32, bool)>,
+    mic: Option<(u32, bool)>,
+    media: Option<(bool, String)>,
+    net: &'static str,
+    bt: bool,
+}
+
+/// Reads every 2 s, or soon after a poke (something changed the volume); returns the poke end.
+fn spawn_poller(cell: Arc<Mutex<Option<Polled>>>) -> mpsc::Sender<()> {
+    let (poke, poked) = mpsc::channel::<()>();
+    thread::spawn(move || loop {
+        let p = Polled { volume: read_volume("@DEFAULT_AUDIO_SINK@"), mic: read_volume("@DEFAULT_AUDIO_SOURCE@"), media: read_media(), net: read_net(), bt: read_bt() };
+        *cell.lock().unwrap() = Some(p);
+        match poked.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => thread::sleep(Duration::from_millis(80)), // let the wpctl that caused the poke finish
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    });
+    poke
+}
+
 /// Cut `s` to fit `max` pixels, with an ellipsis.
 fn clip(t: &mut Text, s: &str, max: f32) -> String {
     let mut out = s.to_string();
@@ -172,6 +198,8 @@ struct Bar {
     battery: Option<(u32, bool)>,
     volume: Option<(u32, bool)>,
     last_poll: Option<Instant>,
+    polled: Arc<Mutex<Option<Polled>>>, // the worker's latest reading
+    poke: mpsc::Sender<()>,             // read again now, not in 2 s
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
     mode_hit: (f32, f32), // the mode icon: opens the constellation view
     hover_star: Option<usize>, // the star the pointer is on, to name it
@@ -435,8 +463,7 @@ impl Bar {
         }
         if self.last_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
             self.last_poll = Some(Instant::now());
-            let (battery, volume) = (read_battery(), read_volume("@DEFAULT_AUDIO_SINK@"));
-            let (media, mic, net, bt) = (read_media(), read_volume("@DEFAULT_AUDIO_SOURCE@"), read_net(), read_bt());
+            let battery = read_battery();
             let counters = read_cpu_counters();
             let cpu = match (self.cpu_prev, counters) {
                 (Some((t0, i0)), Some((t1, i1))) if t1 > t0 => Some((100.0 * (1.0 - (i1 - i0) as f64 / (t1 - t0) as f64)).round() as u32),
@@ -445,12 +472,15 @@ impl Bar {
             self.cpu_prev = counters;
             let (ram, temp, load) = (read_ram_pct(), read_temp(), read_load());
             let load = load.map(|l| (l * 100.0).round() / 100.0);
-            if (&media, mic, net, bt) != (&self.media, self.mic, self.net, self.bt) {
-                (self.media, self.mic, self.net, self.bt) = (media, mic, net, bt);
+            if (battery, cpu, ram, temp, load) != (self.battery, self.cpu, self.ram, self.temp, self.load) {
+                (self.battery, self.cpu, self.ram, self.temp, self.load) = (battery, cpu, ram, temp, load);
                 self.dirty = true;
             }
-            if (battery, volume, cpu, ram, temp, load) != (self.battery, self.volume, self.cpu, self.ram, self.temp, self.load) {
-                (self.battery, self.volume, self.cpu, self.ram, self.temp, self.load) = (battery, volume, cpu, ram, temp, load);
+        }
+        let polled = self.polled.lock().unwrap().clone();
+        if let Some(p) = polled {
+            if (&p.media, p.mic, p.net, p.bt, p.volume) != (&self.media, self.mic, self.net, self.bt, self.volume) {
+                (self.media, self.mic, self.net, self.bt, self.volume) = (p.media, p.mic, p.net, p.bt, p.volume);
                 self.dirty = true;
             }
         }
@@ -584,7 +614,7 @@ impl PointerHandler for Bar {
                         Act::Shot => drop(Command::new("seiza-shot").arg("area").spawn()),
                         Act::Mic => {
                             wpctl(&["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]);
-                            self.last_poll = None;
+                            let _ = self.poke.send(());
                         }
                         Act::Panel => drop(Command::new("seiza-panel").spawn()),
                     }
@@ -594,7 +624,7 @@ impl PointerHandler for Bar {
             match e.kind {
                 PointerEventKind::Press { button: BTN_LEFT, .. } if on_volume => {
                     wpctl(&["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
-                    self.last_poll = None; // re-read now, not in 2s
+                    let _ = self.poke.send(());
                 }
                 PointerEventKind::Press { button: BTN_LEFT, .. } if x >= self.mode_hit.0 && x < self.mode_hit.1 => {
                     let _ = Command::new("seiza-carousel").spawn(); // the constellation view is its own program (pressing again closes it)
@@ -602,7 +632,7 @@ impl PointerHandler for Bar {
                 PointerEventKind::Axis { vertical, .. } if on_volume && vertical.absolute != 0.0 => {
                     // scrolling up (negative) raises it; -l 1.0 stops it at 100%
                     wpctl(if vertical.absolute < 0.0 { &["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"] } else { &["set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"] });
-                    self.last_poll = None;
+                    let _ = self.poke.send(());
                 }
                 _ => {}
             }
@@ -650,6 +680,8 @@ fn main() {
     }
     layer.commit();
 
+    let polled = Arc::new(Mutex::new(None));
+    let poke = spawn_poller(polled.clone());
     let mut app = Bar {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -673,6 +705,8 @@ fn main() {
         battery: None,
         volume: None,
         last_poll: None,
+        polled,
+        poke,
         vol_hit: (0.0, 0.0),
         mode_hit: (0.0, 0.0),
         hover_star: None,
