@@ -62,9 +62,8 @@ fn time_text() -> String {
     local_time(seiza_common::clock_fmt())
 }
 
-// ---- battery, volume, PC status ---------------------------------------------
+// ---- volume, PC status ------------------------------------------------------
 
-/// (percent, charging) of the first battery, if the machine has one.
 /// (percent, muted) of the default output, via PipeWire's wpctl.
 fn read_volume(target: &str) -> Option<(u32, bool)> {
     let out = Command::new("wpctl").args(["get-volume", target]).output().ok()?;
