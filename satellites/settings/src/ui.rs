@@ -4,6 +4,7 @@
 //! Pages are stars on a thread across the top; each page is cards of rows, and typing searches them all.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use seiza_common::{
     config,
@@ -12,6 +13,7 @@ use seiza_common::{
     palette::{palette, rgba},
 };
 
+const KNOB_SECS: f32 = 0.18; // a toggle's knob sliding across
 const PAD: f32 = 30.0; // between the card's edge and its content
 const TOP: f32 = 168.0; // where a page's body starts, from the card's top
 const FOOT: f32 = 60.0; // the strip under the body
@@ -369,7 +371,8 @@ pub struct Ui {
     thumb: Option<(usize, usize, Vec<u32>)>,
     hover: Option<usize>, // the page star under the pointer
     glide: kit::Glide,    // the big star moving to another page
-    stale: bool,          // what is in `content` is out of date
+    knobs: HashMap<&'static str, Instant>, // toggles that were just flipped
+    stale: bool,         // what is in `content` is out of date
     content: Option<Canvas>,
     back: Option<Canvas>, // the card's plate
     body: Option<Canvas>, // the page's body
@@ -417,6 +420,7 @@ impl Ui {
             thumb: None,
             hover: None,
             glide: kit::Glide::default(),
+            knobs: HashMap::new(),
             stale: true,
             content: None,
             back: None,
@@ -621,6 +625,7 @@ impl Ui {
                 }
                 Ctl::Toggle => {
                     let on = self.values[p.id] == "1";
+                    self.knobs.insert(p.id, Instant::now());
                     self.set(p.id, if on { "0" } else { "1" }.into())
                 }
                 Ctl::Path => {
@@ -684,7 +689,13 @@ impl Ui {
     /// The frame at visibility `e` (0 = gone, 1 = fully there): the card rises from below while it fades in.
     pub fn render(&mut self, w: usize, h: usize, e: f32) -> Canvas {
         self.fit(w as f32, h as f32);
-        let g = self.glide.active();
+        let knobs = self.knobs.values().any(|t| t.elapsed().as_secs_f32() < KNOB_SECS);
+        if knobs {
+            self.body_stale = true; // the body is cached: a moving knob needs it redrawn
+        } else {
+            self.knobs.clear();
+        }
+        let g = self.glide.active() || knobs;
         if self.stale || g || self.content.as_ref().is_none_or(|c| c.w != w || c.h != h) {
             self.content = Some(self.draw_card(w, h));
             self.stale = g; // a glide that was still going when this was drawn owes one more frame
@@ -819,14 +830,18 @@ impl Ui {
                 }
             }
             Ctl::Toggle => {
-                let on = val == "1";
-                cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(if on { p.star } else { p.text }, if on { 0.75 } else { 0.2 }));
-                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(if on { p.dust } else { p.sky }, 1.0));
-                if on {
-                    cv.sparkle(cx + cw - ch / 2.0, cy + ch / 2.0, 8.0, rgba(p.star, 1.0));
-                } else {
-                    cv.round_rect(cx + ch / 2.0 - 5.0, cy + ch / 2.0 - 5.0, 10.0, 10.0, 5.0, rgba(p.text, 0.5));
-                }
+                // k: 0 = off, 1 = on; between them while the knob slides
+                let to = if val == "1" { 1.0 } else { 0.0 };
+                let k = self.knobs.get(r.id).map_or(to, |t| {
+                    let e = 1.0 - (1.0 - (t.elapsed().as_secs_f32() / KNOB_SECS).min(1.0)).powi(3); // eases out
+                    1.0 - to + (to - (1.0 - to)) * e
+                });
+                let mix = |a: [f32; 4], b: [f32; 4]| std::array::from_fn::<f32, 4, _>(|i| a[i] + (b[i] - a[i]) * k);
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, mix(rgba(p.text, 0.2), rgba(p.star, 0.75)));
+                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, mix(rgba(p.sky, 1.0), rgba(p.dust, 1.0)));
+                let (kx, ky) = (cx + ch / 2.0 + (cw - ch) * k, cy + ch / 2.0);
+                cv.round_rect(kx - 5.0, ky - 5.0, 10.0, 10.0, 5.0, rgba(p.text, 0.5 * (1.0 - k))); // the off dot becomes the star
+                cv.sparkle(kx, ky, 3.0 + 5.0 * k, rgba(p.star, k));
             }
             Ctl::Path => {
                 let focused = self.focus == Some(r.id);
@@ -897,6 +912,22 @@ mod tests {
     }
 
     const SCREEN: (f32, f32) = (1920.0, 1080.0);
+
+    #[test]
+    fn a_flipped_toggle_owes_frames_until_its_knob_has_arrived() {
+        with_config(|| {
+            let mut ui = Ui::new();
+            let (w, h) = SCREEN;
+            let (cx, cy, cw, ch) = ui.control_at("motion/reduce");
+            ui.press(cx + cw / 2.0, cy + ch / 2.0, w, h, false);
+            ui.render(w as usize, h as usize, 1.0);
+            assert!(ui.pending(), "the knob is still sliding");
+            std::thread::sleep(std::time::Duration::from_secs_f32(KNOB_SECS + 0.05));
+            ui.render(w as usize, h as usize, 1.0); // draws the last frame
+            ui.render(w as usize, h as usize, 1.0);
+            assert!(!ui.pending() && ui.knobs.is_empty());
+        });
+    }
 
     #[test]
     fn clicking_controls_saves_to_the_files_the_programs_read() {
