@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use seiza_common::{
-    draw::{blend, load_font, Canvas, Rgba, Text},
+    draw::{blend, shared_font, Canvas, Rgba, Text},
     local_time,
     palette::{palette, rgba},
 };
@@ -120,7 +120,7 @@ fn bloom(t: f32) -> f32 {
 
 impl Ui {
     pub fn new() -> Ui {
-        let font = load_font(); // looking one up runs a subprocess, so once
+        let font = shared_font(); // parsed once per process
         Ui {
             big: Text::new(font.clone(), 112.0),
             small: Text::new(font, 18.0),
