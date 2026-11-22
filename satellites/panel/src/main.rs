@@ -5,6 +5,7 @@
 //! shortcut: the toggles and sliders are read once on open and after each click (wpctl, nmcli, bluetoothctl,
 //! brightnessctl are run synchronously), so a change made elsewhere while it is open shows next time.
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use seiza_common::{
     draw::{shared_font, Canvas, Rgba, Text},
@@ -45,6 +46,45 @@ fn sh(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
+
+/// Sets a hardware level in the background, latest value wins: a drag moves the pointer far faster than
+/// wpctl or brightnessctl can run, and waiting for each one made the slider stutter.
+struct Setter {
+    busy: AtomicBool,
+    latest: AtomicI32,
+}
+
+impl Setter {
+    const fn new() -> Setter {
+        Setter { busy: AtomicBool::new(false), latest: AtomicI32::new(0) }
+    }
+
+    fn set(&'static self, pct: i32, apply: fn(i32)) {
+        self.latest.store(pct, Ordering::SeqCst);
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return; // the running worker will see the newer value
+        }
+        std::thread::spawn(move || loop {
+            let v = self.latest.load(Ordering::SeqCst);
+            apply(v);
+            if self.latest.load(Ordering::SeqCst) != v {
+                continue;
+            }
+            self.busy.store(false, Ordering::SeqCst);
+            // a value that arrived just before `busy` cleared was not picked up by anyone: take it unless another worker already has
+            if self.latest.load(Ordering::SeqCst) == v || self.busy.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        });
+    }
+
+    fn idle(&self) -> bool {
+        !self.busy.load(Ordering::SeqCst)
+    }
+}
+
+static VOLUME: Setter = Setter::new();
+static BRIGHTNESS: Setter = Setter::new();
 
 fn run(cmd: &str, args: &[&str]) {
     let _ = Command::new(cmd).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
@@ -209,13 +249,13 @@ impl State {
 
     fn set_volume(&mut self, v: f32) {
         self.vol = v.clamp(0.0, 1.0);
-        run("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{:.2}", self.vol)]);
+        VOLUME.set((self.vol * 100.0).round() as i32, |pct| run("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{:.2}", pct as f32 / 100.0)]));
     }
 
     fn set_brightness(&mut self, v: f32) {
         let v = v.clamp(0.02, 1.0); // never all the way off: that is a black screen with no way back
         self.bright = Some(v);
-        run("brightnessctl", &["set", &format!("{}%", (v * 100.0).round())]);
+        BRIGHTNESS.set((v * 100.0).round() as i32, |pct| run("brightnessctl", &["set", &format!("{pct}%")]));
     }
 
     /// Tiles on show: all of them while editing, else the ones not hidden.
@@ -844,6 +884,12 @@ fn main() {
         if event_queue.blocking_dispatch(&mut app).is_err() {
             break; // the compositor went away
         }
+    }
+    for _ in 0..100 {
+        if VOLUME.idle() && BRIGHTNESS.idle() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10)); // the last value is still being set: do not exit under it
     }
     let _ = std::fs::remove_file(format!("{}/seiza-panel.pid", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())));
 }
