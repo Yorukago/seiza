@@ -1,4 +1,4 @@
-//! What the weather and agenda cards show, from the network and from a calendar file. Plain text in, plain text out.
+//! What the weather, agenda and updates cards show, from the network, from a calendar file and from pacman. Plain text in, plain text out.
 use std::process::Command;
 
 #[derive(Default, Clone, PartialEq, Debug)]
@@ -109,6 +109,28 @@ pub fn read_calendar(src: &str) -> Option<String> {
     std::fs::read_to_string(src).ok()
 }
 
+/// The package names waiting for an upgrade: from `checkupdates` (the repos) and `yay -Qua` (the AUR).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Updates {
+    pub repo: Vec<String>,
+    pub aur: Vec<String>,
+}
+
+/// The names from lines like "firefox 160.0-1 -> 161.0-1"; anything else (a progress line, a warning) is skipped.
+pub fn parse_updates(out: &str) -> Vec<String> {
+    out.lines().filter(|l| l.contains(" -> ")).filter_map(|l| l.split_whitespace().next()).map(String::from).collect()
+}
+
+/// None when the repo check cannot run (no pacman-contrib, or no network); yay is optional.
+pub fn fetch_updates() -> Option<Updates> {
+    let repo = Command::new("checkupdates").output().ok()?;
+    if !matches!(repo.status.code(), Some(0 | 2)) {
+        return None; // 0: updates waiting, 2: none, anything else: the check itself failed
+    }
+    let aur = Command::new("yay").arg("-Qua").output().map(|o| parse_updates(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    Some(Updates { repo: parse_updates(&String::from_utf8_lossy(&repo.stdout)), aur })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +160,12 @@ mod tests {
         let u = upcoming(vec![ev(20000, "later"), ev(100, "past"), ev(9000, "ongoing")], 10000, 5);
         assert_eq!(u.iter().map(|e| e.what.as_str()).collect::<Vec<_>>(), ["ongoing", "later"]);
         assert_eq!(upcoming(vec![ev(20000, "a"), ev(30000, "b")], 10000, 1).len(), 1);
+    }
+
+    #[test]
+    fn updates_are_the_names_on_lines_with_an_arrow() {
+        let out = "firefox 160.0-1 -> 161.0-1\n:: Checking for updates\nlinux-cachyos 7.3.4-1 -> 7.3.5-1\n\nnot a package line\n";
+        assert_eq!(parse_updates(out), ["firefox", "linux-cachyos"]);
+        assert!(parse_updates("").is_empty());
     }
 }

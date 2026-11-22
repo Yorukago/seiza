@@ -1,7 +1,7 @@
 //! The widgets' state and drawing: a clock with the moon's phase, a calendar and
 //! the machine's pulse, as cards in a row. No Wayland here, so `--dump` can render it.
 
-use crate::feeds::Weather;
+use crate::feeds::{Updates, Weather};
 use std::collections::HashMap;
 
 use seiza_common::{
@@ -15,11 +15,11 @@ const TOP: f32 = 64.0; // where the first card sits until it is dragged: under t
 const MARGIN: f32 = 26.0; // from the left edge
 /// Where cards sit until they are dragged: two columns on the left and middle of the sky, so the top-right
 /// stays free for the toasts. Each column lists its cards top to bottom.
-const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda"]];
+const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda", "updates"]];
 const HISTORY: usize = 60;
 const MEDIA_BTN_Y: f32 = 146.0;
 const BUTTONS: [(f32, &str); 3] = [(-44.0, "previous"), (0.0, "play-pause"), (44.0, "next")];
-const CARDS: [&str; 6] = ["clock", "calendar", "system", "media", "weather", "agenda"];
+const CARDS: [&str; 7] = ["clock", "calendar", "system", "media", "weather", "agenda", "updates"];
 
 /// What the system card shows; filled by the main loop once a second.
 #[derive(Default, Clone, PartialEq)]
@@ -89,6 +89,7 @@ pub struct Ui {
     pub media: Option<Media>,
     pub weather: Option<Weather>,
     pub agenda: Option<Vec<(String, String)>>, // (when, what); None = no calendar set
+    pub updates: Option<Updates>,              // None = not counted yet
     art: (String, Option<Canvas>), // the picture for the path last asked for
     pub pin: HashMap<String, Pin>, // cards the user has dragged: each lives on one star
     pub view: Option<View>,        // the camera and the stars, from the compositor's state stream
@@ -263,7 +264,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(shared_font(), 64.0), t18: Text::new(shared_font(), 18.0), t14: Text::new(shared_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, updates: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(shared_font(), 64.0), t18: Text::new(shared_font(), 18.0), t14: Text::new(shared_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -286,7 +287,7 @@ impl Ui {
 
     pub fn key(&self) -> String {
         let m = self.media.as_ref().map(|m| format!("{}{}{}{}{}", m.playing, m.title, m.artist, m.pos, m.art));
-        format!("{}|{}|{}|{m:?}|{:?}|{:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0), self.weather, self.agenda)
+        format!("{}|{}|{}|{m:?}|{:?}|{:?}|{:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0), self.weather, self.agenda, self.updates)
     }
 
     fn card_size(name: &str) -> (f32, f32) {
@@ -296,6 +297,7 @@ impl Ui {
             "media" => (340.0, 170.0),
             "weather" => (340.0, 150.0),
             "agenda" => (340.0, 200.0),
+            "updates" => (340.0, 150.0),
             _ => (340.0, 236.0),
         }
     }
@@ -408,6 +410,17 @@ impl Ui {
         Some(cmd)
     }
 
+    /// A press and release on the updates card without moving: time to upgrade. The card is let go of, so it is not pinned.
+    pub fn tap_updates(&mut self) -> bool {
+        let Some(d) = self.drag.as_ref() else { return false };
+        let moved = (d.at.0 - d.from.0).abs() + (d.at.1 - d.from.1).abs();
+        let hit = d.name == "updates" && moved < 4.0;
+        if hit {
+            self.drag = None;
+        }
+        hit
+    }
+
     /// Move the held card with the pointer. True if a card is held.
     pub fn motion(&mut self, px: f32, py: f32) -> bool {
         let Some(d) = &mut self.drag else { return false };
@@ -461,6 +474,7 @@ impl Ui {
             "media" => self.media(&mut cv, x, cw),
             "weather" => self.weather_card(&mut cv, x, cw),
             "agenda" => self.agenda_card(&mut cv, x, cw),
+            "updates" => self.updates_card(&mut cv, x, cw),
             _ => self.system(&mut cv, x, cw),
         }
         cv
@@ -574,6 +588,27 @@ impl Ui {
         let extra = fit(&mut self.t14, &w.extra, cw - 48.0);
         let ew = self.t14.width(&extra);
         self.t14.draw(cv, x + cw - 24.0 - ew, 38.0, &extra, rgba(p.text, 0.4));
+    }
+
+    fn updates_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
+        let p = palette();
+        self.t14.draw(cv, x + 24.0, 38.0, "updates", rgba(p.text, 0.5));
+        let Some(u) = self.updates.clone() else {
+            self.t18.draw(cv, x + 24.0, 84.0, "counting..", rgba(p.text, 0.4));
+            return;
+        };
+        let total = u.repo.len() + u.aur.len();
+        if total == 0 {
+            self.t18.draw(cv, x + 24.0, 84.0, "all up to date", rgba(p.star, 0.9));
+            return;
+        }
+        self.t64.draw(cv, x + 24.0, 102.0, &total.to_string(), rgba(p.text, 1.0));
+        for (row, (n, what)) in [(u.repo.len(), "repo"), (u.aur.len(), "aur")].into_iter().enumerate() {
+            let line = format!("{n} {what}");
+            let w = self.t18.width(&line);
+            self.t18.draw(cv, x + cw - 24.0 - w, 78.0 + 26.0 * row as f32, &line, rgba(p.text, if n == 0 { 0.35 } else { 0.85 }));
+        }
+        self.t14.draw(cv, x + 24.0, 132.0, "click to upgrade", rgba(p.text, 0.45));
     }
 
     fn agenda_card(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
@@ -785,6 +820,19 @@ mod tests {
         assert!(ui.press(x + cw / 2.0, y + MEDIA_BTN_Y, w, h));
         ui.motion(x + cw / 2.0 + 30.0, y + MEDIA_BTN_Y);
         assert_eq!(ui.tap(), None, "moved: a drag");
+    }
+
+    #[test]
+    fn tapping_the_updates_card_upgrades_and_dragging_does_not() {
+        let (w, h) = (1920.0, 1080.0);
+        let mut ui = Ui::new(vec!["updates".into()]);
+        let (x, y, cw, _) = ui.rect("updates", w, h).unwrap();
+        assert!(ui.press(x + cw / 2.0, y + 60.0, w, h));
+        assert!(ui.tap_updates());
+        assert!(!ui.tap_updates(), "the card was let go of");
+        assert!(ui.press(x + cw / 2.0, y + 60.0, w, h));
+        ui.motion(x + cw / 2.0 + 30.0, y + 60.0);
+        assert!(!ui.tap_updates(), "moved: a drag");
     }
 
     #[test]

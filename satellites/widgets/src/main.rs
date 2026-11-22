@@ -1,6 +1,6 @@
 //! seiza-widgets: a clock with the moon's phase, a calendar, the machine's pulse and what is playing,
 //! as cards on the sky, under your windows. Which ones, and in what order, is
-//! `~/.config/seiza/widgets`: one of clock / calendar / system / media / weather / agenda per line (weather and agenda are only shown when listed)
+//! `~/.config/seiza/widgets`: one of clock / calendar / system / media / weather / agenda / updates per line (weather, agenda and updates are only shown when listed)
 //! (an empty file shows nothing; no file shows all four). Drag a card to move it: it is then pinned
 //! to the star you dropped it on and only shows there; cards never dragged sit in a row on the first star.
 //! Right-click a card to send it to the next star. Pins are kept in `~/.config/seiza/widgetpos`; delete that file to put the cards back.
@@ -50,9 +50,17 @@ fn config_cards() -> Vec<String> {
 struct Feeds {
     weather: Option<feeds::Weather>,
     agenda: Option<Vec<(String, String)>>,
+    updates: Option<feeds::Updates>,
 }
 
 const FEED_EVERY: Duration = Duration::from_secs(30 * 60);
+const UPDATES_EVERY: Duration = Duration::from_secs(60 * 60);
+const UPDATES_RETRY: Duration = Duration::from_secs(10 * 60); // the check failed: offline, or no pacman-contrib
+
+/// The upgrade command writes this file when it ends, so the card counts again at once instead of in an hour.
+pub fn updates_flag() -> std::path::PathBuf {
+    std::path::Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("seiza-updates-refresh")
+}
 
 /// One thread per card that needs the outside world: fetch, wait half an hour, fetch again.
 // shortcut: settings are read once at start, so a new place or calendar needs the widgets restarted.
@@ -67,6 +75,23 @@ fn start_feeds(cards: &[String], feeds: std::sync::Arc<std::sync::Mutex<Feeds>>)
                     feeds.lock().unwrap().weather = Some(w);
                 }
                 std::thread::sleep(FEED_EVERY);
+            }
+        });
+    }
+    if cards.iter().any(|c| c == "updates") {
+        let feeds = feeds.clone();
+        std::thread::spawn(move || loop {
+            let found = feeds::fetch_updates();
+            let wait = if found.is_some() { UPDATES_EVERY } else { UPDATES_RETRY };
+            if found.is_some() {
+                feeds.lock().unwrap().updates = found;
+            }
+            let until = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_secs(10));
+                if std::fs::remove_file(updates_flag()).is_ok() {
+                    break;
+                }
             }
         });
     }
@@ -85,6 +110,17 @@ fn start_feeds(cards: &[String], feeds: std::sync::Arc<std::sync::Mutex<Feeds>>)
             }
         });
     }
+}
+
+/// Open a terminal that upgrades everything (yay does the AUR too; plain pacman where there is no yay) and
+/// stays open to be read. Goes through Seiza so the terminal opens on the star you are on.
+fn upgrade() {
+    let script = format!(
+        r#"if command -v yay >/dev/null; then yay -Syu; else sudo pacman -Syu; fi; touch "{}"; printf "\ndone. press enter to close "; read _"#,
+        updates_flag().display()
+    );
+    let line = format!("{} -e sh -c '{}'", seiza_common::apps::terminal_command(), script);
+    std::thread::spawn(move || seiza_common::command(&line));
 }
 
 // shortcut: one playerctl spawn a second; switch to `playerctl --follow` if it ever shows in a profile.
@@ -181,8 +217,8 @@ impl Widgets {
         }
         {
             let f = self.feeds.lock().unwrap();
-            if f.weather != self.ui.weather || f.agenda != self.ui.agenda {
-                (self.ui.weather, self.ui.agenda) = (f.weather.clone(), f.agenda.clone());
+            if f.weather != self.ui.weather || f.agenda != self.ui.agenda || f.updates != self.ui.updates {
+                (self.ui.weather, self.ui.agenda, self.ui.updates) = (f.weather.clone(), f.agenda.clone(), f.updates.clone());
             }
         }
         if self.ui.key() != self.shown {
@@ -291,6 +327,8 @@ impl PointerHandler for Widgets {
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
                     if let Some(cmd) = self.ui.tap() {
                         std::thread::spawn(move || std::process::Command::new("playerctl").arg(cmd).status()); // the thread reaps it
+                    } else if self.ui.tap_updates() {
+                        upgrade();
                     }
                     if let Some((name, pin)) = self.ui.release(w, h) {
                         let _ = seiza_common::config::set("widgetpos", &name, &format!("{:.0},{:.0},{},{}", pin.dx, pin.dy, pin.constellation, pin.star));
@@ -332,7 +370,7 @@ fn main() {
         start_feeds(&ui.cards, feeds.clone());
         std::thread::sleep(Duration::from_secs(3)); // the dump waits a moment for the cards that fetch
         let f = feeds.lock().unwrap();
-        (ui.weather, ui.agenda) = (f.weather.clone(), f.agenda.clone());
+        (ui.weather, ui.agenda, ui.updates) = (f.weather.clone(), f.agenda.clone(), f.updates.clone());
         drop(f);
         let cv = ui.render(1920, 760);
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();

@@ -112,6 +112,7 @@ pub fn pages() -> Vec<Page> {
                 tog("widgets/media", "media", "what is playing, from any MPRIS player", "1"),
                 tog("widgets/weather", "weather", "from wttr.in; set weather.place in seiza.kdl", "0"),
                 tog("widgets/agenda", "agenda", "next events; set calendar.source in seiza.kdl", "0"),
+                tog("widgets/updates", "updates", "pacman and yay updates waiting; click the card to upgrade", "0"),
             ]),
             card("side panel", vec![
                 tog("panel/weather", "weather", "a card with the temperature (asks wttr.in)", "0"),
@@ -189,7 +190,7 @@ fn with_voice(text: &str, val: &str) -> String {
     out.join("\n") + "\n"
 }
 
-const WIDGET_NAMES: [&str; 6] = ["clock", "calendar", "system", "media", "weather", "agenda"];
+const WIDGET_NAMES: [&str; 7] = ["clock", "calendar", "system", "media", "weather", "agenda", "updates"];
 
 /// The widgets file for the cards that are switched on, in the fixed order.
 pub fn widgets_file(on: impl Fn(&str) -> bool) -> String {
