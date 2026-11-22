@@ -5,13 +5,17 @@ use crate::feeds::Weather;
 use std::collections::HashMap;
 
 use seiza_common::{
-    draw::{load_font, Canvas, Text},
+    draw::{shared_font, Canvas, Text},
     local_time,
     palette::{palette, rgba},
 };
 
 const GAP: f32 = 22.0;
-const TOP: f32 = 56.0; // where the row starts until a card is dragged: under the bar
+const TOP: f32 = 64.0; // where the first card sits until it is dragged: under the bar
+const MARGIN: f32 = 26.0; // from the left edge
+/// Where cards sit until they are dragged: two columns on the left and middle of the sky, so the top-right
+/// stays free for the toasts. Each column lists its cards top to bottom.
+const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda"]];
 const HISTORY: usize = 60;
 const MEDIA_BTN_Y: f32 = 146.0;
 const BUTTONS: [(f32, &str); 3] = [(-44.0, "previous"), (0.0, "play-pause"), (44.0, "next")];
@@ -259,7 +263,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(load_font(), 64.0), t18: Text::new(load_font(), 18.0), t14: Text::new(load_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(shared_font(), 64.0), t18: Text::new(shared_font(), 18.0), t14: Text::new(shared_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -287,7 +291,7 @@ impl Ui {
 
     fn card_size(name: &str) -> (f32, f32) {
         match name {
-            "clock" => (330.0, 150.0),
+            "clock" => (340.0, 150.0),
             "calendar" => (340.0, 300.0),
             "media" => (340.0, 170.0),
             "weather" => (340.0, 150.0),
@@ -325,10 +329,8 @@ impl Ui {
             return Some(on_screen(d.at.0, d.at.1));
         }
         let Some(pin) = self.pin.get(name) else {
-            let row: Vec<String> = self.visible().into_iter().filter(|c| !self.pin.contains_key(c)).collect();
-            let total = row.iter().map(|c| Self::card_size(c).0 + GAP).sum::<f32>() - GAP;
-            let before: f32 = row.iter().take_while(|c| *c != name).map(|c| Self::card_size(c).0 + GAP).sum();
-            let (x, y, ..) = on_screen((w - total) / 2.0 + before, TOP);
+            let (hx, hy) = self.home(name);
+            let (x, y, ..) = on_screen(hx, hy);
             let Some(v) = &self.view else { return Some((x, y, cw, ch)) }; // before the first state: where it will be
             let &(_, sx, sy) = v.stars.first()?;
             // the spot that is (x, y) when the first star is centered, as an offset from that star
@@ -338,6 +340,17 @@ impl Ui {
         let v = self.view.as_ref().filter(|v| v.constellation == pin.constellation)?;
         let &(_, sx, sy) = v.stars.iter().find(|(n, _, _)| *n == pin.star)?;
         Self::in_view(v, (sx + pin.dx, sy + pin.dy), cw, ch, w, h)
+    }
+
+    /// Where a card that was never dragged sits on a screen with the first star centered: in its column of
+    /// `COLUMNS`, below the loose cards above it; a column with no loose cards takes no room.
+    fn home(&self, name: &str) -> (f32, f32) {
+        let loose = |c: &str| self.visible().iter().any(|v| v == c) && !self.pin.contains_key(c);
+        let col = COLUMNS.iter().position(|c| c.contains(&name)).unwrap_or(1);
+        let width = |c: &[&str]| c.iter().filter(|n| loose(n)).map(|n| Self::card_size(n).0).fold(0.0, f32::max);
+        let x = MARGIN + COLUMNS[..col].iter().filter(|c| width(c) > 0.0).map(|c| width(c) + GAP).sum::<f32>();
+        let above = COLUMNS[col].iter().take_while(|n| **n != name).filter(|n| loose(n));
+        (x, TOP + above.map(|n| Self::card_size(n).1 + GAP).sum::<f32>())
     }
 
     /// A card at a world point, as a screen rect, if any of it is on screen.
@@ -439,8 +452,9 @@ impl Ui {
         let (cw, ch) = Self::card_size(name);
         let mut cv = Canvas { w: cw as usize + 2 * CARD_PAD, h: ch as usize + 2, px: vec![0; (cw as usize + 2 * CARD_PAD) * (ch as usize + 2)] };
         let (x, p) = (CARD_PAD as f32, palette());
-        cv.round_rect(x - 1.0, 0.0, cw + 2.0, ch + 1.0, 23.0, rgba(p.star, 0.16));
-        cv.round_rect(x, 1.0, cw, ch - 1.0, 22.0, rgba(p.panel, 0.80));
+        cv.round_rect(x - 1.0, 0.0, cw + 2.0, ch + 1.0, 23.0, rgba(p.text, 0.10));
+        cv.round_rect(x, 1.0, cw, ch - 1.0, 22.0, rgba(p.panel, 0.86));
+        cv.round_rect(x, 1.0, cw, ch - 1.0, 22.0, rgba(p.text, 0.03));
         match name {
             "clock" => self.clock(&mut cv, x, cw, ch),
             "calendar" => self.calendar(&mut cv, x, cw),
@@ -456,7 +470,7 @@ impl Ui {
         let p = palette();
         let (_, _, _, _, t) = now_parts();
         self.t64.draw(cv, x + 26.0, 82.0, &local_time(seiza_common::clock_fmt()), rgba(p.text, 1.0));
-        self.t18.draw(cv, x + 28.0, 116.0, &local_time(c"%a %d %b").to_lowercase(), rgba(p.text, 0.6));
+        self.t18.draw(cv, x + 28.0, ch - 26.0, &local_time(c"%a %d %b").to_lowercase(), rgba(p.text, 0.6));
         // the moon, drawn dim as a whole disc with the lit part over it
         let (mx, my, r) = (x + cw - 52.0, 56.0, 20.0);
         let age = moon_age(t);
@@ -469,7 +483,7 @@ impl Ui {
         });
         let name = moon_name(age);
         let nw = self.t14.width(name);
-        self.t14.draw(cv, x + cw - 24.0 - nw, ch - 24.0, name, rgba(p.text, 0.5));
+        self.t14.draw(cv, x + cw - 24.0 - nw, ch - 26.0, name, rgba(p.text, 0.5));
     }
 
     fn calendar(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
@@ -492,8 +506,9 @@ impl Ui {
                 let s = d.to_string();
                 let sw = self.t14.width(&s);
                 if d == today {
-                    cv.round_rect(cx - 14.0, cy - 14.0, 28.0, 28.0, 14.0, rgba(p.star, 0.9));
-                    self.t14.draw(cv, cx - sw / 2.0, cy + 5.0, &s, rgba(p.sky, 1.0)); // dark on gold: never gold under text
+                    cv.round_rect(cx - 14.0, cy - 14.0, 28.0, 28.0, 14.0, rgba(p.star, 0.85)); // indigo with a gold outline
+                    cv.round_rect(cx - 13.0, cy - 13.0, 26.0, 26.0, 13.0, rgba(p.dust, 1.0));
+                    self.t14.draw(cv, cx - sw / 2.0, cy + 5.0, &s, rgba(p.text, 1.0));
                 } else {
                     self.t14.draw(cv, cx - sw / 2.0, cy + 5.0, &s, rgba(p.text, if c >= 5 { 0.55 } else { 0.85 }));
                 }
@@ -658,12 +673,14 @@ mod tests {
     }
 
     #[test]
-    fn cards_start_in_a_row_and_a_dragged_one_is_pinned_to_its_star() {
-        let mut ui = Ui::new(["clock", "calendar"].map(String::from).to_vec());
+    fn cards_start_in_two_columns_and_a_dragged_one_is_pinned_to_its_star() {
+        let mut ui = Ui::new(["clock", "calendar", "system"].map(String::from).to_vec());
         let (w, h) = (1920.0, 1080.0);
-        let total = 330.0 + GAP + 340.0;
-        assert_eq!(ui.rect("clock", w, h), Some(((w - total) / 2.0, TOP, 330.0, 150.0)));
-        assert_eq!(ui.rect("calendar", w, h).unwrap().0, (w - total) / 2.0 + 330.0 + GAP);
+        // the first column: clock, then the calendar under it; the second column starts beside them
+        assert_eq!(ui.rect("clock", w, h), Some((MARGIN, TOP, 340.0, 150.0)));
+        assert_eq!(ui.rect("calendar", w, h).map(|r| (r.0, r.1)), Some((MARGIN, TOP + 150.0 + GAP)));
+        assert_eq!(ui.rect("system", w, h).map(|r| (r.0, r.1)), Some((MARGIN + 340.0 + GAP, TOP)));
+        assert!(ui.rects(w, h).iter().all(|r| r.0 + r.2 < w - 400.0), "the top-right is left for the toasts");
         assert!(!ui.press(5.0, 5.0, w, h), "empty sky is not a card");
         ui.view = Some(view("a", (0.0, 0.0)));
         let (cx, cy, _, _) = ui.rect("clock", w, h).unwrap();
@@ -675,8 +692,15 @@ mod tests {
         assert_eq!((name.as_str(), pin.star.as_str()), ("clock", "a"));
         assert_eq!((pin.dx, pin.dy), (cx + 100.0 - 960.0, cy + 100.0 - 540.0), "an offset from the star's center");
         assert_eq!(ui.rect("clock", w, h).unwrap().0, cx + 100.0);
-        assert_eq!(ui.rect("calendar", w, h).unwrap().0, (w - 340.0) / 2.0, "the row closes up around the one that left");
+        assert_eq!(ui.rect("calendar", w, h).map(|r| (r.0, r.1)), Some((MARGIN, TOP)), "the column closes up around the one that left");
         assert!(!ui.motion(1.0, 1.0), "nothing is held any more");
+    }
+
+    #[test]
+    fn a_column_with_no_cards_takes_no_room() {
+        let ui = Ui::new(["system", "media"].map(String::from).to_vec());
+        assert_eq!(ui.rect("system", 1920.0, 1080.0).map(|r| (r.0, r.1)), Some((MARGIN, TOP)), "no clock or calendar: system takes the first column");
+        assert_eq!(ui.rect("media", 1920.0, 1080.0).map(|r| (r.0, r.1)), Some((MARGIN, TOP + 236.0 + GAP)));
     }
 
     #[test]
@@ -701,7 +725,7 @@ mod tests {
         let mut ui = Ui::new(vec!["clock".into()]);
         let (w, h) = (1920.0, 1080.0);
         ui.view = Some(view("a", (0.0, 0.0)));
-        assert_eq!(ui.rect("clock", w, h).map(|r| (r.0, r.1)), Some((795.0, TOP)));
+        assert_eq!(ui.rect("clock", w, h).map(|r| (r.0, r.1)), Some((MARGIN, TOP)));
         ui.view = Some(view("b", (2000.0, 0.0))); // star 2: a clean screen
         assert_eq!(ui.rect("clock", w, h), None);
         assert!(ui.rects(w, h).is_empty());
@@ -710,7 +734,7 @@ mod tests {
     #[test]
     fn letting_go_with_no_star_to_pin_to_changes_nothing() {
         let mut ui = Ui::new(vec!["clock".into()]);
-        assert!(ui.press(800.0, 80.0, 1920.0, 1080.0));
+        assert!(ui.press(100.0, 100.0, 1920.0, 1080.0));
         ui.motion(900.0, 400.0);
         assert!(ui.release(1920.0, 1080.0).is_none());
         assert!(ui.pin.is_empty());
@@ -725,8 +749,8 @@ mod tests {
         let t = std::time::Instant::now();
         for i in 0..100 {
             ui.view = Some(view("a", (0.0, 0.0)));
-            ui.press(700.0, 100.0, 1920.0, 1080.0);
-            ui.motion(700.0 + i as f32, 100.0 + i as f32);
+            ui.press(100.0, 100.0, 1920.0, 1080.0);
+            ui.motion(100.0 + i as f32, 100.0 + i as f32);
             ui.render(1920, 1080);
             ui.release(1920.0, 1080.0);
         }

@@ -334,7 +334,7 @@ fn main() {
         let f = feeds.lock().unwrap();
         (ui.weather, ui.agenda) = (f.weather.clone(), f.agenda.clone());
         drop(f);
-        let cv = ui.render(1920, 420);
+        let cv = ui.render(1920, 760);
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
