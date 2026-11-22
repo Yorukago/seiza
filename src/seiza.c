@@ -120,6 +120,7 @@ struct tinywl_server {
 
 	double pan_last_x, pan_last_y; /* cursor position at the last canvas-drag step */
 	struct wl_list stars;
+	struct wl_list ghosts;     /* closed windows still fading out */
 	struct star *current_star; /* the star new windows land in */
 	char cfg_dir[400];         /* ~/.config/seiza */
 	struct keymap_cfg keys;    /* built-in defaults + ~/.config/seiza/keys */
@@ -363,30 +364,35 @@ static void surface_deactivate(struct wlr_surface *surface) {
 }
 
 /* Fit the frame around the window's current geometry and color it by focus. */
-static void update_border(struct tinywl_toplevel *tl) {
-	struct wlr_box geo = tl_geometry(tl), *g = &geo;
-	bool focused = tl_surface(tl) && tl->server->seat->keyboard_state.focused_surface == tl_surface(tl);
+static void frame_fit(struct wlr_scene_rect *border, struct wlr_scene_shadow *glow, const struct wlr_box *g,
+		double z, bool shown, bool focused, float a) {
 	int t = BORDER_W;
-	double z = tl->server->zoom * (1 - OPEN_POPIN * tl->faded);
 	int r = lround(WIN_RADIUS * z);
 	int gx = lround(g->x * z), gy = lround(g->y * z);
 	int gw = lround(g->width * z), gh = lround(g->height * z);
-	wlr_scene_node_set_enabled(&tl->border->node, !tl->mode);
-	wlr_scene_node_set_enabled(&tl->glow->node, !tl->mode);
-	wlr_scene_rect_set_size(tl->border, gw + 2 * t, gh + 2 * t);
-	wlr_scene_rect_set_corner_radius(tl->border, r + t);
-	float a = fminf(1.0f, fmaxf(0.0f, 1.0f - tl->faded)), bc[4], gc[4]; /* colours are premultiplied, so alpha scales every channel */
+	wlr_scene_node_set_enabled(&border->node, shown);
+	wlr_scene_node_set_enabled(&glow->node, shown);
+	wlr_scene_rect_set_size(border, gw + 2 * t, gh + 2 * t);
+	wlr_scene_rect_set_corner_radius(border, r + t);
+	float bc[4], gc[4]; /* colours are premultiplied, so alpha scales every channel */
 	for (int i = 0; i < 4; i++) {
 		bc[i] = (focused ? BORDER_FOCUSED : BORDER_IDLE)[i] * a;
 		gc[i] = (focused ? GLOW_FOCUSED : GLOW_IDLE)[i] * a;
 	}
-	wlr_scene_rect_set_color(tl->border, bc);
-	wlr_scene_node_set_position(&tl->border->node, gx - t, gy - t);
+	wlr_scene_rect_set_color(border, bc);
+	wlr_scene_node_set_position(&border->node, gx - t, gy - t);
 	int bloom = 2 * GLOW_SIGMA;
-	wlr_scene_shadow_set_size(tl->glow, gw + 2 * t + 2 * bloom, gh + 2 * t + 2 * bloom);
-	wlr_scene_shadow_set_corner_radius(tl->glow, r + t);
-	wlr_scene_shadow_set_color(tl->glow, gc);
-	wlr_scene_node_set_position(&tl->glow->node, gx - t - bloom, gy - t - bloom);
+	wlr_scene_shadow_set_size(glow, gw + 2 * t + 2 * bloom, gh + 2 * t + 2 * bloom);
+	wlr_scene_shadow_set_corner_radius(glow, r + t);
+	wlr_scene_shadow_set_color(glow, gc);
+	wlr_scene_node_set_position(&glow->node, gx - t - bloom, gy - t - bloom);
+}
+
+static void update_border(struct tinywl_toplevel *tl) {
+	struct wlr_box geo = tl_geometry(tl);
+	bool focused = tl_surface(tl) && tl->server->seat->keyboard_state.focused_surface == tl_surface(tl);
+	frame_fit(tl->border, tl->glow, &geo, tl->server->zoom * (1 - OPEN_POPIN * tl->faded), !tl->mode, focused,
+		fminf(1.0f, fmaxf(0.0f, 1.0f - tl->faded)));
 }
 
 /* SEIZA stars. Territory size and grid spacing, in world units. New stars are
@@ -838,6 +844,93 @@ static bool open_step(struct tinywl_server *server) {
 			layout_toplevel(tl);
 			any |= tl->open_t0 != 0;
 		}
+	}
+	return any;
+}
+
+/* A closed window lingers as a "ghost": its last frame, fading and shrinking like the open animation
+ * played backwards. It owns its own nodes, because the client destroys the window right after it unmaps. */
+#define CLOSE_SECS 0.2
+#define CLOSE_CURVE "emphasizedAccel"
+struct ghost {
+	struct wl_list link;
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_rect *border;
+	struct wlr_scene_shadow *glow;
+	struct wlr_scene_buffer *buf;
+	double wx, wy, t0;
+	struct wlr_box geo;
+	int bx, by, sw, sh, mode; /* where the surface sits in the window, its unscaled size, maximized or not */
+	bool focused;
+};
+
+struct grab_arg {
+	struct wlr_surface *surface;
+	struct wlr_scene_buffer *sb;
+	int x, y;
+};
+
+static void grab_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data) {
+	struct grab_arg *a = data;
+	struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(sb);
+	if (!a->sb && ss && ss->surface == a->surface && sb->buffer) {
+		a->sb = sb, a->x = sx, a->y = sy;
+	}
+}
+
+/* Called as a window unmaps, while its scene still shows the last frame. */
+static void ghost_start(struct tinywl_toplevel *tl) {
+	struct wlr_surface *surface = tl_surface(tl);
+	if (!surface || !surface->mapped || tl->server->motion.reduce || tl->server->overview) {
+		return;
+	}
+	struct grab_arg a = {surface, NULL, 0, 0};
+	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, grab_buffer, &a);
+	if (!a.sb || surface->current.width <= 0 || surface->current.height <= 0) {
+		return;
+	}
+	struct ghost *g = calloc(1, sizeof(*g));
+	g->tree = wlr_scene_tree_create(tl->server->canvas);
+	g->glow = wlr_scene_shadow_create(g->tree, 0, 0, WIN_RADIUS, GLOW_SIGMA, GLOW_IDLE);
+	g->border = wlr_scene_rect_create(g->tree, 0, 0, BORDER_IDLE);
+	g->buf = wlr_scene_buffer_create(g->tree, a.sb->buffer); /* locks the buffer: it outlives the client's */
+	wlr_scene_buffer_set_source_box(g->buf, &a.sb->src_box);
+	wlr_scene_buffer_set_transform(g->buf, a.sb->transform);
+	g->wx = tl->wx, g->wy = tl->wy, g->t0 = mono_s();
+	g->geo = tl_geometry(tl);
+	g->bx = a.x, g->by = a.y, g->mode = tl->mode;
+	g->sw = surface->current.width, g->sh = surface->current.height;
+	g->focused = tl->server->seat->keyboard_state.focused_surface == surface;
+	wl_list_insert(&tl->server->ghosts, &g->link);
+	frames_all(tl->server);
+}
+
+static void ghost_free(struct ghost *g) {
+	wlr_scene_node_destroy(&g->tree->node);
+	wl_list_remove(&g->link);
+	free(g);
+}
+
+/* One step of every closing ghost; true while any is left. */
+static bool ghost_step(struct tinywl_server *server) {
+	bool any = false;
+	struct ghost *g, *tmp;
+	wl_list_for_each_safe(g, tmp, &server->ghosts, link) {
+		double p = (mono_s() - g->t0) / CLOSE_SECS;
+		if (p >= 1.0 || server->overview) {
+			ghost_free(g);
+			continue;
+		}
+		any = true;
+		double e = fmin(1.0, fmax(0.0, motion_bezier(motion_curve(CLOSE_CURVE), p)));
+		double z = server->zoom, pz = z * (1 - OPEN_POPIN * e);
+		wlr_scene_node_set_position(&g->tree->node, lround(g->wx * z + (z - pz) * g->geo.width / 2),
+			lround(g->wy * z + (z - pz) * g->geo.height / 2));
+		wlr_scene_node_set_position(&g->buf->node, g->bx, g->by);
+		wlr_scene_buffer_set_dest_size(g->buf, fmax(1, lround(g->sw * pz)), fmax(1, lround(g->sh * pz)));
+		wlr_scene_buffer_set_corner_radius(g->buf, g->mode ? 0 : lround(WIN_RADIUS * pz));
+		wlr_scene_buffer_set_opacity(g->buf, 1.0f - (float)e);
+		frame_fit(g->border, g->glow, &g->geo, pz, !g->mode, g->focused, 1.0f - (float)e);
 	}
 	return any;
 }
@@ -2850,6 +2943,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 
 	anim_step(output->server);
 	bool opening = open_step(output->server);
+	opening |= ghost_step(output->server);
 
 	/* A fullscreen window on the star in view covers the bar (layer Top); the constellation view hides it anyway. */
 	bool covered = false;
@@ -3048,6 +3142,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		reset_cursor_mode(toplevel->server);
 	}
 
+	ghost_start(toplevel);
 	if (toplevel->x_scene) {
 		wlr_scene_node_destroy(&toplevel->x_scene->buffer->node);
 		toplevel->x_scene = NULL;
@@ -3767,6 +3862,38 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
 }
 
+/* Sends stderr (ours and every program we spawn) to <state dir>/seiza/seiza.log, keeping the
+ * previous run as seiza.log.old. SEIZA_LOG=stderr opts out. Failure leaves stderr untouched. */
+static void log_to_file(void) {
+	const char *opt = getenv("SEIZA_LOG");
+	if (opt && !strcmp(opt, "stderr")) {
+		return;
+	}
+	const char *state = getenv("XDG_STATE_HOME"), *home = getenv("HOME");
+	char dir[512], path[600], old[610];
+	if (state && state[0]) {
+		snprintf(dir, sizeof dir, "%s/seiza", state);
+	} else if (home && home[0]) {
+		snprintf(dir, sizeof dir, "%s/.local/state/seiza", home);
+	} else {
+		return;
+	}
+	char parent[512];
+	snprintf(parent, sizeof parent, "%s", dir);
+	char *slash = strrchr(parent, '/');
+	if (slash) {
+		*slash = 0;
+		mkdir(parent, 0755); /* shortcut: only the last two levels are created */
+	}
+	mkdir(dir, 0755);
+	snprintf(path, sizeof path, "%s/seiza.log", dir);
+	snprintf(old, sizeof old, "%s.old", path);
+	rename(path, old);
+	if (freopen(path, "w", stderr)) {
+		setvbuf(stderr, NULL, _IOLBF, 0);
+	}
+}
+
 int main(int argc, char *argv[]) {
 	/* `seiza validate` checks ~/.config/seiza/seiza.kdl; it needs no running compositor. */
 	if (argc == 2 && !strcmp(argv[1], "validate")) {
@@ -3778,6 +3905,7 @@ int main(int argc, char *argv[]) {
 	if (argc > 1 && argv[1][0] != '-') {
 		return ipc_client(argc, argv);
 	}
+	log_to_file();
 	wlr_log_init(WLR_DEBUG, NULL);
 	char *startup_cmd = NULL;
 
@@ -3862,38 +3990,6 @@ int main(int argc, char *argv[]) {
 	 * backend. */
 	wl_list_init(&server.outputs);
 	server.new_output.notify = server_new_output;
-/* Sends stderr (ours and every program we spawn) to <state dir>/seiza/seiza.log, keeping the
- * previous run as seiza.log.old. SEIZA_LOG=stderr opts out. Failure leaves stderr untouched. */
-static void log_to_file(void) {
-	const char *opt = getenv("SEIZA_LOG");
-	if (opt && !strcmp(opt, "stderr")) {
-		return;
-	}
-	const char *state = getenv("XDG_STATE_HOME"), *home = getenv("HOME");
-	char dir[512], path[600], old[610];
-	if (state && state[0]) {
-		snprintf(dir, sizeof dir, "%s/seiza", state);
-	} else if (home && home[0]) {
-		snprintf(dir, sizeof dir, "%s/.local/state/seiza", home);
-	} else {
-		return;
-	}
-	char parent[512];
-	snprintf(parent, sizeof parent, "%s", dir);
-	char *slash = strrchr(parent, '/');
-	if (slash) {
-		*slash = 0;
-		mkdir(parent, 0755); /* shortcut: only the last two levels are created */
-	}
-	mkdir(dir, 0755);
-	snprintf(path, sizeof path, "%s/seiza.log", dir);
-	snprintf(old, sizeof old, "%s.old", path);
-	rename(path, old);
-	if (freopen(path, "w", stderr)) {
-		setvbuf(stderr, NULL, _IOLBF, 0);
-	}
-}
-
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
 
 	/* Create a scene graph. This is a wlroots abstraction that handles all
@@ -3905,7 +4001,6 @@ static void log_to_file(void) {
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 	server.layers[0] = wlr_scene_tree_create(&server.scene->tree);
-	log_to_file();
 	server.layers[1] = wlr_scene_tree_create(&server.scene->tree);
 	server.canvas = wlr_scene_tree_create(&server.scene->tree);
 	server.xtop = wlr_scene_tree_create(server.canvas);
@@ -3920,6 +4015,7 @@ static void log_to_file(void) {
 	wl_list_init(&server.layer_surfaces);
 	server.zoom = 1.0;
 	wl_list_init(&server.stars);
+	wl_list_init(&server.ghosts);
 	/* Start in star 0: its territory is centered so the default camera
 	 * (0,0) already looks at it on a 1920x1080 screen. */
 	persist_startup(&server);
