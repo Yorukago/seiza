@@ -9,6 +9,7 @@ pub mod docs;
 pub mod draw;
 pub mod figure;
 pub mod kit;
+pub mod notes;
 pub mod palette;
 pub mod sys;
 pub mod voyager;

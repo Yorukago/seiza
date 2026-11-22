@@ -110,13 +110,14 @@ struct Polled {
     media: Option<(bool, String)>,
     net: &'static str,
     bt: bool,
+    unread: usize, // notifications the panel has not shown yet
 }
 
 /// Reads every 2 s, or soon after a poke (something changed the volume); returns the poke end.
 fn spawn_poller(cell: Arc<Mutex<Option<Polled>>>) -> mpsc::Sender<()> {
     let (poke, poked) = mpsc::channel::<()>();
     thread::spawn(move || loop {
-        let p = Polled { volume: read_volume("@DEFAULT_AUDIO_SINK@"), mic: read_volume("@DEFAULT_AUDIO_SOURCE@"), media: read_media(), net: read_net(), bt: read_bt() };
+        let p = Polled { volume: read_volume("@DEFAULT_AUDIO_SINK@"), mic: read_volume("@DEFAULT_AUDIO_SOURCE@"), media: read_media(), net: read_net(), bt: read_bt(), unread: seiza_common::notes::unread() };
         *cell.lock().unwrap() = Some(p);
         match poked.recv_timeout(Duration::from_secs(2)) {
             Ok(()) => thread::sleep(Duration::from_millis(80)), // let the wpctl that caused the poke finish
@@ -198,6 +199,7 @@ struct Bar {
     battery: Option<(u32, bool)>,
     volume: Option<(u32, bool)>,
     last_poll: Option<Instant>,
+    unread: usize, // notifications the panel has not shown yet: a dot on the network icons, which open it
     polled: Arc<Mutex<Option<Polled>>>, // the worker's latest reading
     poke: mpsc::Sender<()>,             // read again now, not in 2 s
     vol_hit: (f32, f32), // x range of the volume widget: scroll changes it, click mutes
@@ -358,6 +360,9 @@ impl Bar {
                 _ => rc.icon_wifi(x + 8.0, cy - 1.0, 7.0, off),
             }
             rc.icon_bluetooth(x + 32.0, cy, 8.0, if self.bt { accent } else { off });
+            if self.unread > 0 {
+                rc.round_rect(x + 39.0, cy - 15.0, 7.0, 7.0, 3.5, accent); // something new in the panel
+            }
             self.hit(x - 12.0, 64.0, Act::Panel);
         }
         if self.show.quick {
@@ -479,8 +484,8 @@ impl Bar {
         }
         let polled = self.polled.lock().unwrap().clone();
         if let Some(p) = polled {
-            if (&p.media, p.mic, p.net, p.bt, p.volume) != (&self.media, self.mic, self.net, self.bt, self.volume) {
-                (self.media, self.mic, self.net, self.bt, self.volume) = (p.media, p.mic, p.net, p.bt, p.volume);
+            if (&p.media, p.mic, p.net, p.bt, p.volume, p.unread) != (&self.media, self.mic, self.net, self.bt, self.volume, self.unread) {
+                (self.media, self.mic, self.net, self.bt, self.volume, self.unread) = (p.media, p.mic, p.net, p.bt, p.volume, p.unread);
                 self.dirty = true;
             }
         }
@@ -705,6 +710,7 @@ fn main() {
         battery: None,
         volume: None,
         last_poll: None,
+        unread: 0,
         polled,
         poke,
         vol_hit: (0.0, 0.0),

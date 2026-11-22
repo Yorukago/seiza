@@ -116,7 +116,7 @@ fn parse_notes(s: &str) -> Vec<Note> {
 }
 
 fn notes_path() -> std::path::PathBuf {
-    std::path::Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("seiza-notifications")
+    seiza_common::notes::log_path()
 }
 
 fn ago(secs: u64) -> String {
@@ -679,6 +679,7 @@ impl Panel {
             }
             Some(Hit::Clear) => {
                 let _ = std::fs::File::create(notes_path());
+                seiza_common::notes::mark_seen();
                 self.st.notes.clear();
                 self.dirty = true;
             }
@@ -871,7 +872,7 @@ fn main() {
         dirty: true,
         exit: false,
         entered: false,
-        st: State::read(),
+        st: { let st = State::read(); seiza_common::notes::mark_seen(); st }, // opening the panel is reading them
         hits: vec![],
         hover: None,
         drag: None,
