@@ -1,20 +1,25 @@
 //! The settings page: state, layout and drawing, with no Wayland in it so `--dump`
 //! and the tests can run it. Every setting lives in one of Seiza's small config
 //! files (see `seiza_common::config`); the programs that care read their own.
+//! Pages are stars on a thread across the top; each page is cards of rows, and typing searches them all.
 
 use std::collections::HashMap;
 
 use seiza_common::{
     config,
     draw::{load_font, Canvas, Text},
+    kit::{self, Thread, PILL_W},
     palette::{palette, rgba},
 };
 
-pub const W: f32 = 900.0;
-pub const H: f32 = 640.0;
-const NAV_W: f32 = 190.0;
-const ROW_H: f32 = 78.0;
-const FIT: usize = 6; // rows that fit above the footer; a longer page scrolls by whole rows
+const PAD: f32 = 30.0; // between the card's edge and its content
+const TOP: f32 = 168.0; // where a page's body starts, from the card's top
+const FOOT: f32 = 60.0; // the strip under the body
+const GAP: f32 = 18.0; // between cards
+const MINCOL: f32 = 430.0; // the narrowest a column of cards may get
+const ROW: f32 = 58.0; // a row with its control beside the words
+const INNER: f32 = 18.0; // between a card's edge and its rows
+const UNIT: f32 = 60.0; // one scroll step, in pixels
 
 #[derive(Clone, Copy)]
 pub enum Ctl {
@@ -34,75 +39,99 @@ pub struct Row {
     pub default: &'static str,
 }
 
+pub struct Card {
+    pub title: &'static str,
+    pub rows: Vec<Row>,
+}
+
 pub struct Page {
     pub name: &'static str,
     pub blurb: &'static str,
-    pub rows: Vec<Row>,
+    pub cards: Vec<Card>,
 }
 
 pub fn pages() -> Vec<Page> {
     let row = |id, label, hint, ctl, default| Row { id, label, hint, ctl, default };
     let tog = |id, label, hint, default| row(id, label, hint, Ctl::Toggle, default);
+    let card = |title, rows| Card { title, rows };
     vec![
-        Page { name: "look", blurb: "seiza reads a picture and borrows its colors.", rows: vec![
-            row("look/swatches", "the sky now", "the colors every program draws with", Ctl::Swatches, ""),
-            row("look/wallpaper", "colors from picture", "wallust reads it", Ctl::Path, ""),
-            row("look/random", "surprise me", "one from the same folder", Ctl::Button("random"), ""),
-            row("look/style", "palette style", "how boldly the picture colors the sky", Ctl::Choice(&["soft", "hard", "comp", "salient"]), "soft"),
-            row("look/apply", "borrow the colors", "restarts the bar, the sky and the widgets", Ctl::Button("apply"), ""),
-            tog("look/contrast_guard", "keep text readable", "swaps in cream text if a picture is too dim", "1"),
+        Page { name: "sky", blurb: "seiza reads a picture and borrows its colors. the stars and the camera live here too.", cards: vec![
+            card("colors", vec![
+                row("look/swatches", "the sky now", "the colors every program draws with", Ctl::Swatches, ""),
+                row("look/wallpaper", "colors from picture", "wallust reads it", Ctl::Path, ""),
+                row("look/random", "surprise me", "one from the same folder", Ctl::Button("random"), ""),
+                row("look/style", "palette style", "how boldly the picture colors the sky", Ctl::Choice(&["soft", "hard", "comp", "salient"]), "soft"),
+                row("look/apply", "borrow the colors", "restarts the bar, the sky and the widgets", Ctl::Button("apply"), ""),
+                tog("look/contrast_guard", "keep text readable", "swaps in cream text if a picture is too dim", "1"),
+            ]),
+            card("night", vec![
+                row("sky/nebula", "painted sky", "how much cloud the night shows", Ctl::Slider(0.0, 1.0, 0.05), "0.4"),
+                tog("sky/shooting", "shooting stars", "now and then", "1"),
+                tog("sky/labels", "star names", "in the overview", "1"),
+                tog("sky/threads", "threads", "the lines joining stars in the overview", "1"),
+            ]),
+            card("motion", vec![
+                row("motion/pan_secs", "pan duration", "how long a pan between altitudes takes", Ctl::Slider(0.1, 2.0, 0.05), "0.35"),
+                row("motion/easing", "easing", "how a pan settles", Ctl::Choice(&["drift", "glide", "float", "calm", "bounce"]), "drift"),
+                tog("motion/reduce", "reduce motion", "pans become jumps", "0"),
+            ]),
         ]},
-        Page { name: "window", blurb: "the frame around every window.", rows: vec![
-            row("frame/radius", "corner roundness", "in pixels", Ctl::Slider(0.0, 32.0, 1.0), "14"),
-            row("frame/border", "frame thickness", "in pixels", Ctl::Slider(0.0, 8.0, 1.0), "2"),
-            row("frame/glow", "glow", "the bloom behind a window", Ctl::Choice(&["off", "soft", "bright"]), "soft"),
+        Page { name: "windows", blurb: "the frame around every window.", cards: vec![
+            card("frame", vec![
+                row("frame/radius", "corner roundness", "in pixels", Ctl::Slider(0.0, 32.0, 1.0), "14"),
+                row("frame/border", "frame thickness", "in pixels", Ctl::Slider(0.0, 8.0, 1.0), "2"),
+                row("frame/glow", "glow", "the bloom behind a window", Ctl::Choice(&["off", "soft", "bright"]), "soft"),
+            ]),
         ]},
-        Page { name: "bar", blurb: "what the bar says.", rows: vec![
-            row("look/clock", "clock", "24 hours or 12", Ctl::Choice(&["24", "12"]), "24"),
-            tog("bar/date", "date", "next to the clock", "1"),
-            tog("bar/stats", "system stats", "cpu and ram", "1"),
-            tog("bar/volume", "volume", "the speaker level", "1"),
-            tog("bar/battery", "battery", "only where there is one", "1"),
-            tog("bar/dots", "star dots", "one per star; click to fly there", "1"),
-            tog("bar/media", "now playing", "click to play or pause", "1"),
-            tog("bar/quick", "quick buttons", "screenshot and microphone", "1"),
-            tog("bar/net", "network", "network and bluetooth", "1"),
-            tog("bar/weather", "weather", "the temperature (asks wttr.in)", "0"),
+        Page { name: "bar", blurb: "what the bar says.", cards: vec![
+            card("time", vec![
+                row("look/clock", "clock", "24 hours or 12", Ctl::Choice(&["24", "12"]), "24"),
+                tog("bar/date", "date", "next to the clock", "1"),
+            ]),
+            card("system", vec![
+                tog("bar/stats", "system stats", "cpu and ram", "1"),
+                tog("bar/volume", "volume", "the speaker level", "1"),
+                tog("bar/battery", "battery", "only where there is one", "1"),
+                tog("bar/net", "network", "network and bluetooth", "1"),
+            ]),
+            card("extras", vec![
+                tog("bar/dots", "star dots", "one per star; click to fly there", "1"),
+                tog("bar/media", "now playing", "click to play or pause", "1"),
+                tog("bar/quick", "quick buttons", "screenshot and microphone", "1"),
+                tog("bar/weather", "weather", "the temperature (asks wttr.in)", "0"),
+            ]),
         ]},
-        Page { name: "panel", blurb: "the side panel.", rows: vec![
-            tog("panel/weather", "weather", "a card with the temperature (asks wttr.in)", "0"),
-            tog("panel/calendar", "calendar", "this month, today lit", "0"),
+        Page { name: "cards", blurb: "what lives on the sky, and in the side panel.", cards: vec![
+            card("on the sky", vec![
+                tog("widgets/clock", "clock", "the time, and the moon's phase", "1"),
+                tog("widgets/calendar", "calendar", "this month", "1"),
+                tog("widgets/system", "system", "cpu, ram and temperature", "1"),
+                tog("widgets/media", "media", "what is playing, from any MPRIS player", "1"),
+                tog("widgets/weather", "weather", "from wttr.in; set weather.place in seiza.kdl", "0"),
+                tog("widgets/agenda", "agenda", "next events; set calendar.source in seiza.kdl", "0"),
+            ]),
+            card("side panel", vec![
+                tog("panel/weather", "weather", "a card with the temperature (asks wttr.in)", "0"),
+                tog("panel/calendar", "calendar", "this month, today lit", "0"),
+            ]),
         ]},
-        Page { name: "stars", blurb: "the sky behind everything.", rows: vec![
-            row("sky/nebula", "painted sky", "how much cloud the night shows", Ctl::Slider(0.0, 1.0, 0.05), "0.4"),
-            tog("sky/shooting", "shooting stars", "now and then", "1"),
-            tog("sky/labels", "star names", "in the overview", "1"),
-            tog("sky/threads", "threads", "the lines joining stars in the overview", "1"),
+        Page { name: "yoru", blurb: "how the launcher and the menus behave.", cards: vec![
+            card("yoru", vec![
+                tog("yoru/lines", "Yoru's lines", "the little quips on the lock screen and launcher", "1"),
+                tog("yoru/confirm", "confirm power actions", "press twice to shut down or log out", "1"),
+                row("ysh/voice", "ysh voice", "how much Yoru says in the shell: nothing, hi and bye, or everything", Ctl::Choice(&["off", "quiet", "full"]), "full"),
+            ]),
+            card("launcher", vec![
+                row("launcher/style", "launcher look", "a list, or apps as stars", Ctl::Choice(&["list", "stars"]), "list"),
+                row("launcher/search", "web search", "what a query that is no app asks", Ctl::Choice(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo"),
+                row("launcher/terminal", "terminal", "runs apps that want one; kitty if empty", Ctl::Path, ""),
+            ]),
         ]},
-        Page { name: "motion", blurb: "seiza is never in a hurry.", rows: vec![
-            row("motion/pan_secs", "pan duration", "how long a pan between altitudes takes", Ctl::Slider(0.1, 2.0, 0.05), "0.35"),
-            row("motion/easing", "easing", "how a pan settles", Ctl::Choice(&["drift", "glide", "float", "calm", "bounce"]), "drift"),
-            tog("motion/reduce", "reduce motion", "pans become jumps", "0"),
-        ]},
-        Page { name: "yoru", blurb: "how the launcher and the menus behave.", rows: vec![
-            tog("yoru/lines", "Yoru's lines", "the little quips on the lock screen and launcher", "1"),
-            tog("yoru/confirm", "confirm power actions", "press twice to shut down or log out", "1"),
-            row("launcher/style", "launcher look", "a list, or apps as stars", Ctl::Choice(&["list", "stars"]), "list"),
-            row("launcher/search", "web search", "what a query that is no app asks", Ctl::Choice(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo"),
-            row("ysh/voice", "ysh voice", "how much Yoru says in the shell: nothing, hi and bye, or everything", Ctl::Choice(&["off", "quiet", "full"]), "full"),
-            row("launcher/terminal", "terminal", "runs apps that want one; kitty if empty", Ctl::Path, ""),
-        ]},
-        Page { name: "widgets", blurb: "what lives on the sky.", rows: vec![
-            tog("widgets/clock", "clock", "the time, and the moon's phase", "1"),
-            tog("widgets/calendar", "calendar", "this month", "1"),
-            tog("widgets/system", "system", "cpu, ram and temperature", "1"),
-            tog("widgets/media", "media", "what is playing, from any MPRIS player", "1"),
-            tog("widgets/weather", "weather", "from wttr.in; set weather.place in seiza.kdl", "0"),
-            tog("widgets/agenda", "agenda", "next events; set calendar.source in seiza.kdl", "0"),
-        ]},
-        Page { name: "keys", blurb: "keys are written in ~/.config/seiza/seiza.kdl.", rows: vec![
-            row("keys/help", "show all bindings", "asks seiza to list them", Ctl::Button("show"), ""),
-            row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
+        Page { name: "keys", blurb: "keys are written in ~/.config/seiza/seiza.kdl.", cards: vec![
+            card("bindings", vec![
+                row("keys/help", "show all bindings", "asks seiza to list them", Ctl::Button("show"), ""),
+                row("keys/reload", "reload keys", "after editing the file", Ctl::Button("reload"), ""),
+            ]),
         ]},
     ]
 }
@@ -175,17 +204,140 @@ fn thumbnail(path: &str) -> Option<(usize, usize, Vec<u32>)> {
     Some((w, h, px.chunks(3).map(|c| 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect()))
 }
 
+type Rect = (f32, f32, f32, f32); // x, y, w, h
+
+/// One row, placed: where it is and where its control is, relative to the page body.
+struct Placed {
+    id: &'static str,
+    ctl: Ctl,
+    label: &'static str,
+    lines: Vec<String>, // the hint, wrapped
+    row: Rect,
+    ctl_box: Rect,
+    first: bool,
+    thumb: bool, // a picture preview sits under the words
+}
+
+struct Layout {
+    cards: Vec<(String, Rect)>,
+    rows: Vec<Placed>,
+    total: f32, // the tallest column, scrolled or not
+}
+
+/// The cards to show: the page's own, or, while searching, the rows of every page that match all the words
+/// typed (one card per card that has any).
+fn view<'a>(pages: &'a [Page], page: usize, query: &str) -> Vec<(String, Vec<&'a Row>)> {
+    if query.trim().is_empty() {
+        return pages[page].cards.iter().map(|c| (c.title.to_string(), c.rows.iter().collect())).collect();
+    }
+    let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+    let mut out = vec![];
+    for p in pages {
+        for c in &p.cards {
+            let rows: Vec<&Row> = c
+                .rows
+                .iter()
+                .filter(|r| {
+                    let hay = format!("{} {} {} {}", p.name, c.title, r.label, r.hint).to_lowercase();
+                    words.iter().all(|w| hay.contains(w.as_str()))
+                })
+                .collect();
+            if !rows.is_empty() {
+                out.push((format!("{} \u{b7} {}", p.name, c.title), rows));
+            }
+        }
+    }
+    out
+}
+
+/// How big a control is (a slider's width is whatever its row leaves).
+fn ctl_size(ctl: Ctl, t13: &mut Text) -> (f32, f32) {
+    match ctl {
+        Ctl::Slider(..) => (0.0, 24.0),
+        Ctl::Choice(opts) => (opts.iter().map(|o| t13.width(o) + 30.0).sum::<f32>() + 8.0, 34.0),
+        Ctl::Toggle => (50.0, 28.0),
+        Ctl::Path => (300.0, 36.0),
+        Ctl::Button(t) => ((t13.width(t) + 44.0).max(90.0), 34.0),
+        Ctl::Swatches => (6.0 * 30.0, 24.0),
+    }
+}
+
+/// Deal `view` into columns (as many as are wide enough, in order, each card into the shortest) and place
+/// every row, scrolled by `scroll` pixels. A control sits beside its words; sliders and wide choices go under.
+fn layout(view: &[(String, Vec<&Row>)], t15: &mut Text, t13: &mut Text, thumb: bool, cw: f32, scroll: f32) -> Layout {
+    let cols = if cw >= 2.0 * MINCOL + GAP { 2 } else { 1 };
+    let col_w = (cw - GAP * (cols - 1) as f32) / cols as f32;
+    let inner = col_w - 2.0 * INNER;
+    // per row: (control under the words, its height, control size, hint lines)
+    let shapes: Vec<Vec<(bool, f32, (f32, f32), Vec<String>)>> = view
+        .iter()
+        .map(|(_, rows)| {
+            rows.iter()
+                .map(|r| {
+                    let (mut w, h) = ctl_size(r.ctl, t13);
+                    let label_w = t15.width(r.label);
+                    if matches!(r.ctl, Ctl::Path) {
+                        w = w.min(inner - label_w - 24.0).max(120.0); // a text field gives way to its label
+                    }
+                    let crowded = !matches!(r.ctl, Ctl::Path) && label_w + w + 24.0 > inner;
+                    let under = matches!(r.ctl, Ctl::Slider(..)) || (matches!(r.ctl, Ctl::Choice(_)) && w > inner * 0.35) || crowded;
+                    let lines = kit::wrap(t13, r.hint, if under { inner } else { inner - w - 16.0 });
+                    let mut rh = if under { 58.0 + h + 12.0 } else { ROW } + 16.0 * (lines.len() - 1) as f32;
+                    if thumb && r.id == "look/wallpaper" {
+                        rh += 62.0;
+                    }
+                    (under, rh, (w, h), lines)
+                })
+                .collect()
+        })
+        .collect();
+    let heights: Vec<f32> = shapes.iter().map(|rows| kit::CARD_HEAD + rows.iter().map(|s| s.1).sum::<f32>() + 4.0).collect();
+    let mut used = vec![0.0f32; cols];
+    let mut out = Layout { cards: vec![], rows: vec![], total: 0.0 };
+    for (i, (title, rows)) in view.iter().enumerate() {
+        let c = (0..cols).min_by(|&a, &b| used[a].total_cmp(&used[b])).unwrap_or(0);
+        let (x, top) = (c as f32 * (col_w + GAP), used[c] - scroll);
+        used[c] += heights[i] + GAP;
+        out.cards.push((title.clone(), (x, top, col_w, heights[i])));
+        let mut ry = top + kit::CARD_HEAD;
+        for (k, r) in rows.iter().enumerate() {
+            let (under, rh, (w, h), lines) = shapes[i][k].clone();
+            let ctl_box = if matches!(r.ctl, Ctl::Slider(..)) {
+                (x + INNER + 48.0, ry + 58.0, inner - 48.0, h)
+            } else if under {
+                (x + INNER, ry + 58.0, w, h)
+            } else {
+                (x + col_w - INNER - w, ry + (ROW - h) / 2.0, w, h)
+            };
+            out.rows.push(Placed { id: r.id, ctl: r.ctl, label: r.label, lines, row: (x, ry, col_w, rh), ctl_box, first: k == 0, thumb: thumb && r.id == "look/wallpaper" });
+            ry += rh;
+        }
+    }
+    out.total = used.iter().cloned().fold(0.0, f32::max);
+    out
+}
+
 pub struct Ui {
     pages: Vec<Page>,
     pub page: usize,
-    pub row0: usize, // first row shown on a page too long for the card
+    scroll: f32,       // pixels scrolled off the top of the body
+    query: String,     // what is typed in the search pill
     pub values: HashMap<&'static str, String>,
-    pub focus: Option<&'static str>, // the text field being typed into
+    pub focus: Option<&'static str>, // the text field being typed into, or the slider being dragged
     pub msg: String,
     pub restart: Vec<&'static str>, // programs to restart when the page closes
     thumb: Option<(usize, usize, Vec<u32>)>,
+    hover: Option<usize>, // the page star under the pointer
+    glide: kit::Glide,    // the big star moving to another page
+    stale: bool,          // what is in `content` is out of date
+    content: Option<Canvas>,
+    back: Option<Canvas>, // the card's plate
+    body: Option<Canvas>, // the page's body
+    body_stale: bool,
+    w: f32, // the card's size: most of the screen
+    h: f32,
     t22: Text,
-    t17: Text,
+    t15: Text,
     t13: Text,
 }
 
@@ -202,7 +354,7 @@ impl Ui {
         let pages = pages();
         let mut values = HashMap::new();
         let widgets = std::fs::read_to_string(config::path("widgets")).ok();
-        for r in pages.iter().flat_map(|p| &p.rows) {
+        for r in pages.iter().flat_map(|p| p.cards.iter().flat_map(|c| &c.rows)) {
             let v = match (r.id.split_once('/'), &widgets) {
                 (Some(("widgets", name)), Some(text)) => if text.lines().any(|l| l.trim() == name) { "1" } else { "0" }.to_string(),
                 (Some(("ysh", _)), _) => ysh_voice(&std::fs::read_to_string(ysh_rc()).unwrap_or_default()).unwrap_or(r.default).to_string(),
@@ -212,55 +364,117 @@ impl Ui {
             };
             values.insert(r.id, v);
         }
-        let mut ui = Ui { pages, page: 0, row0: 0, values, focus: None, msg: "that's all for now..".into(), restart: vec![], thumb: None, t22: Text::new(load_font(), 24.0), t17: Text::new(load_font(), 17.0), t13: Text::new(load_font(), 13.0) };
+        let font = load_font();
+        let mut ui = Ui {
+            pages,
+            page: 0,
+            scroll: 0.0,
+            query: String::new(),
+            values,
+            focus: None,
+            msg: "most apply at once  \u{b7}  the sky and the cards when this closes".into(),
+            restart: vec![],
+            thumb: None,
+            hover: None,
+            glide: kit::Glide::default(),
+            stale: true,
+            content: None,
+            back: None,
+            body: None,
+            body_stale: true,
+            w: 1200.0,
+            h: 740.0,
+            t22: Text::new(font.clone(), 24.0),
+            t15: Text::new(font.clone(), 15.0),
+            t13: Text::new(font, 13.0),
+        };
         ui.load_thumb();
         ui
     }
 
     pub fn load_thumb(&mut self) {
         self.thumb = Some(self.values["look/wallpaper"].as_str()).filter(|p| !p.trim().is_empty()).and_then(thumbnail);
+        self.stale = true;
+        self.body_stale = true;
     }
 
-    /// Scroll a long page by `d` rows (wheel, PageUp/PageDown); a short page stays put.
-    pub fn scroll_by(&mut self, d: i32) {
-        let max = self.rows().len().saturating_sub(FIT) as i32;
-        self.row0 = (self.row0 as i32 + d).clamp(0, max) as usize;
+    fn cw(&self) -> f32 {
+        self.w - 2.0 * PAD
     }
 
-    pub fn set_page(&mut self, i: usize) {
-        self.page = i;
-        self.row0 = 0;
+    fn body_h(&self) -> f32 {
+        self.h - TOP - FOOT
     }
 
-    pub fn rows(&self) -> &[Row] {
-        &self.pages[self.page].rows
+    /// Size the card to the screen: most of it, so the desktop still shows around it.
+    fn fit(&mut self, w: f32, h: f32) {
+        self.w = (w * 0.78).clamp(1000.0, 1500.0).min(w - 40.0);
+        self.h = (h * 0.82).clamp(640.0, 880.0).min(h - 40.0);
     }
 
-    pub fn page_names(&self) -> Vec<&'static str> {
-        self.pages.iter().map(|p| p.name).collect()
-    }
-
+    /// The card sits a little below the middle, under the bar.
     fn origin(&self, w: f32, h: f32) -> (f32, f32) {
-        ((w - W) / 2.0, (h - H) / 2.0)
+        (((w - self.w) / 2.0).round(), ((h - self.h) / 2.0 + 18.0).round())
     }
 
-    /// The control's box for row `i`, relative to the panel.
-    fn control(&self, i: usize) -> (f32, f32, f32, f32) {
-        let (w, h) = match self.rows()[i].ctl {
-            Ctl::Slider(..) => (240.0, 24.0),
-            Ctl::Choice(opts) => (opts.len() as f32 * 84.0, 34.0),
-            Ctl::Toggle => (50.0, 28.0),
-            Ctl::Path => (330.0, 36.0),
-            Ctl::Button(_) => (110.0, 36.0),
-            Ctl::Swatches => (6.0 * 34.0, 28.0),
-        };
-        let x = W - 36.0 - w;
-        let y = 112.0 + (i as f32 - self.row0 as f32) * ROW_H + (ROW_H - h) / 2.0 - 6.0;
-        (x, y, w, h)
+    /// The row of page stars across the card's top.
+    fn thread(&self, ox: f32, oy: f32) -> Thread {
+        Thread::new(ox + 200.0, ox + self.w - PAD - PILL_W - 30.0, oy + 40.0, self.pages.len())
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    fn lay(&mut self) -> Layout {
+        let (cw, thumb, scroll) = (self.cw(), self.thumb.is_some(), self.scroll);
+        let view = view(&self.pages, self.page, &self.query);
+        layout(&view, &mut self.t15, &mut self.t13, thumb, cw, scroll)
+    }
+
+    /// Scroll by `d` steps (wheel, arrows, PageUp/PageDown); a page that fits stays put.
+    pub fn scroll_by(&mut self, d: f32) {
+        let max = (self.lay().total - self.body_h()).max(0.0);
+        self.scroll = (self.scroll + d * UNIT).clamp(0.0, max);
+        self.stale = true;
+        self.body_stale = true;
+    }
+
+    pub fn go(&mut self, page: usize) {
+        let page = page.min(self.pages.len() - 1);
+        if page != self.page {
+            self.glide.start(self.glide.pos(self.page));
+        }
+        self.page = page;
+        self.query.clear();
+        self.scroll = 0.0;
+        self.stale = true;
+        self.body_stale = true;
+    }
+
+    /// True while a frame is still owed: the star is moving, or what is shown is out of date.
+    pub fn pending(&self) -> bool {
+        self.stale
+    }
+
+    /// The pointer moved to `at` (None: it left); true if the highlight changed and a redraw is due.
+    pub fn hover(&mut self, at: Option<(f32, f32)>, w: f32, h: f32) -> bool {
+        self.fit(w, h);
+        let (ox, oy) = self.origin(w, h);
+        let now = at.and_then(|(x, y)| self.thread(ox, oy).hit(x, y));
+        let changed = std::mem::replace(&mut self.hover, now) != now;
+        self.stale |= changed;
+        changed
     }
 
     pub fn set(&mut self, id: &'static str, val: String) -> Effect {
         self.values.insert(id, val.clone());
+        self.stale = true;
+        self.body_stale = true;
         let (file, key) = id.split_once('/').unwrap();
         let saved = match file {
             "widgets" => {
@@ -310,60 +524,94 @@ impl Ui {
         }
     }
 
+    /// A slider's value for a pointer at body x `bx`.
+    fn slide(&mut self, p: &Placed, bx: f32) -> Effect {
+        let Ctl::Slider(min, max, step) = p.ctl else { return Effect::None };
+        let (cx, _, cw, _) = p.ctl_box;
+        let t = ((bx - cx) / cw).clamp(0.0, 1.0);
+        let v = ((min + (max - min) * t) / step).round() * step;
+        self.set(p.id, if step.fract() == 0.0 { format!("{v}") } else { format!("{v:.2}") })
+    }
+
     /// A press (or drag) at a screen point.
     pub fn press(&mut self, x: f32, y: f32, w: f32, h: f32, dragging: bool) -> Effect {
+        self.fit(w, h);
         let (ox, oy) = self.origin(w, h);
-        let (px, py) = (x - ox, y - oy);
-        if !dragging {
-            self.focus = None;
+        if dragging {
+            // a slider stays under the pointer even when the pointer leaves it
+            let Some(id) = self.focus else { return Effect::None };
+            let lay = self.lay();
+            return match lay.rows.iter().find(|p| p.id == id) {
+                Some(p) => self.slide(p, x - ox - PAD),
+                None => Effect::None,
+            };
         }
-        if !dragging && px >= 0.0 && px < NAV_W {
-            if let Some(i) = (0..self.pages.len()).find(|&i| py >= 112.0 + i as f32 * 44.0 && py < 112.0 + i as f32 * 44.0 + 40.0) {
-                self.set_page(i);
-            }
+        self.focus = None;
+        if let Some(i) = self.thread(ox, oy).hit(x, y) {
+            self.go(i);
             return Effect::None;
         }
-        let (first, last) = (self.row0, (self.row0 + FIT).min(self.rows().len()));
-        for i in first..last {
-            let (cx, cy, cw, ch) = self.control(i);
-            let id = self.rows()[i].id;
-            let inside = px >= cx - 6.0 && px < cx + cw + 6.0 && py >= cy - 6.0 && py < cy + ch + 6.0;
-            match self.rows()[i].ctl {
-                Ctl::Slider(min, max, step) if inside || (dragging && self.focus == Some(id)) => {
-                    self.focus = Some(id); // dragging stays on this slider even when the pointer leaves it
-                    let t = ((px - cx) / cw).clamp(0.0, 1.0);
-                    let v = (min + (max - min) * t) / step;
-                    let v = v.round() * step;
-                    return self.set(id, if step.fract() == 0.0 { format!("{v}") } else { format!("{v:.2}") });
-                }
-                Ctl::Choice(opts) if inside && !dragging => {
-                    let n = (((px - cx) / cw) * opts.len() as f32) as usize;
-                    return self.set(id, opts[n.min(opts.len() - 1)].to_string());
-                }
-                Ctl::Toggle if inside && !dragging => {
-                    let on = self.values[id] == "1";
-                    return self.set(id, if on { "0" } else { "1" }.into());
-                }
-                Ctl::Path if inside && !dragging => self.focus = Some(id),
-                Ctl::Button(_) if inside && !dragging => return self.set(id, "1".into()),
-                _ => {}
+        let (bx, by) = (x - ox - PAD, y - oy - TOP);
+        if by < 0.0 || by > self.body_h() {
+            return Effect::None;
+        }
+        let lay = self.lay();
+        for p in &lay.rows {
+            let (cx, cy, cw, ch) = p.ctl_box;
+            if !(bx >= cx - 6.0 && bx < cx + cw + 6.0 && by >= cy - 6.0 && by < cy + ch + 6.0) {
+                continue;
             }
+            return match p.ctl {
+                Ctl::Slider(..) => {
+                    self.focus = Some(p.id); // dragging stays on this slider
+                    self.slide(p, bx)
+                }
+                Ctl::Choice(opts) => {
+                    let mut sx = cx + 4.0;
+                    let mut pick = opts[opts.len() - 1];
+                    for o in opts {
+                        let sw = self.t13.width(o) + 30.0;
+                        if bx < sx + sw {
+                            pick = o;
+                            break;
+                        }
+                        sx += sw;
+                    }
+                    self.set(p.id, pick.to_string())
+                }
+                Ctl::Toggle => {
+                    let on = self.values[p.id] == "1";
+                    self.set(p.id, if on { "0" } else { "1" }.into())
+                }
+                Ctl::Path => {
+                    self.focus = Some(p.id);
+                    self.stale = true;
+                    self.body_stale = true;
+                    Effect::None
+                }
+                Ctl::Button(_) => self.set(p.id, "1".into()),
+                Ctl::Swatches => Effect::None,
+            };
         }
         Effect::None
     }
 
     pub fn release(&mut self) {
-        if self.focus.is_some_and(|id| matches!(self.rows().iter().find(|r| r.id == id).map(|r| &r.ctl), Some(Ctl::Slider(..)))) {
+        let slider = |id: &str| self.pages.iter().flat_map(|p| p.cards.iter().flat_map(|c| &c.rows)).any(|r| r.id == id && matches!(r.ctl, Ctl::Slider(..)));
+        if self.focus.is_some_and(slider) {
             self.focus = None;
         }
     }
 
-    /// Typing into the focused text field.
+    /// Typing goes into the focused text field, else into the search.
     pub fn type_text(&mut self, s: &str) {
         if let Some(id) = self.focus {
             self.values.get_mut(id).unwrap().push_str(s);
             let v = self.values[id].clone();
             self.set(id, v);
+        } else {
+            self.query.push_str(s);
+            self.query_changed();
         }
     }
 
@@ -372,118 +620,210 @@ impl Ui {
             self.values.get_mut(id).unwrap().pop();
             let v = self.values[id].clone();
             self.set(id, v);
+        } else if self.query.pop().is_some() {
+            self.query_changed();
         }
     }
 
-    pub fn render(&mut self, w: usize, h: usize) -> Canvas {
+    fn query_changed(&mut self) {
+        self.scroll = 0.0;
+        self.stale = true;
+        self.body_stale = true;
+    }
+
+    /// Esc: leave the text field, else empty the search. False if there was nothing to leave: the caller closes.
+    pub fn escape(&mut self) -> bool {
+        let had = self.focus.take().is_some() || !self.query.is_empty();
+        self.query.clear();
+        if had {
+            self.query_changed();
+        }
+        had
+    }
+
+    /// The frame at visibility `e` (0 = gone, 1 = fully there): the card rises from below while it fades in.
+    pub fn render(&mut self, w: usize, h: usize, e: f32) -> Canvas {
+        self.fit(w as f32, h as f32);
+        let g = self.glide.active();
+        if self.stale || g || self.content.as_ref().is_none_or(|c| c.w != w || c.h != h) {
+            self.content = Some(self.draw_card(w, h));
+            self.stale = g; // a glide that was still going when this was drawn owes one more frame
+            if !g {
+                self.glide.clear();
+            }
+        }
+        let oy = self.origin(w as f32, h as f32).1;
+        kit::appear(self.content.as_ref().expect("drawn above"), e, (oy as usize).saturating_sub(24)..(oy + self.h) as usize + 24)
+    }
+
+    fn draw_card(&mut self, w: usize, h: usize) -> Canvas {
         let p = palette();
-        let mut cv = Canvas { w, h, px: vec![0; w * h] };
-        let flat = {
-            let a = 0.86;
-            let ch = |v: f32| (v * a * 255.0) as u32;
-            ((a * 255.0) as u32) << 24 | ch(p.sky[0]) << 16 | ch(p.sky[1]) << 8 | ch(p.sky[2])
-        };
-        cv.px.fill(flat);
         let (ox, oy) = self.origin(w as f32, h as f32);
-        cv.round_rect(ox - 1.0, oy - 1.0, W + 2.0, H + 2.0, 25.0, rgba(p.star, 0.3));
-        cv.round_rect(ox, oy, W, H, 24.0, rgba(p.panel, 1.0));
-        cv.round_rect(ox, oy, NAV_W, H, 24.0, rgba(p.sky, 0.45));
-        cv.round_rect(ox + NAV_W - 30.0, oy, 30.0, H, 0.0, rgba(p.panel, 1.0));
-        cv.round_rect(ox + NAV_W, oy + 20.0, 1.0, H - 40.0, 0.0, rgba(p.text, 0.08));
-
-        self.t13.draw(&mut cv, ox + 28.0, oy + 52.0, "settings", rgba(p.text, 0.45));
-        for (i, name) in self.page_names().iter().enumerate() {
-            let y = oy + 112.0 + i as f32 * 44.0;
-            if i == self.page {
-                cv.round_rect(ox + 14.0, y, NAV_W - 28.0, 40.0, 14.0, rgba(p.dust, 0.9));
-                cv.sparkle(ox + 36.0, y + 20.0, 6.0, rgba(p.star, 1.0));
-            }
-            self.t17.draw(&mut cv, ox + 56.0, y + 26.0, name, rgba(p.text, if i == self.page { 1.0 } else { 0.6 }));
+        if self.back.as_ref().is_none_or(|b| b.w != w || b.h != h) {
+            let mut b = kit::window_plate(w, h, (ox, oy), (self.w, self.h), FOOT);
+            self.t22.draw(&mut b, ox + PAD, oy + 46.0, "settings", rgba(p.text, 0.95));
+            self.back = Some(b);
         }
+        let mut cv = self.back.clone().expect("made above");
+        let names: Vec<&str> = self.pages.iter().map(|p| p.name).collect();
+        let (pos, hover) = (if self.searching() { -9.0 } else { self.glide.pos(self.page) }, self.hover); // no big star while searching
+        self.thread(ox, oy).draw(&mut cv, &mut self.t13, &names, pos, hover);
 
-        let page = &self.pages[self.page];
-        let (name, blurb) = (page.name, page.blurb);
-        self.t22.draw(&mut cv, ox + NAV_W + 36.0, oy + 58.0, name, rgba(p.text, 1.0));
-        self.t13.draw(&mut cv, ox + NAV_W + 36.0, oy + 84.0, blurb, rgba(p.text, 0.55));
+        let (title, blurb) = if self.searching() {
+            let n: usize = view(&self.pages, self.page, &self.query).iter().map(|(_, r)| r.len()).sum();
+            let found = if n == 0 { "nothing matches that".to_string() } else { format!("{n} setting{} across every page", if n == 1 { "" } else { "s" }) };
+            ("search", found)
+        } else {
+            (self.pages[self.page].name, self.pages[self.page].blurb.to_string())
+        };
+        self.t22.draw(&mut cv, ox + PAD, oy + 122.0, title, rgba(p.text, 1.0));
+        self.t13.draw(&mut cv, ox + PAD, oy + 146.0, &blurb, rgba(p.text, 0.55));
+        kit::search_pill(&mut cv, &mut self.t15, ox + self.w - PAD - PILL_W, oy + 23.0, &self.query, "find a setting..");
 
-        let (first, last) = (self.row0, (self.row0 + FIT).min(self.rows().len()));
-        for i in first..last {
-            let y = oy + 112.0 + (i - self.row0) as f32 * ROW_H;
-            cv.round_rect(ox + NAV_W + 36.0, y - 8.0, W - NAV_W - 72.0, 1.0, 0.0, rgba(p.text, 0.07));
-            let (id, label, hint) = (self.rows()[i].id, self.rows()[i].label, self.rows()[i].hint);
-            self.t17.draw(&mut cv, ox + NAV_W + 36.0, y + 28.0, label, rgba(p.text, 1.0));
-            self.t13.draw(&mut cv, ox + NAV_W + 36.0, y + 50.0, hint, rgba(p.text, 0.5));
-            let (cx, cy, cw, ch) = self.control(i);
-            let (cx, cy) = (ox + cx, oy + cy);
-            let val = self.values[id].clone();
-            match self.rows()[i].ctl {
-                Ctl::Slider(min, max, _) => {
-                    let t = ((val.parse::<f32>().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0);
-                    cv.round_rect(cx, cy + ch / 2.0 - 3.0, cw, 6.0, 3.0, rgba(p.dust, 0.9));
-                    cv.round_rect(cx, cy + ch / 2.0 - 3.0, (cw * t).max(6.0), 6.0, 3.0, rgba(p.star, 0.9));
-                    cv.sparkle(cx + cw * t, cy + ch / 2.0, 10.0, rgba(p.star, 1.0));
-                    let tw = self.t13.width(&val);
-                    self.t13.draw(&mut cv, cx - 14.0 - tw, cy + ch / 2.0 + 5.0, &val, rgba(p.text, 0.7));
-                }
-                Ctl::Choice(opts) => {
-                    cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.sky, 0.6));
-                    for (n, o) in opts.iter().enumerate() {
-                        let ox2 = cx + n as f32 * 84.0;
-                        let on = *o == val;
-                        if on {
-                            cv.round_rect(ox2 + 3.0, cy + 3.0, 78.0, ch - 6.0, (ch - 6.0) / 2.0, rgba(p.star, 0.95));
-                        }
-                        let tw = self.t13.width(o);
-                        self.t13.draw(&mut cv, ox2 + 42.0 - tw / 2.0, cy + ch / 2.0 + 5.0, o, if on { rgba(p.sky, 1.0) } else { rgba(p.text, 0.8) });
-                    }
-                }
-                Ctl::Toggle => {
-                    let on = val == "1";
-                    cv.round_rect(cx, cy, cw, ch, ch / 2.0, if on { rgba(p.star, 0.95) } else { rgba(p.dust, 0.9) });
-                    let kx = if on { cx + cw - ch / 2.0 } else { cx + ch / 2.0 };
-                    cv.round_rect(kx - 10.0, cy + ch / 2.0 - 10.0, 20.0, 20.0, 10.0, rgba(if on { p.sky } else { p.text }, 0.95));
-                }
-                Ctl::Path => {
-                    let focused = self.focus == Some(id);
-                    cv.round_rect(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0, ch / 2.0 + 1.0, rgba(p.star, if focused { 0.7 } else { 0.2 }));
-                    cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.sky, 0.8));
-                    if let (Some((tw, th, px)), true) = (&self.thumb, id == "look/wallpaper") {
-                        let (tx, ty) = ((cx - 110.0) as usize, (cy + ch / 2.0) as usize - th / 2);
-                        cv.round_rect(tx as f32 - 1.0, ty as f32 - 1.0, *tw as f32 + 2.0, *th as f32 + 2.0, 3.0, rgba(p.star, 0.3));
-                        for y in 0..*th {
-                            cv.px[(ty + y) * w + tx..(ty + y) * w + tx + tw].copy_from_slice(&px[y * tw..(y + 1) * tw]);
-                        }
-                    }
-                    let shown = if val.is_empty() && !focused { (if id == "look/wallpaper" { "~/pictures/sky.jpg" } else { "kitty" }).to_string() } else { val.clone() };
-                    // keep the tail of a long path in view
-                    let tail: String = shown.chars().rev().scan(0.0, |acc, c| { *acc += self.t13.glyph(c).0.advance_width; (*acc < cw - 36.0).then_some(c) }).collect::<Vec<_>>().into_iter().rev().collect();
-                    let end = self.t13.draw(&mut cv, cx + 18.0, cy + ch / 2.0 + 5.0, &tail, rgba(p.text, if val.is_empty() && !focused { 0.3 } else { 1.0 }));
-                    if focused {
-                        cv.round_rect(end + 1.0, cy + 9.0, 1.5, ch - 18.0, 0.0, rgba(p.text, 0.9));
-                    }
-                }
-                Ctl::Swatches => {
-                    for (n, c) in [p.sky, p.dust, p.mist, p.glow, p.star, p.text].into_iter().enumerate() {
-                        let x = cx + n as f32 * 34.0;
-                        cv.round_rect(x - 1.0, cy - 1.0, 30.0, ch + 2.0, 15.0, rgba(p.text, 0.25));
-                        cv.round_rect(x, cy, 28.0, ch, 14.0, rgba(c, 1.0));
-                    }
-                }
-                Ctl::Button(text) => {
-                    cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.star, 0.95));
-                    let tw = self.t17.width(text);
-                    self.t17.draw(&mut cv, cx + cw / 2.0 - tw / 2.0, cy + ch / 2.0 + 6.0, text, rgba(p.sky, 1.0));
-                }
-            }
+        let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
+        if self.body_stale || self.body.as_ref().is_none_or(|b| b.w != cw || b.h != bh) {
+            self.body = Some(self.draw_body());
+            self.body_stale = false;
         }
-        self.t13.draw(&mut cv, ox + NAV_W + 36.0, oy + H - 28.0, &self.msg, rgba(p.text, 0.55));
-        let ew = self.t13.width("esc to close");
-        if self.row0 + FIT < self.rows().len() {
-            let mw = self.t13.width("scroll for more");
-            self.t13.draw(&mut cv, ox + W - 36.0 - ew - 24.0 - mw, oy + H - 28.0, "scroll for more", rgba(p.star, 0.8));
+        cv.over(self.body.as_ref().expect("made above"), (ox + PAD) as i32, (oy + TOP) as i32);
+
+        let total = self.lay().total;
+        let more = self.scroll + 1.0 < total - bh as f32;
+        if total > bh as f32 {
+            let (track, frac) = (bh as f32, bh as f32 / total);
+            cv.round_rect(ox + self.w - 14.0, oy + TOP, 4.0, track, 2.0, rgba(p.text, 0.1));
+            cv.round_rect(ox + self.w - 14.0, oy + TOP + track * self.scroll / total, 4.0, track * frac, 2.0, rgba(p.star, 0.9));
         }
-        self.t13.draw(&mut cv, ox + W - 36.0 - ew, oy + H - 28.0, "esc to close", rgba(p.text, 0.35));
+        let base = oy + self.h - 22.0;
+        self.t13.draw(&mut cv, ox + PAD, base, &self.msg, rgba(p.text, 0.55));
+        let esc = "esc to close";
+        let ew = self.t13.width(esc);
+        self.t13.draw(&mut cv, ox + self.w - PAD - ew, base, esc, rgba(p.text, 0.35));
+        if more {
+            let more_txt = "scroll for more";
+            let mw = self.t13.width(more_txt);
+            self.t13.draw(&mut cv, ox + self.w - PAD - ew - 24.0 - mw, base, more_txt, rgba(p.star, 0.8));
+        }
         cv
+    }
+
+    /// The page's cards and their rows, at the body's own origin.
+    fn draw_body(&mut self) -> Canvas {
+        let p = palette();
+        let (cw, bh) = (self.cw() as usize, self.body_h() as usize);
+        let mut cv = Canvas { w: cw, h: bh, px: vec![0; cw * bh] };
+        let lay = self.lay();
+        for (title, (x, y, w, h)) in &lay.cards {
+            if y + h >= 0.0 && *y <= bh as f32 {
+                kit::card(&mut cv, &mut self.t13, *x, *y, *w, *h, title);
+            }
+        }
+        for r in &lay.rows {
+            let (x, y, w, h) = r.row;
+            if y + h < 0.0 || y > bh as f32 {
+                continue;
+            }
+            if !r.first {
+                cv.round_rect(x + 1.0, y, w - 2.0, 1.0, 0.0, rgba(p.text, 0.06));
+            }
+            self.t15.draw(&mut cv, x + INNER, y + 25.0, r.label, rgba(p.text, 0.95));
+            for (i, line) in r.lines.iter().enumerate() {
+                self.t13.draw(&mut cv, x + INNER, y + 44.0 + 16.0 * i as f32, line, rgba(p.text, 0.5));
+            }
+            if let (true, Some((tw, th, px))) = (r.thumb, &self.thumb) {
+                let (tx, ty) = ((x + INNER) as i32, (y + 56.0 + 16.0 * (r.lines.len() - 1) as f32) as i32);
+                cv.round_rect(tx as f32 - 1.0, ty as f32 - 1.0, *tw as f32 + 2.0, *th as f32 + 2.0, 3.0, rgba(p.star, 0.3));
+                for yy in 0..*th {
+                    let py = ty + yy as i32;
+                    if py >= 0 && (py as usize) < cv.h && tx >= 0 && tx as usize + tw <= cv.w {
+                        cv.px[py as usize * cv.w + tx as usize..py as usize * cv.w + tx as usize + tw].copy_from_slice(&px[yy * tw..(yy + 1) * tw]);
+                    }
+                }
+            }
+            self.draw_ctl(&mut cv, r);
+        }
+        cv
+    }
+
+    fn draw_ctl(&mut self, cv: &mut Canvas, r: &Placed) {
+        let p = palette();
+        let (cx, cy, cw, ch) = r.ctl_box;
+        let val = self.values[r.id].clone();
+        match r.ctl {
+            Ctl::Slider(min, max, _) => {
+                let t = ((val.parse::<f32>().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0);
+                let my = cy + ch / 2.0;
+                self.t13.draw(cv, r.row.0 + INNER, my + 5.0, &val, rgba(p.text, 0.7));
+                cv.round_rect(cx, my - 2.0, cw, 4.0, 2.0, rgba(p.text, 0.12));
+                cv.round_rect(cx, my - 2.0, (cw * t).max(4.0), 4.0, 2.0, rgba(p.star, 0.9));
+                let kx = cx + cw * t;
+                cv.round_rect(kx - 10.0, my - 10.0, 20.0, 20.0, 10.0, rgba(p.star, 0.25));
+                cv.round_rect(kx - 7.5, my - 7.5, 15.0, 15.0, 7.5, rgba(p.text, 0.96));
+            }
+            Ctl::Choice(opts) => {
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.text, 0.14));
+                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(p.sky, 1.0));
+                let mut sx = cx + 4.0;
+                for o in opts {
+                    let sw = self.t13.width(o) + 30.0;
+                    let on = *o == val;
+                    if on {
+                        cv.round_rect(sx, cy + 3.0, sw, ch - 6.0, (ch - 6.0) / 2.0, rgba(p.dust, 1.0));
+                    }
+                    self.t13.draw(cv, sx + 15.0, cy + ch / 2.0 + 5.0, o, rgba(p.text, if on { 1.0 } else { 0.7 }));
+                    sx += sw;
+                }
+            }
+            Ctl::Toggle => {
+                let on = val == "1";
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(if on { p.star } else { p.text }, if on { 0.75 } else { 0.2 }));
+                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(if on { p.dust } else { p.sky }, 1.0));
+                if on {
+                    cv.sparkle(cx + cw - ch / 2.0, cy + ch / 2.0, 8.0, rgba(p.star, 1.0));
+                } else {
+                    cv.round_rect(cx + ch / 2.0 - 5.0, cy + ch / 2.0 - 5.0, 10.0, 10.0, 5.0, rgba(p.text, 0.5));
+                }
+            }
+            Ctl::Path => {
+                let focused = self.focus == Some(r.id);
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(if focused { p.star } else { p.text }, if focused { 0.7 } else { 0.15 }));
+                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(p.sky, 1.0));
+                let hint = val.is_empty() && !focused;
+                let shown = if hint { (if r.id == "look/wallpaper" { "~/pictures/sky.jpg" } else { "kitty" }).to_string() } else { val.clone() };
+                // keep the tail of a long path in view
+                let tail: String = shown.chars().rev().scan(0.0, |acc, c| { *acc += self.t13.glyph(c).0.advance_width; (*acc < cw - 36.0).then_some(c) }).collect::<Vec<_>>().into_iter().rev().collect();
+                let end = self.t13.draw(cv, cx + 18.0, cy + ch / 2.0 + 5.0, &tail, rgba(p.text, if hint { 0.3 } else { 1.0 }));
+                if focused {
+                    cv.round_rect(end + 1.0, cy + 9.0, 1.5, ch - 18.0, 0.0, rgba(p.text, 0.9));
+                }
+            }
+            Ctl::Swatches => {
+                for (n, c) in [p.sky, p.dust, p.mist, p.glow, p.star, p.text].into_iter().enumerate() {
+                    let x = cx + n as f32 * 30.0;
+                    cv.round_rect(x, cy + 1.0, 24.0, 24.0, 12.0, rgba(p.text, 0.25));
+                    cv.round_rect(x + 1.0, cy + 2.0, 22.0, 22.0, 11.0, rgba(c, 1.0));
+                }
+            }
+            Ctl::Button(text) => {
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, rgba(p.star, 0.85));
+                cv.round_rect(cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, ch / 2.0 - 1.0, rgba(p.panel, 1.0));
+                let tw = self.t13.width(text);
+                self.t13.draw(cv, cx + cw / 2.0 - tw / 2.0, cy + ch / 2.0 + 5.0, text, rgba(p.star, 1.0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Ui {
+    /// The control of row `id` in screen coordinates, with the card fitted to a 1920x1080 screen.
+    fn control_at(&mut self, id: &str) -> Rect {
+        self.fit(1920.0, 1080.0);
+        let (ox, oy) = self.origin(1920.0, 1080.0);
+        let lay = self.lay();
+        let p = lay.rows.iter().find(|p| p.id == id).unwrap_or_else(|| panic!("{id} is not on this page"));
+        let (x, y, w, h) = p.ctl_box;
+        (ox + PAD + x, oy + TOP + y, w, h)
     }
 }
 
@@ -511,30 +851,32 @@ mod tests {
         r
     }
 
+    const SCREEN: (f32, f32) = (1920.0, 1080.0);
+
     #[test]
     fn clicking_controls_saves_to_the_files_the_programs_read() {
         with_config(|| {
             let mut ui = Ui::new();
             assert_eq!(ui.values["motion/easing"], "drift");
-            ui.page = 5; // motion
-            let (w, h) = (1920.0, 1080.0);
-            let (ox, oy) = ((w - W) / 2.0, (h - H) / 2.0);
-            // the easing choice: click its second segment
-            let (cx, cy, _, ch) = ui.control(1);
-            assert!(matches!(ui.press(ox + cx + 84.0 + 40.0, oy + cy + ch / 2.0, w, h, false), Effect::ReloadConfig));
+            let (w, h) = SCREEN;
+            // the easing choice: click inside its second segment
+            let (cx, cy, _, ch) = ui.control_at("motion/easing");
+            let second = cx + 4.0 + ui.t13.width("drift") + 30.0 + 15.0;
+            assert!(matches!(ui.press(second, cy + ch / 2.0, w, h, false), Effect::ReloadConfig));
             assert_eq!(config::get("motion", "easing").as_deref(), Some("glide"));
             // the reduce toggle
-            let (cx, cy, cw, ch) = ui.control(2);
-            ui.press(ox + cx + cw / 2.0, oy + cy + ch / 2.0, w, h, false);
+            let (cx, cy, cw, ch) = ui.control_at("motion/reduce");
+            ui.press(cx + cw / 2.0, cy + ch / 2.0, w, h, false);
             assert_eq!(config::get("motion", "reduce").as_deref(), Some("1"));
             // a slider: click its far end
-            let (cx, cy, cw, ch) = ui.control(0);
-            ui.press(ox + cx + cw, oy + cy + ch / 2.0, w, h, false);
+            let (cx, cy, cw, ch) = ui.control_at("motion/pan_secs");
+            ui.press(cx + cw, cy + ch / 2.0, w, h, false);
+            ui.release();
             assert_eq!(config::get("motion", "pan_secs").as_deref(), Some("2.00"));
             // the widgets toggles rewrite the whole file, and ask for a restart
-            ui.page = 7;
-            let (cx, cy, cw, ch) = ui.control(1); // calendar off
-            ui.press(ox + cx + cw / 2.0, oy + cy + ch / 2.0, w, h, false);
+            ui.go(3);
+            let (cx, cy, cw, ch) = ui.control_at("widgets/calendar"); // calendar off
+            ui.press(cx + cw / 2.0, cy + ch / 2.0, w, h, false);
             assert_eq!(std::fs::read_to_string(config::path("widgets")).unwrap(), "clock\nsystem\nmedia\n");
             assert_eq!(ui.restart, ["seiza-widgets"]);
             // a fresh run reads it all back
@@ -552,13 +894,29 @@ mod tests {
             assert_eq!(ui.values["bar/date"], "0", "off in the file shows as off");
             assert!(matches!(ui.set("frame/radius", "20".into()), Effect::ReloadConfig));
             assert_eq!(config::get("frame", "radius").as_deref(), Some("20"));
-            ui.page = 1;
-            let (w, h) = (1920.0, 1080.0);
-            let (cx, cy, cw, ch) = ui.control(0);
-            ui.press((w - W) / 2.0 + cx + cw, (h - H) / 2.0 + cy + ch / 2.0, w, h, false);
+            ui.go(1);
+            let (w, h) = SCREEN;
+            let (cx, cy, cw, ch) = ui.control_at("frame/radius");
+            ui.press(cx + cw, cy + ch / 2.0, w, h, false);
             assert_eq!(config::get("frame", "radius").as_deref(), Some("32"), "no .00 for the C parser");
             assert!(matches!(ui.set("keys/help", "1".into()), Effect::Run("seiza help")));
             assert!(!config::path("keys").exists());
+        });
+    }
+
+    #[test]
+    fn dragging_a_slider_follows_the_pointer_even_outside_it() {
+        with_config(|| {
+            let mut ui = Ui::new();
+            ui.go(1);
+            let (w, h) = SCREEN;
+            let (cx, cy, cw, ch) = ui.control_at("frame/radius");
+            ui.press(cx, cy + ch / 2.0, w, h, false);
+            assert_eq!(config::get("frame", "radius").as_deref(), Some("0"));
+            ui.press(cx + cw / 2.0, cy + 400.0, w, h, true); // far below the slider
+            assert_eq!(config::get("frame", "radius").as_deref(), Some("16"));
+            ui.release();
+            assert!(ui.focus.is_none());
         });
     }
 
@@ -577,16 +935,53 @@ mod tests {
     }
 
     #[test]
-    fn typing_goes_to_the_focused_field_only() {
+    fn typing_goes_to_the_focused_field_else_to_the_search() {
         with_config(|| {
             let mut ui = Ui::new();
             ui.type_text("x");
-            assert_eq!(ui.values["look/wallpaper"], "");
+            assert_eq!(ui.values["look/wallpaper"], "", "no field focused: it is a search");
+            assert!(ui.searching());
+            assert!(ui.escape() && !ui.searching());
             ui.focus = Some("look/wallpaper");
             ui.type_text("/a");
             ui.type_text("b");
             ui.backspace();
             assert_eq!(ui.values["look/wallpaper"], "/a");
+            assert!(ui.escape() && ui.focus.is_none(), "Esc leaves the field first");
+            assert!(!ui.escape(), "and then there is nothing left: the caller closes");
+        });
+    }
+
+    #[test]
+    fn typing_finds_settings_on_every_page_and_they_still_work() {
+        with_config(|| {
+            let mut ui = Ui::new();
+            ui.type_text("glow");
+            let found = view(&ui.pages, ui.page, &ui.query);
+            assert!(found.iter().any(|(t, rows)| t == "windows \u{b7} frame" && rows.iter().any(|r| r.id == "frame/glow")));
+            let (w, h) = SCREEN;
+            let (cx, cy, _, ch) = ui.control_at("frame/glow");
+            ui.press(cx + 20.0, cy + ch / 2.0, w, h, false);
+            assert_eq!(config::get("frame", "glow").as_deref(), Some("off"), "a found control is live");
+            ui.type_text(" zzzz");
+            assert!(view(&ui.pages, ui.page, &ui.query).is_empty());
+        });
+    }
+
+    #[test]
+    fn controls_sit_beside_their_words_except_sliders_and_wide_choices() {
+        with_config(|| {
+            let mut ui = Ui::new();
+            ui.fit(1920.0, 1080.0);
+            let lay = ui.lay();
+            let row = |id: &str| lay.rows.iter().find(|p| p.id == id).unwrap();
+            let toggle = row("motion/reduce");
+            let (x, _, w, _) = toggle.row;
+            assert!((toggle.ctl_box.0 + toggle.ctl_box.2 - (x + w - INNER)).abs() < 0.01, "a toggle is at the card's right edge");
+            let slider = row("sky/nebula");
+            assert!(slider.ctl_box.1 > slider.row.1 + 50.0, "a slider is under its words");
+            assert!(row("look/style").ctl_box.1 > row("look/style").row.1 + 50.0, "four segments do not fit beside the words");
+            assert!(lay.cards.len() == 3 && lay.total > 0.0);
         });
     }
 }

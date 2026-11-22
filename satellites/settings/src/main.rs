@@ -1,7 +1,7 @@
 //! seiza-settings: change how Seiza looks and moves. Every setting is written to the
 //! small config file of the program that reads it (see `seiza_common::config`);
 //! motion is applied at once, the sky and widgets when this page closes.
-//! `seiza-settings --dump out.ppm [page]` draws one frame to a file.
+//! `seiza-settings --dump out.ppm [page [width height [visibility 0..1 [search]]]]` draws one frame to a file.
 mod ui;
 
 use std::process::Command;
@@ -49,6 +49,8 @@ struct Settings {
     exit: bool,
     chord: bool, // ctrl or alt held: not typing
     down: bool,  // left button held: dragging a slider
+    anim: seiza_common::kit::Anim,
+    shown: f32, // the visibility last drawn
     ui: Ui,
 }
 
@@ -82,11 +84,27 @@ impl Settings {
         self.dirty = true;
     }
 
+    /// Visibility now, 0..1, and whether it is still moving. The card rises while it opens and drops while it closes.
+    fn visibility(&mut self) -> (f32, bool) {
+        let (e, moving, done) = self.anim.visibility();
+        self.exit |= done;
+        (e, moving)
+    }
+
+    fn close(&mut self) {
+        self.anim.close();
+        self.dirty = true;
+    }
+
     fn key(&mut self, event: &KeyEvent) {
         let typing = self.ui.focus.is_some();
+        let browsing = !typing && !self.ui.searching();
         match event.keysym {
-            Keysym::Escape if typing => self.ui.focus = None,
-            Keysym::Escape => self.exit = true,
+            Keysym::Escape => {
+                if !self.ui.escape() {
+                    self.close();
+                }
+            }
             Keysym::Return | Keysym::KP_Enter if typing => {
                 if self.ui.focus.take() == Some("look/wallpaper") {
                     let e = self.ui.set("look/apply", "1".into());
@@ -94,12 +112,14 @@ impl Settings {
                 }
             }
             Keysym::BackSpace => self.ui.backspace(),
-            Keysym::Up if !typing => self.ui.set_page(self.ui.page.saturating_sub(1)),
-            Keysym::Down if !typing => self.ui.set_page((self.ui.page + 1).min(self.ui.page_names().len() - 1)),
-            Keysym::Page_Up if !typing => self.ui.scroll_by(-1),
-            Keysym::Page_Down if !typing => self.ui.scroll_by(1),
+            Keysym::Left if browsing => self.ui.go(self.ui.page.saturating_sub(1)),
+            Keysym::Right | Keysym::Tab if browsing => self.ui.go(self.ui.page + 1),
+            Keysym::Up if !typing => self.ui.scroll_by(-1.0),
+            Keysym::Down if !typing => self.ui.scroll_by(1.0),
+            Keysym::Page_Up if !typing => self.ui.scroll_by(-6.0),
+            Keysym::Page_Down if !typing => self.ui.scroll_by(6.0),
             _ => match event.utf8.as_deref() {
-                Some(s) if typing && !self.chord && !s.chars().any(char::is_control) => self.ui.type_text(s),
+                Some(s) if !self.chord && !s.chars().any(char::is_control) => self.ui.type_text(s),
                 _ => return,
             },
         }
@@ -107,11 +127,16 @@ impl Settings {
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        if !self.configured || self.frame_pending || !self.dirty {
+        if !self.configured || self.frame_pending {
+            return;
+        }
+        let (e, moving) = self.visibility();
+        if self.exit || !(self.dirty || moving || self.ui.pending() || e != self.shown) {
             return;
         }
         self.dirty = false;
-        let cv: Canvas = self.ui.render(self.size.0 as usize, self.size.1 as usize);
+        self.shown = e;
+        let cv: Canvas = self.ui.render(self.size.0 as usize, self.size.1 as usize, e);
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         // shortcut: assumes a little-endian host, which Argb8888 in memory then matches.
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
@@ -157,6 +182,7 @@ impl LayerShellHandler for Settings {
         }
         self.size = size;
         self.configured = true;
+        self.anim.open();
         self.dirty = true;
         self.draw(qh);
     }
@@ -227,8 +253,10 @@ impl PointerHandler for Settings {
                     let effect = self.ui.press(x, y, w, h, true);
                     self.run(effect);
                 }
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.dirty |= self.ui.hover(Some((x, y)), w, h),
+                PointerEventKind::Leave { .. } => self.dirty |= self.ui.hover(None, w, h),
                 PointerEventKind::Axis { vertical, .. } if vertical.absolute != 0.0 => {
-                    self.ui.scroll_by(if vertical.absolute > 0.0 { 1 } else { -1 });
+                    self.ui.scroll_by(if vertical.absolute > 0.0 { 1.0 } else { -1.0 });
                     self.dirty = true;
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
@@ -264,8 +292,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--dump") {
         let mut ui = Ui::new();
-        ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
-        let cv = ui.render(1920, 1080);
+        ui.page = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(0).min(ui.page_count() - 1);
+        if let Some(q) = args.get(6) {
+            ui.type_text(q);
+        }
+        let size = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+        let cv = ui.render(size(3, 1920), size(4, 1080), args.get(5).and_then(|v| v.parse().ok()).unwrap_or(1.0));
         let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
         ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
         std::fs::write(args.get(1).expect("--dump needs a file"), ppm).unwrap();
@@ -301,10 +333,14 @@ fn main() {
         exit: false,
         chord: false,
         down: false,
+        anim: Default::default(),
+        shown: -1.0,
         ui: Ui::new(),
     };
     while !app.exit {
-        event_queue.blocking_dispatch(&mut app).unwrap();
+        if event_queue.blocking_dispatch(&mut app).is_err() {
+            break; // the compositor went away
+        }
     }
     // The sky and widgets read their files at start, so they come back with the new settings.
     for name in &app.ui.restart {
