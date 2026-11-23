@@ -131,9 +131,9 @@ fn upgrade() {
 }
 
 // shortcut: one playerctl spawn a second; switch to `playerctl --follow` if it ever shows in a profile.
-fn read_media() -> Option<Media> {
-    let out = std::process::Command::new("playerctl").args(["-a", "metadata", "--format", MEDIA_FORMAT]).output().ok()?;
-    parse_media(&String::from_utf8_lossy(&out.stdout))
+fn read_media() -> Vec<Media> {
+    let out = std::process::Command::new("playerctl").args(["-a", "metadata", "--format", MEDIA_FORMAT]).output();
+    out.map(|o| parse_media(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
 }
 
 /// A card's pin from `widgetpos` ("clock=-300,120,default,work": dx,dy, constellation, star).
@@ -332,9 +332,9 @@ impl PointerHandler for Widgets {
                     }
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
-                    if let Some(cmd) = self.ui.tap() {
-                        std::thread::spawn(move || std::process::Command::new("playerctl").arg(cmd).status()); // the thread reaps it
-                    } else if self.ui.tap_updates() {
+                    if let Some((cmd, player)) = self.ui.tap() {
+                        std::thread::spawn(move || std::process::Command::new("playerctl").args(["-p", &player, cmd]).status()); // the thread reaps it
+                    } else if !self.ui.tap_arrow() && self.ui.tap_updates() { // an arrow tap is done once taken
                         upgrade();
                     }
                     if let Some((name, pin)) = self.ui.release(w, h) {

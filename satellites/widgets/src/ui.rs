@@ -19,6 +19,7 @@ const MARGIN: f32 = 26.0; // from the left edge
 const COLUMNS: [&[&str]; 2] = [&["clock", "calendar"], &["system", "media", "weather", "agenda", "updates", "voyager"]];
 const HISTORY: usize = 60;
 const MEDIA_BTN_Y: f32 = 146.0;
+const MEDIA_ARROW_Y: f32 = 85.0;
 const BUTTONS: [(f32, &str); 3] = [(-44.0, "previous"), (0.0, "play-pause"), (44.0, "next")];
 const CARDS: [&str; 8] = ["clock", "calendar", "system", "media", "weather", "agenda", "updates", "voyager"];
 
@@ -31,7 +32,7 @@ pub struct Pulse {
     pub load: Option<f32>,
 }
 
-/// What the media card shows: the first playing MPRIS player, else the first one there is.
+/// What the media card shows: the player picked with its arrows, else the first playing MPRIS player, else the first one there is.
 #[derive(Default, Clone, PartialEq)]
 pub struct Media {
     pub playing: bool,
@@ -40,21 +41,21 @@ pub struct Media {
     pub pos: u64, // seconds
     pub len: u64,
     pub art: String, // path of a local cover picture, else empty
+    pub player: String, // MPRIS name, as playerctl -p takes it
 }
 
 /// One line per player from `playerctl -a metadata --format <FORMAT>`.
-pub const MEDIA_FORMAT: &str = "{{status}}\u{1f}{{title}}\u{1f}{{artist}}\u{1f}{{position}}\u{1f}{{mpris:length}}\u{1f}{{mpris:artUrl}}";
+pub const MEDIA_FORMAT: &str = "{{status}}\u{1f}{{title}}\u{1f}{{artist}}\u{1f}{{position}}\u{1f}{{mpris:length}}\u{1f}{{mpris:artUrl}}\u{1f}{{playerName}}";
 
-pub fn parse_media(out: &str) -> Option<Media> {
-    let players: Vec<Media> = out
+pub fn parse_media(out: &str) -> Vec<Media> {
+    out
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\u{1f}').collect();
             let secs = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1_000_000;
-            (f.len() == 6 && f[0] != "Stopped").then(|| Media { playing: f[0] == "Playing", title: f[1].into(), artist: f[2].into(), pos: secs(3), len: secs(4), art: f[5].strip_prefix("file://").unwrap_or("").replace("%20", " ") })
+            (f.len() == 7 && f[0] != "Stopped").then(|| Media { playing: f[0] == "Playing", title: f[1].into(), artist: f[2].into(), pos: secs(3), len: secs(4), art: f[5].strip_prefix("file://").unwrap_or("").replace("%20", " "), player: f[6].into() })
         })
-        .collect();
-    players.iter().find(|m| m.playing).or(players.first()).cloned()
+        .collect()
 }
 
 /// Where a card lives: `dx`,`dy` from the center of one star, in world units, so it is there
@@ -87,7 +88,9 @@ struct Drag {
 pub struct Ui {
     pub cards: Vec<String>, // "clock", "calendar", "system", "media", in the order drawn
     pub pulse: Pulse,
-    pub media: Option<Media>,
+    pub media: Option<Media>, // the one of `players` on the card
+    pub players: Vec<Media>,
+    pub pick: Option<String>, // the player an arrow chose; None follows the playing one
     pub weather: Option<Weather>,
     pub agenda: Option<Vec<(String, String)>>, // (when, what); None = no calendar set
     pub updates: Option<Updates>,              // None = not counted yet
@@ -265,7 +268,7 @@ fn now_parts() -> (i32, u32, u32, usize, f64) {
 
 impl Ui {
     pub fn new(cards: Vec<String>) -> Ui {
-        Ui { cards, pulse: Pulse::default(), media: None, weather: None, agenda: None, updates: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(shared_font(), 64.0), t18: Text::new(shared_font(), 18.0), t14: Text::new(shared_font(), 14.0) }
+        Ui { cards, pulse: Pulse::default(), media: None, players: vec![], pick: None, weather: None, agenda: None, updates: None, art: Default::default(), pin: HashMap::new(), view: None, drag: None, cache_key: String::new(), cache: HashMap::new(), cpu_history: vec![], t64: Text::new(shared_font(), 64.0), t18: Text::new(shared_font(), 18.0), t14: Text::new(shared_font(), 14.0) }
     }
 
     pub fn set_pulse(&mut self, p: Pulse) {
@@ -277,8 +280,16 @@ impl Ui {
     }
 
     /// Redraw when this changes.
-    /// Take the player's state; the cover is decoded once per picture (ImageMagick, like settings thumbnails).
-    pub fn set_media(&mut self, m: Option<Media>) {
+    /// Take the players' state; the cover is decoded once per picture (ImageMagick, like settings thumbnails).
+    pub fn set_media(&mut self, players: Vec<Media>) {
+        self.players = players;
+        self.show_player();
+    }
+
+    // shortcut: two instances of one player share a name, so they act as one; tell them apart if it ever matters.
+    fn show_player(&mut self) {
+        let by_pick = self.pick.as_ref().and_then(|n| self.players.iter().find(|m| m.player == *n));
+        let m = by_pick.or_else(|| self.players.iter().find(|m| m.playing)).or(self.players.first()).cloned();
         let path = m.as_ref().map(|m| m.art.clone()).unwrap_or_default();
         if path != self.art.0 {
             self.art = (path.clone(), if path.is_empty() { None } else { cover(&path) });
@@ -286,8 +297,16 @@ impl Ui {
         self.media = m;
     }
 
+    /// An arrow on the media card: the player `step` places along, wrapping round.
+    fn cycle_player(&mut self, step: isize) {
+        let n = self.players.len() as isize;
+        let at = self.media.as_ref().and_then(|c| self.players.iter().position(|m| m.player == c.player)).unwrap_or(0) as isize;
+        self.pick = self.players.get((at + step).rem_euclid(n.max(1)) as usize).map(|m| m.player.clone());
+        self.show_player();
+    }
+
     pub fn key(&self) -> String {
-        let m = self.media.as_ref().map(|m| format!("{}{}{}{}{}", m.playing, m.title, m.artist, m.pos, m.art));
+        let m = self.media.as_ref().map(|m| format!("{}{}{}{}{}{}{}", m.playing, m.title, m.artist, m.pos, m.art, m.player, self.players.len()));
         format!("{}|{}|{}|{m:?}|{:?}|{:?}|{:?}", local_time(c"%Y%m%d%H%M"), self.cpu_history.len(), self.cpu_history.last().copied().unwrap_or(0), self.weather, self.agenda, self.updates)
     }
 
@@ -399,17 +418,33 @@ impl Ui {
         Some((name, pin))
     }
 
-    /// A press and release on one of the media card's buttons without moving: the playerctl command to run.
-    /// The card is let go of, so it is not pinned.
-    pub fn tap(&mut self) -> Option<&'static str> {
+    /// A press and release on one of the media card's buttons without moving: the playerctl command to run, and
+    /// the player to run it on. The card is let go of, so it is not pinned.
+    pub fn tap(&mut self) -> Option<(&'static str, String)> {
         let d = self.drag.as_ref()?;
         let moved = (d.at.0 - d.from.0).abs() + (d.at.1 - d.from.1).abs();
         let (gx, gy) = (d.grab.0 / self.scale(), d.grab.1 / self.scale());
         let hit = d.name == "media" && moved < 4.0 && (gy - MEDIA_BTN_Y).abs() < 16.0 && self.media.is_some();
         let (cw, _) = Self::card_size("media");
         let cmd = hit.then(|| BUTTONS.iter().find(|(dx, _)| (gx - (cw / 2.0 + dx)).abs() < 20.0).map(|b| b.1)).flatten()?;
+        let player = self.media.as_ref()?.player.clone();
         self.drag = None;
-        Some(cmd)
+        Some((cmd, player))
+    }
+
+    /// A press and release on one of the media card's arrows without moving: show the previous or next player.
+    pub fn tap_arrow(&mut self) -> bool {
+        let Some(d) = self.drag.as_ref() else { return false };
+        let moved = (d.at.0 - d.from.0).abs() + (d.at.1 - d.from.1).abs();
+        let (gx, gy) = (d.grab.0 / self.scale(), d.grab.1 / self.scale());
+        let (cw, _) = Self::card_size("media");
+        if d.name != "media" || moved >= 4.0 || (gy - MEDIA_ARROW_Y).abs() > 30.0 || self.players.len() < 2 {
+            return false;
+        }
+        let step = if gx < 24.0 { -1 } else if gx > cw - 24.0 { 1 } else { return false };
+        self.drag = None;
+        self.cycle_player(step);
+        true
     }
 
     /// A press and release on the updates card without moving: time to upgrade. The card is let go of, so it is not pinned.
@@ -535,11 +570,17 @@ impl Ui {
 
     fn media(&mut self, cv: &mut Canvas, x: f32, cw: f32) {
         let p = palette();
-        self.t14.draw(cv, x + 24.0, 38.0, "now playing", rgba(p.text, 0.5));
         let Some(m) = self.media.clone() else {
+            self.t14.draw(cv, x + 24.0, 38.0, "now playing", rgba(p.text, 0.5));
             self.t18.draw(cv, x + 24.0, 84.0, "nothing playing", rgba(p.text, 0.4));
             return;
         };
+        self.t14.draw(cv, x + 24.0, 38.0, &format!("audio from {}", m.player), rgba(p.text, 0.5));
+        if self.players.len() > 1 {
+            let (ink, ay, lx, rx) = (rgba(p.text, 0.5), MEDIA_ARROW_Y, x + 12.0, x + cw - 12.0);
+            cv.shape(lx, ay, 6.0, ink, |px, py| { let u = px - lx; (-4.0..=4.0).contains(&u) && (py - ay).abs() <= (u + 4.0) * 0.7 });
+            cv.shape(rx, ay, 6.0, ink, |px, py| { let u = px - rx; (-4.0..=4.0).contains(&u) && (py - ay).abs() <= (4.0 - u) * 0.7 });
+        }
         let state = if m.playing { "playing" } else { "paused" };
         let sw = self.t14.width(state);
         self.t14.draw(cv, x + cw - 24.0 - sw, 38.0, state, rgba(p.text, 0.4));
@@ -828,10 +869,10 @@ mod tests {
     fn tapping_a_media_button_runs_it_and_dragging_does_not() {
         let (w, h) = (1920.0, 1080.0);
         let mut ui = Ui::new(vec!["media".into()]);
-        ui.media = Some(Media { playing: true, title: "t".into(), artist: "a".into(), pos: 1, len: 10, art: String::new() });
+        ui.media = Some(Media { playing: true, title: "t".into(), artist: "a".into(), pos: 1, len: 10, art: String::new(), player: "mpv".into() });
         let (x, y, cw, _) = ui.rect("media", w, h).unwrap();
         assert!(ui.press(x + cw / 2.0 + 44.0, y + MEDIA_BTN_Y, w, h));
-        assert_eq!(ui.tap(), Some("next"));
+        assert_eq!(ui.tap(), Some(("next", "mpv".into())));
         assert!(ui.press(x + 10.0, y + MEDIA_BTN_Y, w, h), "off the buttons it is a drag");
         assert_eq!(ui.tap(), None);
         assert!(ui.press(x + cw / 2.0, y + MEDIA_BTN_Y, w, h));
@@ -852,16 +893,45 @@ mod tests {
         assert!(!ui.tap_updates(), "moved: a drag");
     }
 
+    fn line(st: &str, t: &str) -> String {
+        format!("{st}\u{1f}{t}\u{1f}Art\u{1f}83000000\u{1f}240000000\u{1f}file:///tmp/a%20b.png\u{1f}p-{t}\n")
+    }
+
     #[test]
     fn media_prefers_the_playing_player_and_skips_stopped_ones() {
-        let line = |st: &str, t: &str| format!("{st}\u{1f}{t}\u{1f}Art\u{1f}83000000\u{1f}240000000\u{1f}file:///tmp/a%20b.png\n");
-        let m = parse_media(&(line("Paused", "a") + &line("Playing", "b"))).unwrap();
-        assert_eq!((m.title.as_str(), m.playing, m.pos, m.len), ("b", true, 83, 240));
-        assert_eq!(parse_media(&line("Paused", "a")).unwrap().title, "a");
-        assert!(parse_media(&line("Stopped", "a")).is_none());
-        assert!(parse_media("").is_none());
-        assert_eq!(parse_media(&line("Playing", "a")).unwrap().art, "/tmp/a b.png");
+        let mut ui = Ui::new(vec!["media".into()]);
+        ui.set_media(parse_media(&(line("Paused", "a") + &line("Playing", "b"))));
+        let m = ui.media.clone().unwrap();
+        assert_eq!((m.title.as_str(), m.playing, m.pos, m.len, m.player.as_str()), ("b", true, 83, 240, "p-b"));
+        ui.set_media(parse_media(&line("Paused", "a")));
+        assert_eq!(ui.media.clone().unwrap().title, "a");
+        assert!(parse_media(&line("Stopped", "a")).is_empty());
+        assert!(parse_media("").is_empty());
+        assert_eq!(parse_media(&line("Playing", "a"))[0].art, "/tmp/a b.png");
         assert_eq!(clock(83), "1:23");
+    }
+
+    #[test]
+    fn the_arrows_pick_a_player_and_the_pick_sticks() {
+        let (w, h) = (1920.0, 1080.0);
+        let mut ui = Ui::new(vec!["media".into()]);
+        ui.set_media(parse_media(&(line("Paused", "a") + &line("Playing", "b") + &line("Paused", "c"))));
+        let (x, y, cw, _) = ui.rect("media", w, h).unwrap();
+        let title = |ui: &Ui| ui.media.clone().unwrap().title;
+        assert_eq!(title(&ui), "b", "no pick follows the playing one");
+        assert!(ui.press(x + cw - 10.0, y + MEDIA_ARROW_Y, w, h));
+        assert!(ui.tap_arrow());
+        assert_eq!(title(&ui), "c");
+        assert!(ui.press(x + cw - 10.0, y + MEDIA_ARROW_Y, w, h));
+        assert!(ui.tap_arrow());
+        assert_eq!(title(&ui), "a", "wraps round");
+        ui.set_media(parse_media(&(line("Paused", "a") + &line("Playing", "b") + &line("Paused", "c"))));
+        assert_eq!(title(&ui), "a", "a poll does not undo the pick");
+        assert!(ui.press(x + 10.0, y + MEDIA_ARROW_Y, w, h));
+        assert!(ui.tap_arrow());
+        assert_eq!(title(&ui), "c", "left goes back");
+        assert!(ui.press(x + cw / 2.0, y + MEDIA_ARROW_Y, w, h));
+        assert!(!ui.tap_arrow(), "off the arrows it is a drag");
     }
 
     #[test]
