@@ -3020,6 +3020,9 @@ dependencies = [
 [[package]]
 name = "seiza-wonder"
 version = "0.1.0"
+dependencies = [
+ "zbus",
+]
 
 [[package]]
 name = "self_cell"

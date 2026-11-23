@@ -13,6 +13,10 @@ impl Track {
     pub fn url(&self) -> String {
         format!("https://www.youtube.com/watch?v={}", self.id)
     }
+
+    pub fn thumbnail(&self) -> String {
+        format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", self.id)
+    }
 }
 
 /// One line per result, fields split by U+001F, like the widgets' playerctl format.

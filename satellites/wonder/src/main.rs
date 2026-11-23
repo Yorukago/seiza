@@ -1,6 +1,7 @@
 //! wonder: the Seiza music player. For now only its engine (mpv + yt-dlp) and a terminal harness for it;
 //! the window comes later.
 mod ipc;
+mod mpris;
 mod player;
 mod search;
 
@@ -32,6 +33,20 @@ fn main() {
             std::thread::sleep(Duration::from_millis(500));
             println!("after seek to 30: {:?}", p.state());
         }
-        _ => eprintln!("usage: seiza-wonder search <words> | play <url> [--silent]"),
+        // `wonder serve [--silent] [words]`: a player on the session bus; `playerctl -p wonder open <url>` loads a track.
+        Some("serve") => {
+            let extra: &[&str] = if args.iter().any(|a| a == "--silent") { &["--ao=null"] } else { &["--volume=30"] };
+            let mut player = player::Player::start(extra).expect("mpv");
+            let query = args[1..].iter().filter(|a| *a != "--silent").cloned().collect::<Vec<_>>().join(" ");
+            if let Some(t) = (!query.is_empty()).then(|| search::search(&query, 1).ok()).flatten().and_then(|r| r.into_iter().next()) {
+                player.play_track(t); // the first result of any words after the flags, so the track's artist and cover show too
+            }
+            let p = std::sync::Arc::new(std::sync::Mutex::new(player));
+            let _bus = mpris::serve(p).expect("the MPRIS name is taken or there is no session bus");
+            loop {
+                std::thread::park();
+            }
+        }
+        _ => eprintln!("usage: seiza-wonder search <words> | play <url> [--silent] | serve [--silent] [words]"),
     }
 }
