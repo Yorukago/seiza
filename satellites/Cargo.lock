@@ -3021,7 +3021,9 @@ dependencies = [
 name = "seiza-wonder"
 version = "0.1.0"
 dependencies = [
+ "seiza-common",
  "serde_json",
+ "smithay-client-toolkit 0.21.1",
  "zbus",
 ]
 

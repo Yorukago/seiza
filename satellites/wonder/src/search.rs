@@ -25,8 +25,8 @@ const FORMAT: &str = "%(id)s\u{1f}%(title)s\u{1f}%(channel)s\u{1f}%(duration)s";
 /// Blocks for a second or two: call it from a thread.
 pub fn search(query: &str, count: usize) -> Result<Vec<Track>, String> {
     let out = Command::new("yt-dlp")
-        .args(["--flat-playlist", "--no-warnings", "--print", FORMAT])
-        .arg(format!("ytsearch{count}:{query}"))
+        .args(["--flat-playlist", "--no-warnings", "--playlist-end", &count.to_string(), "--print", FORMAT])
+        .arg(if query.starts_with("http") { query.to_string() } else { format!("ytsearch{count}:{query}") }) // a pasted link is looked up as it is
         .output()
         .map_err(|e| format!("yt-dlp did not start: {e}"))?;
     if !out.status.success() && out.stdout.is_empty() {
