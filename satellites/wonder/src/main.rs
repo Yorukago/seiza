@@ -1,11 +1,10 @@
 //! wonder: the Seiza music player. For now only its engine (mpv + yt-dlp) and a terminal harness for it;
 //! the window comes later.
 mod ipc;
+mod lyrics;
 mod mpris;
 mod player;
 mod search;
-
-use std::time::{Duration, Instant};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -14,39 +13,30 @@ fn main() {
             Ok(tracks) => tracks.iter().for_each(|t| println!("{} | {} | {}s | {}", t.title, t.artist, t.secs, t.url())),
             Err(e) => eprintln!("search failed: {e}"),
         },
-        // `wonder play <url> [--silent]`: load it, show its state a few times, pause, quit.
-        Some("play") if args.len() > 1 => {
-            let extra: &[&str] = if args.iter().any(|a| a == "--silent") { &["--ao=null"] } else { &["--volume=30"] };
-            let mut p = player::Player::start(extra).expect("mpv");
-            assert!(p.load(&args[1]), "mpv refused the url");
-            let t0 = Instant::now();
-            while p.state().len == 0.0 && t0.elapsed() < Duration::from_secs(40) {
-                std::thread::sleep(Duration::from_millis(300));
+        // `wonder lyrics <words>`: the lyrics of the first search result, to see what the window would show.
+        Some("lyrics") => {
+            let Some(t) = search::search(&args[1..].join(" "), 1).ok().and_then(|r| r.into_iter().next()) else { return eprintln!("no such track") };
+            println!("{} ({}s)", t.title, t.secs);
+            match lyrics::fetch(&t) {
+                Some(l) => println!("{} lines, synced: {}\n{:?}", l.lines.len(), l.synced, &l.lines[..l.lines.len().min(4)]),
+                None => println!("no lyrics"),
             }
-            println!("loaded after {:.1}s: {:?}", t0.elapsed().as_secs_f32(), p.state());
-            std::thread::sleep(Duration::from_secs(3));
-            println!("playing: {:?}", p.state());
-            p.pause(true);
-            std::thread::sleep(Duration::from_millis(500));
-            println!("paused: {:?}", p.state());
-            p.seek(30.0);
-            std::thread::sleep(Duration::from_millis(500));
-            println!("after seek to 30: {:?}", p.state());
         }
         // `wonder serve [--silent] [words]`: a player on the session bus; `playerctl -p wonder open <url>` loads a track.
         Some("serve") => {
             let extra: &[&str] = if args.iter().any(|a| a == "--silent") { &["--ao=null"] } else { &["--volume=30"] };
-            let mut player = player::Player::start(extra).expect("mpv");
+            let player = player::Player::spawn(extra).expect("mpv");
             let query = args[1..].iter().filter(|a| *a != "--silent").cloned().collect::<Vec<_>>().join(" ");
-            if let Some(t) = (!query.is_empty()).then(|| search::search(&query, 1).ok()).flatten().and_then(|r| r.into_iter().next()) {
-                player.play_track(t); // the first result of any words after the flags, so the track's artist and cover show too
+            if !query.is_empty() {
+                for t in search::search(&query, 3).unwrap_or_default() {
+                    player.lock().unwrap().add(t); // the first results of any words after the flags
+                }
             }
-            let p = std::sync::Arc::new(std::sync::Mutex::new(player));
-            let _bus = mpris::serve(p).expect("the MPRIS name is taken or there is no session bus");
+            let _bus = mpris::serve(player).expect("the MPRIS name is taken or there is no session bus");
             loop {
                 std::thread::park();
             }
         }
-        _ => eprintln!("usage: seiza-wonder search <words> | play <url> [--silent] | serve [--silent] [words]"),
+        _ => eprintln!("usage: seiza-wonder search <words> | lyrics <words> | serve [--silent] [words]"),
     }
 }

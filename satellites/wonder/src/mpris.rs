@@ -1,13 +1,10 @@
 //! wonder as an MPRIS player, so playerctl, the bar chip, the media keys and the widgets' media card see it.
-//! shortcut: no PropertiesChanged signals and no Volume; clients that poll (playerctl, the widgets) are fine,
+//! shortcut: no PropertiesChanged signals and no Volume (the state it reports is the engine's last poll, up to 250 ms old); clients that poll (playerctl, the widgets) are fine,
 //! ones that only listen for changes will not notice until they ask again. Add the signals when one matters.
-use crate::player::{Player, State};
+use crate::player::{Player, Shared, State};
 use crate::search::Track;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use zbus::zvariant::{ObjectPath, Value};
-
-pub type Shared = Arc<Mutex<Player>>;
 
 struct Root;
 
@@ -59,20 +56,20 @@ impl Now {
         self.with(|p| p.pause(true));
     }
     fn play_pause(&self) {
-        self.with(|p| {
-            let paused = p.state().paused;
-            p.pause(!paused)
-        });
+        self.with(|p| p.pause(!p.last.paused));
     }
     fn stop(&self) {
         self.with(|p| p.stop());
     }
-    // there is no queue yet: CanGoNext and CanGoPrevious say so
-    fn next(&self) {}
-    fn previous(&self) {}
+    fn next(&self) {
+        self.with(|p| p.next());
+    }
+    fn previous(&self) {
+        self.with(|p| p.prev());
+    }
     fn seek(&self, offset: i64) {
         self.with(|p| {
-            let at = p.state().pos + offset as f64 / 1e6;
+            let at = p.last.pos + offset as f64 / 1e6;
             p.seek(at.max(0.0))
         });
     }
@@ -85,15 +82,15 @@ impl Now {
 
     #[zbus(property)]
     fn playback_status(&self) -> &'static str {
-        status(&self.with(|p| p.state()))
+        status(&self.with(|p| p.last.clone()))
     }
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, Value<'static>> {
-        self.with(|p| metadata(&p.state(), p.track.as_ref()))
+        self.with(|p| metadata(&p.last, p.queue.current()))
     }
     #[zbus(property)]
     fn position(&self) -> i64 {
-        (self.with(|p| p.state().pos) * 1e6) as i64
+        (self.with(|p| p.last.pos) * 1e6) as i64
     }
     #[zbus(property)]
     fn rate(&self) -> f64 {
@@ -109,11 +106,11 @@ impl Now {
     }
     #[zbus(property)]
     fn can_go_next(&self) -> bool {
-        false
+        self.with(|p| p.queue.step(1).is_some())
     }
     #[zbus(property)]
     fn can_go_previous(&self) -> bool {
-        false
+        self.with(|p| p.queue.at.is_some())
     }
     #[zbus(property)]
     fn can_play(&self) -> bool {
