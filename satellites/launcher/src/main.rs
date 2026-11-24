@@ -8,6 +8,7 @@
 //! draws the clipboard picker (`seiza-launcher --clip`, see clip.rs) from $XDG_RUNTIME_DIR/seiza-clip.
 mod calc;
 mod clip;
+mod pass;
 mod emoji;
 mod ui;
 

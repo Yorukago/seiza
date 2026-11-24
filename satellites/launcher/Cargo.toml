@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+keepass = "0.17.0"
 seiza-common = { path = "../common" }
 smithay-client-toolkit = "0.21.1"
+
+[dev-dependencies]
+keepass = { version = "0.17.0", features = ["save_kdbx4"] }
