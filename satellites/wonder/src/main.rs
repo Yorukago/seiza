@@ -3,6 +3,7 @@
 //! `--dump out.ppm [page [width height [visibility 0..1]]]` (one frame of the window to a file).
 mod cache;
 mod cover;
+mod history;
 mod ipc;
 mod lyrics;
 mod mpris;

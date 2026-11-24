@@ -33,7 +33,7 @@ fn one_line(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
 
-fn render(name: &str, tracks: &[Track]) -> String {
+pub fn render(name: &str, tracks: &[Track]) -> String {
     let mut out = one_line(name) + "\n";
     for t in tracks {
         out += &format!("{}\t{}\t{}\t{}\n", t.id, one_line(&t.title), one_line(&t.artist), t.secs);
@@ -42,7 +42,7 @@ fn render(name: &str, tracks: &[Track]) -> String {
 }
 
 /// None for a file with no name or no playable track. A bad line is skipped: its id would end up in a URL and a file name.
-fn parse(text: &str) -> Option<(String, Vec<Track>)> {
+pub fn parse(text: &str) -> Option<(String, Vec<Track>)> {
     let mut lines = text.lines();
     let name = lines.next()?.trim().to_string();
     let tracks: Vec<Track> = lines
@@ -56,11 +56,14 @@ fn parse(text: &str) -> Option<(String, Vec<Track>)> {
 
 /// Save a queue as a new playlist.
 pub fn save(tracks: &[Track]) -> Option<Playlist> {
+    save_in(&dir()?, tracks)
+}
+
+fn save_in(dir: &std::path::Path, tracks: &[Track]) -> Option<Playlist> {
     if tracks.is_empty() {
         return None;
     }
-    let dir = dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::create_dir_all(dir).ok()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let name = name_of(tracks);
     // the file is named by the time; a second save in the same second takes the next free name
@@ -71,7 +74,11 @@ pub fn save(tracks: &[Track]) -> Option<Playlist> {
 
 /// Every saved playlist, the newest first.
 pub fn list() -> Vec<Playlist> {
-    let Some(entries) = dir().and_then(|d| std::fs::read_dir(d).ok()) else { return vec![] };
+    dir().map_or(vec![], |d| list_in(&d))
+}
+
+fn list_in(dir: &std::path::Path) -> Vec<Playlist> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut all: Vec<Playlist> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -104,6 +111,24 @@ mod tests {
         assert_eq!(name, "first song +1");
         assert_eq!(back.len(), 2);
         assert_eq!((back[0].id.as_str(), back[0].title.as_str(), back[1].secs), ("abc_123", "first song", 100));
+    }
+
+    #[test]
+    fn saving_writes_a_file_that_lists_back_newest_first_and_deleting_removes_it() {
+        let dir = std::env::temp_dir().join(format!("wonder-pl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(list_in(&dir).is_empty(), "no folder yet is no playlists");
+        let a = save_in(&dir.join("nested/lists"), &[t("a", "A")]).expect("saves, creating the folders");
+        let dir = dir.join("nested/lists");
+        let b = save_in(&dir, &[t("b", "B"), t("c", "C")]).unwrap();
+        assert_ne!(a.file, b.file, "two saves in the same second do not overwrite each other");
+        let all = list_in(&dir);
+        assert_eq!(all.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["B +1", "A"]);
+        assert_eq!(all[0].tracks.len(), 2);
+        delete(&all[0]);
+        assert_eq!(list_in(&dir).len(), 1);
+        assert!(save_in(&dir, &[]).is_none(), "an empty queue is not saved");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
     }
 
     #[test]

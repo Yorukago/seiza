@@ -84,6 +84,7 @@ pub struct Player {
     pub repeat: bool,
     pub volume: f64, // 0 to 100, remembered between runs
     pick: Option<usize>,     // the shuffled next track, chosen once so what is pre-fetched is what plays
+    logged: Option<String>, // the id last written to the history
     requested: std::collections::HashSet<String>, // ids already sent to the cache this run
     pub last: State, // as of the last `poll`: what the window and MPRIS read
     ended: bool,     // the last track finished and there is no next one
@@ -116,7 +117,7 @@ impl Player {
         for _ in 0..50 {
             if let Ok(s) = UnixStream::connect(&sock) {
                 let (queue, last, ended, loaded_at) = (Queue::default(), State { idle: true, ..Default::default() }, false, Instant::now());
-                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, volume, pick: None, requested: Default::default(), last, ended, loaded_at });
+                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, volume, pick: None, logged: None, requested: Default::default(), last, ended, loaded_at });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -256,7 +257,12 @@ impl Player {
         if over {
             self.next();
         } else if settled && !self.last.idle && self.last.pos > 5.0 && self.queue.at.is_some() {
-            // well into a track: keep it on disk for replays, and fetch the next one so it starts without the wait
+            // well into a track: it counts as played
+            if let Some(t) = self.queue.current().filter(|t| self.logged.as_ref() != Some(&t.id)).cloned() {
+                self.logged = Some(t.id.clone());
+                crate::history::record(&t);
+            }
+            // ...keep it on disk for replays, and fetch the next one so it starts without the wait
             let ids: Vec<String> = [self.queue.at, self.upcoming()].into_iter().flatten().filter_map(|i| self.queue.items.get(i)).map(|t| t.id.clone()).collect();
             let new: Vec<String> = ids.into_iter().filter(|id| self.requested.insert(id.clone())).collect();
             if !new.is_empty() {
