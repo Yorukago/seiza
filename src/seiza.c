@@ -209,6 +209,7 @@ struct tinywl_output {
 	struct wl_listener request_state;
 	struct wl_listener destroy;
 	struct wlr_scene_buffer *corner[4]; /* SEIZA: the screen's rounded corners, TL TR BL BR */
+	int corner_r; /* radius the corners were built with */
 };
 
 struct tinywl_toplevel {
@@ -1745,6 +1746,7 @@ static void autostart(struct tinywl_server *server) {
 
 static void rules_load(struct tinywl_server *server);
 static void tile_load(struct tinywl_server *server);
+static void place_corners(struct tinywl_output *output);
 static void tile_star(struct tinywl_server *server, struct star *s);
 static int op_reload_config(void *ud) {
 	struct tinywl_server *server = ud;
@@ -1753,6 +1755,10 @@ static int op_reload_config(void *ud) {
 	tile_load(server);
 	frame_colors_load(server);
 	relayout_all(server); /* a new radius or border changes every window */
+	struct tinywl_output *out;
+	wl_list_for_each(out, &server->outputs, link) {
+		place_corners(out);
+	}
 	struct star *st;
 	wl_list_for_each(st, &server->stars, link) {
 		tile_star(server, st);
@@ -2886,12 +2892,11 @@ static void server_cursor_frame(struct wl_listener *listener, void *data) {
 }
 
 /* SEIZA rounded screen: four small black masks, one per corner, drawn above
- * everything. Each is a CORNER_R x CORNER_R antialiased quarter-circle bitmap. */
-#define CORNER_R 22
-
+ * everything. Each is an r x r antialiased quarter-circle bitmap; r is FRAME.screen (0 = square screen). */
 struct corner_buf {
 	struct wlr_buffer base;
-	uint32_t px[CORNER_R * CORNER_R];
+	int r;
+	uint32_t px[];
 };
 
 static void corner_destroy(struct wlr_buffer *b) {
@@ -2906,7 +2911,7 @@ static bool corner_begin(struct wlr_buffer *b, uint32_t flags, void **data, uint
 	}
 	*data = cb->px;
 	*format = DRM_FORMAT_ARGB8888;
-	*stride = CORNER_R * 4;
+	*stride = cb->r * 4;
 	return true;
 }
 
@@ -2918,15 +2923,16 @@ static const struct wlr_buffer_impl corner_impl = {
 	.end_data_ptr_access = corner_end,
 };
 
-static struct wlr_buffer *corner_make(bool flip_x, bool flip_y) {
-	struct corner_buf *cb = calloc(1, sizeof(*cb));
-	wlr_buffer_init(&cb->base, &corner_impl, CORNER_R, CORNER_R);
-	for (int y = 0; y < CORNER_R; y++) {
-		for (int x = 0; x < CORNER_R; x++) {
-			int fx = flip_x ? CORNER_R - 1 - x : x, fy = flip_y ? CORNER_R - 1 - y : y;
-			double d = hypot(fx + 0.5 - CORNER_R, fy + 0.5 - CORNER_R);
-			double a = fmin(1.0, fmax(0.0, d - CORNER_R + 0.5)); /* black outside the circle */
-			cb->px[y * CORNER_R + x] = (uint32_t)lround(a * 255.0) << 24; /* premultiplied black */
+static struct wlr_buffer *corner_make(int r, bool flip_x, bool flip_y) {
+	struct corner_buf *cb = calloc(1, sizeof(*cb) + sizeof(uint32_t) * r * r);
+	cb->r = r;
+	wlr_buffer_init(&cb->base, &corner_impl, r, r);
+	for (int y = 0; y < r; y++) {
+		for (int x = 0; x < r; x++) {
+			int fx = flip_x ? r - 1 - x : x, fy = flip_y ? r - 1 - y : y;
+			double d = hypot(fx + 0.5 - r, fy + 0.5 - r);
+			double a = fmin(1.0, fmax(0.0, d - r + 0.5)); /* black outside the circle */
+			cb->px[y * r + x] = (uint32_t)lround(a * 255.0) << 24; /* premultiplied black */
 		}
 	}
 	return &cb->base;
@@ -2937,15 +2943,24 @@ static void place_corners(struct tinywl_output *output) {
 	struct tinywl_server *server = output->server;
 	struct wlr_box box = {0};
 	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &box);
+	int r = FRAME.screen;
 	for (int i = 0; i < 4; i++) {
+		if (output->corner[i] && output->corner_r != r) { /* the radius changed: rebuild */
+			wlr_scene_node_destroy(&output->corner[i]->node);
+			output->corner[i] = NULL;
+		}
+		if (!r) {
+			continue;
+		}
 		if (!output->corner[i]) {
-			struct wlr_buffer *b = corner_make(i & 1, i >> 1);
+			struct wlr_buffer *b = corner_make(r, i & 1, i >> 1);
 			output->corner[i] = wlr_scene_buffer_create(server->corner_tree, b);
 			wlr_buffer_drop(b);
 		}
 		wlr_scene_node_set_position(&output->corner[i]->node,
-			box.x + (i & 1 ? box.width - CORNER_R : 0), box.y + (i >> 1 ? box.height - CORNER_R : 0));
+			box.x + (i & 1 ? box.width - r : 0), box.y + (i >> 1 ? box.height - r : 0));
 	}
+	output->corner_r = r;
 }
 
 static void output_frame(struct wl_listener *listener, void *data) {

@@ -4,6 +4,7 @@
 
 void frame_defaults(struct frame *f) {
 	f->radius = 14;
+	f->screen = 22;
 	f->border = 2;
 	f->glow = GLOW_SOFT;
 }
@@ -36,6 +37,8 @@ void frame_parse(const char *text, struct frame *f) {
 				for (char *e = val + strlen(val); e > val && e[-1] == ' '; ) *--e = '\0';
 				if (!strcmp(key, "radius")) {
 					number(val, 0, 32, &f->radius);
+				} else if (!strcmp(key, "screen")) {
+					number(val, 0, 48, &f->screen);
 				} else if (!strcmp(key, "border")) {
 					number(val, 0, 8, &f->border);
 				} else if (!strcmp(key, "glow")) {

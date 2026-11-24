@@ -82,6 +82,7 @@ pub fn pages() -> Vec<Page> {
         Page { name: "windows", blurb: "the frame around every window.", cards: vec![
             card("frame", vec![
                 row("frame/radius", "corner roundness", "in pixels", Ctl::Slider(0.0, 32.0, 1.0), "14"),
+                row("frame/screen", "screen corners", "round the display itself, 0 is off", Ctl::Slider(0.0, 48.0, 1.0), "22"),
                 row("frame/border", "frame thickness", "in pixels", Ctl::Slider(0.0, 8.0, 1.0), "2"),
                 row("frame/glow", "glow", "the bloom behind a window", Ctl::Choice(&["off", "soft", "bright"]), "soft"),
             ]),
