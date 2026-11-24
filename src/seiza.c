@@ -371,7 +371,7 @@ static void frame_fit(struct wlr_scene_rect *border, struct wlr_scene_shadow *gl
 		double z, bool shown, bool focused, float a) {
 	int t = BORDER_W;
 	int r = lround(WIN_RADIUS * z);
-	int gx = lround(g->x * z), gy = lround(g->y * z);
+	int gx = 0, gy = 0; /* wlroots puts the geometry origin at the window's origin: a CSD shadow margin is cut off */
 	int gw = lround(g->width * z), gh = lround(g->height * z);
 	wlr_scene_node_set_enabled(&border->node, shown);
 	wlr_scene_node_set_enabled(&glow->node, shown);
@@ -673,6 +673,8 @@ struct scale_arg {
 	double z;
 	int radius;
 	float opacity;
+	struct wlr_surface *root; /* an xdg window's main surface: layout_toplevel clips it to the window geometry */
+	struct wlr_box geo;
 };
 
 static double mono_s(void);
@@ -700,9 +702,13 @@ static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data
 	if (!ss) {
 		return;
 	}
-	/* The unscaled size wlroots itself uses (surface.c: surface_reconfigure);
-	 * xdg windows aren't clipped, so it is just the surface size. */
+	/* The unscaled size wlroots itself uses (surface.c: surface_reconfigure): the surface size,
+	 * or the window geometry for an xdg main surface (its CSD shadow is clipped away). */
 	int w = ss->surface->current.width, h = ss->surface->current.height;
+	if (ss->surface == arg->root && arg->geo.width > 0 && arg->geo.height > 0) {
+		w = arg->geo.width;
+		h = arg->geo.height;
+	}
 	if (w <= 0 || h <= 0) {
 		return;
 	}
@@ -725,6 +731,9 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		tl->wy = fmax(tl->wy, tl->star->cy - STAR_H / 2.0 + (tl->mode ? 0 : tl->server->usable.y - tl->server->full.y));
 	}
 	struct wlr_box geo = tl_geometry(tl); /* the smaller window keeps its centre */
+	if (!tl->xsurface) {
+		wlr_scene_subsurface_tree_set_clip(&tl->scene_tree->node, &geo); /* cut off a CSD shadow margin */
+	}
 	wlr_scene_node_set_position(&tl->scene_tree->node, lround(tl->wx * z + (z - pz) * geo.width / 2), lround(tl->wy * z + (z - pz) * geo.height / 2));
 	if (tl->xsurface && surface && surface->mapped && tl->xsurface->width && tl->xsurface->height &&
 			(tl->xsurface->x != 0 || tl->xsurface->y != 0)) {
@@ -733,7 +742,8 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 		 * bigger than that. Which window gets the pointer follows Wayland pointer focus, not X geometry. */
 		wlr_xwayland_surface_configure(tl->xsurface, 0, 0, tl->xsurface->width, tl->xsurface->height);
 	}
-	struct scale_arg arg = {pz, tl->mode ? 0 : lround(WIN_RADIUS * pz), fminf(1.0f, fmaxf(0.0f, alpha))}; /* maximized windows have square corners */
+	struct scale_arg arg = {pz, tl->mode ? 0 : lround(WIN_RADIUS * pz), fminf(1.0f, fmaxf(0.0f, alpha)),
+		tl->xsurface ? NULL : surface, geo}; /* maximized windows have square corners */
 	wlr_scene_node_for_each_buffer(&tl->scene_tree->node, scale_buffer, &arg);
 	update_border(tl);
 }
