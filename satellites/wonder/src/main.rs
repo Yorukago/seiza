@@ -6,6 +6,7 @@ mod cover;
 mod ipc;
 mod lyrics;
 mod mpris;
+mod playlists;
 mod player;
 mod search;
 mod ui;
@@ -101,7 +102,9 @@ impl Wonder {
             }
             Keysym::BackSpace => self.ui.backspace(),
             Keysym::Return | Keysym::KP_Enter => self.ui.enter(),
-            Keysym::Tab => self.ui.go((self.ui.page + 1) % 2),
+            Keysym::Delete if !self.ui.searching() => self.ui.delete_selected(),
+            Keysym::s | Keysym::S if self.ctrl => self.ui.save_queue(),
+            Keysym::Tab => self.ui.next_page(),
             Keysym::Up => self.ui.move_sel(-1),
             Keysym::Down => self.ui.move_sel(1),
             Keysym::Left if !self.ui.searching() => self.ui.step(-1),
@@ -213,7 +216,7 @@ impl KeyboardHandler for Wonder {
         self.draw(qh);
     }
     fn repeat_key(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
-        if !matches!(event.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::Escape | Keysym::Tab | Keysym::space) {
+        if !self.ctrl && !matches!(event.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::Escape | Keysym::Tab | Keysym::space) {
             self.key(&event);
             self.draw(qh);
         }

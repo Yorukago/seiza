@@ -3,6 +3,7 @@
 use crate::cover;
 use crate::lyrics::{self, Lyrics};
 use crate::player::{Shared, State};
+use crate::playlists::{self, Playlist};
 use crate::search::{self, Track};
 use seiza_common::draw::{blend, shared_font, Canvas, Text};
 use seiza_common::kit::{self, Glide, Thread, PILL_W};
@@ -18,7 +19,8 @@ const GAP: f32 = 40.0; // between that column and the lyrics
 const ROW_H: f32 = 76.0; // a search result
 const ROW_GAP: f32 = 10.0;
 const QUEUE_MAX: usize = 7; // stars shown at once
-const PAGES: [&str; 2] = ["now", "find"];
+const SAVE_W: f32 = 170.0;
+const PAGES: [&str; 3] = ["now", "find", "playlists"];
 
 /// The mini pill: its size, and where the cover (x, y, radius), the seek thread and the play button sit in it.
 pub const MINI: (u32, u32) = (480, 76);
@@ -55,6 +57,9 @@ pub struct Ui {
     results: Job<Vec<Track>>,
     sel: usize,
     added: HashSet<String>, // ids put in the queue from the results
+    lists: Vec<Playlist>,   // the playlists page
+    psel: usize,
+    saved_at: Option<Instant>, // when the queue was last saved: the button says so for a moment
     queue: Vec<Track>,
     at: Option<usize>,
     st: State,
@@ -107,6 +112,7 @@ struct Geo {
     lyrics: (f32, f32, f32, f32), // x, top, width, bottom
     lyric_mid: f32, // the baseline of the line being sung
     queue_y: f32,
+    save: (f32, f32, f32, f32), // the "save as playlist" button: x, y, w, h
     queue: Thread,
     tabs: Thread,
 }
@@ -123,6 +129,9 @@ impl Ui {
             results: Job::Idle,
             sel: 0,
             added: HashSet::new(),
+            lists: vec![],
+            psel: 0,
+            saved_at: None,
             queue: vec![],
             at: None,
             st: State { idle: true, ..Default::default() },
@@ -174,6 +183,12 @@ impl Ui {
         ui.query = if page == 1 { "hoshi".into() } else { String::new() };
         ui.searched = ui.query.clone();
         ui.results = Job::Done(ui.queue[..5].to_vec());
+        ui.lists = vec![
+            Playlist { name: "sleep rewind +6".into(), tracks: ui.queue.clone(), file: Default::default() },
+            Playlist { name: "paper boats +1".into(), tracks: ui.queue[1..3].to_vec(), file: Default::default() },
+            Playlist { name: "dawn, a little later".into(), tracks: ui.queue[6..].to_vec(), file: Default::default() },
+        ];
+        ui.psel = 1;
         ui
     }
 
@@ -197,6 +212,7 @@ impl Ui {
             lyrics: (lx + LEFT_W + GAP, oy + 175.0, self.w - 2.0 * PAD - LEFT_W - GAP, oy + 475.0),
             lyric_mid: oy + 330.0,
             queue_y: qy,
+            save: (ox + self.w - PAD - SAVE_W, qy - 74.0, SAVE_W, 30.0),
             queue: Thread::new(lx, ox + self.w - PAD, qy, n),
             tabs: Thread::new(ox + 150.0, ox + 150.0 + 150.0 * PAGES.len() as f32, oy + 40.0, PAGES.len()),
         }
@@ -260,6 +276,9 @@ impl Ui {
                 });
             }
         }
+        if self.saved_at.is_some_and(|t| t.elapsed().as_secs_f32() > 2.5) {
+            self.saved_at = None;
+        }
         let key = self.state_key();
         let changed = key != self.shown;
         self.stale |= changed;
@@ -278,7 +297,7 @@ impl Ui {
             Job::Done(v) => 2 + v.len(),
             Job::Failed(_) => 99,
         };
-        format!("{:?}|{}|{}|{}|{}|{:?}|{}|{}|{}", self.at, self.queue.len(), self.st.paused, self.st.pos as u32, self.st.len as u32, line, self.cover.is_some(), r, self.track_id.is_some())
+        format!("{}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{}", self.saved_at.is_some(), self.at, self.queue.len(), self.st.paused, self.st.pos as u32, self.st.len as u32, line, self.cover.is_some(), r, self.track_id.is_some())
     }
 
     /// True while a frame is still owed: something changed, or something moves by itself.
@@ -324,10 +343,18 @@ impl Ui {
         !self.query.is_empty()
     }
 
+    pub fn next_page(&mut self) {
+        self.go((self.page + 1) % PAGES.len());
+    }
+
     pub fn go(&mut self, page: usize) {
         if page < PAGES.len() && page != self.page {
             self.glide.start(self.page as f32);
             self.page = page;
+            if page == 2 {
+                self.lists = playlists::list();
+                self.psel = 0;
+            }
             self.stale = true;
         }
     }
@@ -335,6 +362,10 @@ impl Ui {
     /// Enter: a new search when the words changed, else the chosen result joins the queue.
     pub fn enter(&mut self) {
         let q = self.query.trim().to_string();
+        if self.page == 2 && q.is_empty() {
+            self.play_list();
+            return;
+        }
         if !q.is_empty() && q != self.searched {
             self.go(1);
             self.searched = q.clone();
@@ -361,10 +392,49 @@ impl Ui {
     }
 
     pub fn move_sel(&mut self, d: isize) {
+        if self.page == 2 {
+            if !self.lists.is_empty() {
+                self.psel = (self.psel as isize + d).clamp(0, self.lists.len() as isize - 1) as usize;
+                self.stale = true;
+            }
+            return;
+        }
         if let Job::Done(v) = &self.results {
             self.sel = (self.sel as isize + d).clamp(0, v.len() as isize - 1) as usize;
             self.stale = true;
         }
+    }
+
+    /// Ctrl+S or the button: keep the queue as a playlist.
+    pub fn save_queue(&mut self) {
+        if playlists::save(&self.queue).is_some() {
+            self.saved_at = Some(Instant::now());
+            self.stale = true;
+        }
+    }
+
+    /// The chosen playlist replaces the queue and starts.
+    fn play_list(&mut self) {
+        let Some(pl) = self.lists.get(self.psel).cloned() else { return };
+        self.added.clear();
+        self.with_player(|p| p.play_all(pl.tracks));
+        self.go(0);
+    }
+
+    pub fn delete_selected(&mut self) {
+        if self.page != 2 || self.psel >= self.lists.len() {
+            return;
+        }
+        playlists::delete(&self.lists[self.psel]);
+        self.lists = playlists::list();
+        self.psel = self.psel.min(self.lists.len().saturating_sub(1));
+        self.stale = true;
+    }
+
+    /// How many playlist rows fit, and the first one shown so the chosen one is in view.
+    fn list_rows(&self) -> (usize, usize) {
+        let vis = ((self.h - 168.0 - FOOT - 12.0) / (ROW_H + ROW_GAP)).floor().max(1.0) as usize;
+        (vis, if self.psel < vis { 0 } else { self.psel + 1 - vis })
     }
 
     pub fn toggle(&mut self) {
@@ -409,6 +479,15 @@ impl Ui {
             }
             return true;
         }
+        if self.page == 2 {
+            self.press_list(&g, x, y);
+            return true;
+        }
+        let (bx, by, bw, bh) = g.save;
+        if !self.queue.is_empty() && x >= bx && x <= bx + bw && y >= by && y <= by + bh {
+            self.save_queue();
+            return true;
+        }
         let (sx0, sx1, sy) = g.seek;
         if (y - sy).abs() < 14.0 && x >= sx0 - 4.0 && x <= sx1 + 4.0 && self.st.len > 0.0 {
             let at = ((x - sx0) / (sx1 - sx0)).clamp(0.0, 1.0) as f64 * self.st.len;
@@ -450,6 +529,20 @@ impl Ui {
     }
 
     /// The lyric line drawn at (x, y), if the lyrics are timed.
+    fn press_list(&mut self, g: &Geo, x: f32, y: f32) {
+        let top = g.oy + 168.0;
+        let row = ((y - top) / (ROW_H + ROW_GAP)).floor();
+        let (vis, start) = self.list_rows();
+        if x > g.ox + PAD && x < g.ox + self.w - PAD && row >= 0.0 && (row as usize) < vis && (y - top) % (ROW_H + ROW_GAP) < ROW_H && start + (row as usize) < self.lists.len() {
+            self.psel = start + row as usize;
+            if x > g.ox + self.w - PAD - 56.0 {
+                self.delete_selected();
+            } else {
+                self.play_list();
+            }
+        }
+    }
+
     fn lyric_at(&self, g: &Geo, x: f32, y: f32) -> Option<usize> {
         let Job::Done(l) = &self.lyrics else { return None };
         let (lx, top, w, bottom) = g.lyrics;
@@ -492,13 +585,17 @@ impl Ui {
         let labels: Vec<&str> = PAGES.to_vec();
         g.tabs.draw(&mut cv, &mut self.t13, &labels, self.glide.pos(self.page), self.hover);
         kit::search_pill(&mut cv, &mut self.t15, g.ox + self.w - PAD - PILL_W, g.oy + 23.0, &self.query, "search the sky..");
-        if self.page == 0 {
-            self.draw_now(&mut cv, &g);
-        } else {
-            self.draw_find(&mut cv, &g);
+        match self.page {
+            0 => self.draw_now(&mut cv, &g),
+            1 => self.draw_find(&mut cv, &g),
+            _ => self.draw_playlists(&mut cv, &g),
         }
         let base = g.oy + self.h - 22.0;
-        let hint = if self.page == 0 { "click a star to change page  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  left/right: previous, next" } else { "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now" };
+        let hint = match self.page {
+            0 => "click a star to change page  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  ctrl+s: save the queue",
+            1 => "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now",
+            _ => "enter or click: play it, replacing the queue  \u{b7}  up/down: choose  \u{b7}  Delete or x: remove",
+        };
         self.t13.draw(&mut cv, g.ox + PAD, base, hint, rgba(p.text, 0.4));
         let quit = "ctrl+m: mini  \u{b7}  Esc: clear / close";
         let qw = self.t13.width(quit);
@@ -739,6 +836,8 @@ impl Ui {
         }
         let n = self.queue.len();
         self.t13.draw(cv, lx, g.queue_y - 50.0, &format!("queue \u{b7} a constellation of {n}"), rgba(p.text, 0.5));
+        let label = if self.saved_at.is_some() { "saved!" } else { "save as playlist" };
+        kit::pill_button(cv, &mut self.t13, g.save, label, self.saved_at.is_some());
         let start = self.queue_window().0;
         let titles: Vec<String> = self.queue_window().1.iter().map(|t| t.title.clone()).collect();
         let names: Vec<String> = titles.iter().map(|t| fit(&mut self.t13, t, 150.0)).collect();
@@ -790,6 +889,38 @@ impl Ui {
                 }
             }
             Job::Idle => {}
+        }
+    }
+}
+
+impl Ui {
+    fn draw_playlists(&mut self, cv: &mut Canvas, g: &Geo) {
+        let p = palette();
+        let blurb = if self.lists.is_empty() { "nothing saved yet.. press \"save as playlist\" on the now page".to_string() } else { format!("{} saved \u{b7} click one to play it, it replaces the queue", self.lists.len()) };
+        self.heading(cv, g, "playlists", &blurb);
+        let top = g.oy + 168.0;
+        let (x, rw) = (g.ox + PAD, self.w - 2.0 * PAD);
+        let (vis, start) = self.list_rows();
+        let rows: Vec<Playlist> = self.lists.iter().skip(start).take(vis).cloned().collect();
+        for (k, pl) in rows.iter().enumerate() {
+            let y = top + k as f32 * (ROW_H + ROW_GAP);
+            let hot = start + k == self.psel;
+            cv.round_rect(x, y, rw, ROW_H, 14.0, rgba(if hot { p.star } else { p.text }, if hot { 0.8 } else { 0.10 }));
+            cv.round_rect(x + 1.0, y + 1.0, rw - 2.0, ROW_H - 2.0, 13.0, rgba(p.panel, 1.0));
+            // the playlist as a little constellation: one star per song, up to five, joined by a thread
+            cv.round_rect(x + 12.0, y + 11.0, 96.0, 54.0, 8.0, rgba(p.sky, 1.0));
+            let n = pl.tracks.len().min(5);
+            let pts: Vec<(f32, f32)> = (0..n).map(|i| (x + 28.0 + 64.0 * i as f32 / (n.max(2) - 1) as f32, y + 38.0 + [-11.0, 8.0, -7.0, 11.0, -3.0][i])).collect();
+            cv.polyline(&pts, 1.0, rgba(p.star, 0.45));
+            pts.iter().for_each(|&(sx, sy)| cv.sparkle(sx, sy, 4.5, rgba(p.star, 0.9)));
+            let name = fit(&mut self.t15, &pl.name, rw - 140.0 - 80.0);
+            self.t15.draw(cv, x + 124.0, y + 32.0, &name, rgba(p.text, 1.0));
+            let songs = if pl.tracks.len() == 1 { "1 song".to_string() } else { format!("{} songs", pl.tracks.len()) };
+            self.t13.draw(cv, x + 124.0, y + 54.0, &format!("{songs} \u{b7} {}", clock(pl.secs() as f64)), rgba(p.text, 0.55));
+            let (cx, cy) = (x + rw - 28.0, y + ROW_H / 2.0);
+            let ink = rgba(p.text, if hot { 0.8 } else { 0.4 });
+            cv.polyline(&[(cx - 5.0, cy - 5.0), (cx + 5.0, cy + 5.0)], 1.4, ink);
+            cv.polyline(&[(cx - 5.0, cy + 5.0), (cx + 5.0, cy - 5.0)], 1.4, ink);
         }
     }
 }

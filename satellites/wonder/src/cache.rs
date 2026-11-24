@@ -19,7 +19,7 @@ fn audio_dir() -> Option<PathBuf> {
 }
 
 /// A YouTube id becomes part of a file name, so only the characters ids have.
-fn valid(id: &str) -> bool {
+pub fn valid(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 

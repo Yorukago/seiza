@@ -156,6 +156,13 @@ impl Player {
         }
     }
 
+    /// Replace the queue with these tracks and start the first.
+    pub fn play_all(&mut self, tracks: Vec<Track>) {
+        self.queue.items = tracks;
+        self.queue.at = None;
+        self.play_at(0);
+    }
+
     /// Play it next, right now.
     pub fn play_now(&mut self, t: Track) {
         let i = self.queue.insert_next(t);
