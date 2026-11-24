@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=settings
+GenericName=Settings
+Comment=Seiza's settings: look, bar, widgets, keys and more
+Exec=seiza-settings
+Keywords=settings;preferences;config;options;theme;
+Categories=Settings;
+Terminal=false

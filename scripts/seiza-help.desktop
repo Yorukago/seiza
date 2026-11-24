@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=help
+GenericName=Help
+Comment=Seiza's help: keys, tips and documentation
+Exec=seiza-help
+Keywords=help;keys;shortcuts;docs;documentation;guide;
+Categories=Utility;
+Terminal=false

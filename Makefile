@@ -74,10 +74,12 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-diary $(PREFIX)/bin/seiza-diary
 	install -Dm644 scripts/seiza-diary.desktop $(PREFIX)/share/applications/seiza-diary.desktop
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
+	install -Dm644 scripts/seiza-settings.desktop $(PREFIX)/share/applications/seiza-settings.desktop
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel
 	install -Dm755 satellites/target/release/seiza-conf $(PREFIX)/bin/seiza-conf
 	install -Dm755 satellites/target/release/seiza-help $(PREFIX)/bin/seiza-help
+	install -Dm644 scripts/seiza-help.desktop $(PREFIX)/share/applications/seiza-help.desktop
 	install -Dm755 satellites/target/release/seiza-wonder $(PREFIX)/bin/seiza-wonder
 	install -Dm644 scripts/seiza-wonder.desktop $(PREFIX)/share/applications/seiza-wonder.desktop
 	install -Dm755 satellites/target/release/seiza-hh $(PREFIX)/bin/seiza-hh
