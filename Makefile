@@ -72,6 +72,7 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-notify $(PREFIX)/bin/seiza-notify
 	install -Dm755 satellites/target/release/seiza-panel $(PREFIX)/bin/seiza-panel
 	install -Dm755 satellites/target/release/seiza-diary $(PREFIX)/bin/seiza-diary
+	install -Dm644 scripts/seiza-diary.desktop $(PREFIX)/share/applications/seiza-diary.desktop
 	install -Dm755 satellites/target/release/seiza-settings $(PREFIX)/bin/seiza-settings
 	install -Dm755 satellites/target/release/seiza-constellations $(PREFIX)/bin/seiza-constellations
 	install -Dm755 satellites/target/release/seiza-carousel $(PREFIX)/bin/seiza-carousel

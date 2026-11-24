@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=diary
+GenericName=Diary
+Comment=Seiza's diary: one page per day, on a calendar
+Exec=seiza-diary
+Keywords=diary;journal;notes;calendar;write;
+Categories=Office;Calendar;
+Terminal=false
