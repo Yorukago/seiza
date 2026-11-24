@@ -452,12 +452,16 @@ impl Ui {
     /// The lyric line drawn at (x, y), if the lyrics are timed.
     fn lyric_at(&self, g: &Geo, x: f32, y: f32) -> Option<usize> {
         let Job::Done(l) = &self.lyrics else { return None };
-        let cur = l.current(self.st.pos as f32)?;
         let (lx, top, w, bottom) = g.lyrics;
         if x < lx || x > lx + w || y < top || y > bottom {
             return None;
         }
-        (0..l.lines.len()).find(|&i| (y - (g.lyric_mid + line_offset(cur, i))).abs() < 22.0 && !l.lines[i].1.is_empty())
+        match l.current(self.st.pos as f32) {
+            Some(cur) => (0..l.lines.len()).find(|&i| (y - (g.lyric_mid + line_offset(cur, i))).abs() < 22.0 && !l.lines[i].1.is_empty()),
+            // before the first line the window shows the first lines quietly, one under another (see draw_lyrics)
+            None if l.synced => l.lines.iter().enumerate().filter(|(_, (_, s))| !s.is_empty()).take(8).enumerate().find(|(k, _)| (y - (top + 28.0 + *k as f32 * 36.0)).abs() < 18.0).map(|(_, (i, _))| i),
+            None => None,
+        }
     }
 
     // ---- drawing ----
@@ -854,6 +858,16 @@ mod tests {
         assert_eq!(ui.mini_lines(), ("hoshi no ito".to_string(), "kotoza demo \u{b7} no lyrics for this one..".to_string()));
         ui.st.len = 0.0;
         assert_eq!(ui.mini_lines().0, "fetching..");
+    }
+
+    #[test]
+    fn the_quiet_lines_before_the_first_one_can_be_clicked_too() {
+        let mut ui = Ui::demo(0);
+        ui.st.pos = 10.0; // the first line is at 60 s
+        let g = ui.geo(1440.0, 900.0);
+        let (lx, top) = (g.lyrics.0, g.lyrics.1);
+        assert_eq!(ui.lyric_at(&g, lx + 20.0, top + 28.0 - 6.0), Some(0));
+        assert_eq!(ui.lyric_at(&g, lx + 20.0, top + 28.0 + 36.0 - 6.0), Some(1));
     }
 
     #[test]
