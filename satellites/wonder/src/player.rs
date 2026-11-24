@@ -51,6 +51,17 @@ impl Queue {
         let i = self.at? as isize + d;
         (0..self.items.len() as isize).contains(&i).then_some(i as usize)
     }
+
+    /// Where the music goes when this track is over. Shuffle picks any other track by `roll` and never ends;
+    /// repeat wraps the end back to the first.
+    pub fn after(&self, shuffle: bool, repeat: bool, roll: usize) -> Option<usize> {
+        let (at, n) = (self.at?, self.items.len());
+        if shuffle && n > 1 {
+            let i = roll % (n - 1);
+            return Some(if i >= at { i + 1 } else { i });
+        }
+        self.step(1).or_else(|| repeat.then_some(0))
+    }
 }
 
 pub struct Player {
@@ -58,6 +69,8 @@ pub struct Player {
     ipc: Ipc,
     sock: PathBuf,
     pub queue: Queue,
+    pub shuffle: bool,
+    pub repeat: bool,
     pub last: State, // as of the last `poll`: what the window and MPRIS read
     ended: bool,     // the last track finished and there is no next one
     loaded_at: Instant,
@@ -88,7 +101,7 @@ impl Player {
         for _ in 0..50 {
             if let Ok(s) = UnixStream::connect(&sock) {
                 let (queue, last, ended, loaded_at) = (Queue::default(), State { idle: true, ..Default::default() }, false, Instant::now());
-                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, last, ended, loaded_at });
+                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, last, ended, loaded_at });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -147,7 +160,8 @@ impl Player {
     }
 
     pub fn next(&mut self) {
-        match self.queue.step(1) {
+        let roll = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
+        match self.queue.after(self.shuffle, self.repeat, roll) {
             Some(i) => drop(self.play_at(i)),
             None => {
                 self.ended = true;
@@ -231,5 +245,16 @@ mod tests {
         assert_eq!(q.current().unwrap().id, "b");
         q.at = None;
         assert_eq!(q.insert_next(t("y")), 4, "with none current it goes to the end");
+    }
+
+    #[test]
+    fn shuffle_never_picks_the_current_track_and_repeat_wraps_the_end() {
+        let mut q = Queue::default();
+        (0..3).for_each(|i| drop(q.push(t(&i.to_string()))));
+        q.at = Some(1);
+        assert!((0..9).all(|r| matches!(q.after(true, false, r), Some(0 | 2))));
+        q.at = Some(2);
+        assert_eq!((q.after(false, false, 0), q.after(false, true, 0)), (None, Some(0)));
+        assert_eq!(q.after(false, false, 0).or(q.after(false, true, 0)), Some(0));
     }
 }

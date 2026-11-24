@@ -45,6 +45,8 @@ pub struct Ui {
     queue: Vec<Track>,
     at: Option<usize>,
     st: State,
+    shuffle: bool,
+    repeat: bool,
     track_id: Option<String>, // the track the lyrics and cover below are for
     lyrics: Job<Lyrics>,
     cover: Option<Canvas>,
@@ -88,7 +90,7 @@ struct Geo {
     oy: f32,
     cover: (f32, f32),
     seek: (f32, f32, f32), // x0, x1, y
-    buttons: [(f32, f32, f32); 3], // prev, play, next: centre and radius
+    buttons: [(f32, f32, f32); 5], // prev, play, next, shuffle, repeat: centre and radius
     lyrics: (f32, f32, f32, f32), // x, top, width, bottom
     lyric_mid: f32, // the baseline of the line being sung
     queue_y: f32,
@@ -111,6 +113,8 @@ impl Ui {
             queue: vec![],
             at: None,
             st: State { idle: true, ..Default::default() },
+            shuffle: false,
+            repeat: false,
             track_id: None,
             lyrics: Job::Idle,
             cover: None,
@@ -176,7 +180,7 @@ impl Ui {
             oy,
             cover: (lx, cy),
             seek: (lx, lx + LEFT_W, oy + 441.0),
-            buttons: [(lx + LEFT_W / 2.0 - 70.0, oy + 508.0, 19.0), (lx + LEFT_W / 2.0, oy + 508.0, 26.0), (lx + LEFT_W / 2.0 + 70.0, oy + 508.0, 19.0)],
+            buttons: [(lx + LEFT_W / 2.0 - 70.0, oy + 508.0, 19.0), (lx + LEFT_W / 2.0, oy + 508.0, 26.0), (lx + LEFT_W / 2.0 + 70.0, oy + 508.0, 19.0), (lx + LEFT_W / 2.0 - 125.0, oy + 508.0, 14.0), (lx + LEFT_W / 2.0 + 125.0, oy + 508.0, 14.0)],
             lyrics: (lx + LEFT_W + GAP, oy + 175.0, self.w - 2.0 * PAD - LEFT_W - GAP, oy + 475.0),
             lyric_mid: oy + 330.0,
             queue_y: qy,
@@ -228,6 +232,7 @@ impl Ui {
         if let Some(s) = &self.shared {
             let p = s.lock().unwrap();
             (self.queue, self.at, self.st) = (p.queue.items.clone(), p.queue.at, p.last.clone());
+            (self.shuffle, self.repeat) = (p.shuffle, p.repeat);
         }
         let id = self.current().map(|t| t.id.clone());
         if id != self.track_id {
@@ -392,7 +397,17 @@ impl Ui {
                 match i {
                     0 => self.step(-1),
                     1 => self.toggle(),
-                    _ => self.step(1),
+                    2 => self.step(1),
+                    3 => {
+                        self.shuffle = !self.shuffle;
+                        let on = self.shuffle;
+                        self.with_player(|p| p.shuffle = on);
+                    }
+                    _ => {
+                        self.repeat = !self.repeat;
+                        let on = self.repeat;
+                        self.with_player(|p| p.repeat = on);
+                    }
                 }
                 return true;
             }
@@ -526,13 +541,23 @@ impl Ui {
         let p = palette();
         let ink = rgba(p.text, 0.85);
         for (i, &(x, y, r)) in g.buttons.iter().enumerate() {
-            let edge = if i == 1 { rgba(p.star, 0.9) } else { rgba(p.text, 0.28) };
+            let on = match i {
+                3 => self.shuffle,
+                4 => self.repeat,
+                _ => i == 1,
+            };
+            let edge = if on { rgba(p.star, 0.9) } else { rgba(p.text, 0.28) };
             cv.round_rect(x - r, y - r, 2.0 * r, 2.0 * r, r, edge);
             cv.round_rect(x - r + 1.2, y - r + 1.2, 2.0 * r - 2.4, 2.0 * r - 2.4, r - 1.2, rgba(p.panel, 1.0));
             match i {
                 0 => {
                     cv.round_rect(x - 7.0, y - 6.5, 2.0, 13.0, 1.0, ink);
                     cv.shape(x + 2.0, y, 8.0, ink, |px, py| px - x >= -4.0 && px - x <= 7.0 && (py - y).abs() <= (px - x + 4.0) * 0.6);
+                }
+                3 | 4 => {
+                    let (word, ink) = (["s", "r"][i - 3], if on { rgba(p.star, 1.0) } else { rgba(p.text, 0.5) });
+                    let w = self.t13.width(word);
+                    self.t13.draw(cv, x - w / 2.0, y + 4.5, word, ink);
                 }
                 2 => {
                     cv.round_rect(x + 5.0, y - 6.5, 2.0, 13.0, 1.0, ink);
