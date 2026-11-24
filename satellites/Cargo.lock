@@ -3213,6 +3213,7 @@ dependencies = [
  "keepass",
  "seiza-common",
  "smithay-client-toolkit 0.21.1",
+ "zeroize",
 ]
 
 [[package]]

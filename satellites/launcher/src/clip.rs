@@ -116,7 +116,7 @@ fn ago(secs: u64) -> String {
 }
 
 /// Shorten `s` with ".." until it fits in `max` pixels.
-fn fit(t: &mut Text, s: &str, max: f32) -> String {
+pub(crate) fn fit(t: &mut Text, s: &str, max: f32) -> String {
     if t.width(s) <= max {
         return s.to_string();
     }

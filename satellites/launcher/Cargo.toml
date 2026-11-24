@@ -7,6 +7,7 @@ edition = "2024"
 keepass = "0.17.0"
 seiza-common = { path = "../common" }
 smithay-client-toolkit = "0.21.1"
+zeroize = "1"
 
 [dev-dependencies]
 keepass = { version = "0.17.0", features = ["save_kdbx4"] }

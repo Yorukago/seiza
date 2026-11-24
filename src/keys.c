@@ -33,6 +33,7 @@ const char KEYS_DEFAULT[] =
 	"Super+h       = seiza-help\n"
 	"Super+l       = seiza-launcher\n"
 	"Super+v       = seiza-launcher --clip\n"
+	"Super+Shift+v = seiza-launcher --pass\n"
 	"Super+Tab     = seiza switch\n"
 	"Super+Shift+l = seiza-lock\n"
 	"Super+s       = seiza-settings\n"

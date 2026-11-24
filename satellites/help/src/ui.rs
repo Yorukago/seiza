@@ -43,6 +43,7 @@ const WHAT: &[(&str, &str, &str)] = &[
     ("seiza tile", "tile this star", "Windows"),
     ("seiza switch", "window switcher", "Windows"),
     ("seiza-launcher --clip", "clipboard history", "Apps"),
+    ("seiza-launcher --pass", "password vault", "Apps"),
     ("seiza-launcher", "launcher", "Apps"),
     ("seiza-shot area", "screenshot an area", "Capture"),
     ("seiza-shot screen", "screenshot the screen", "Capture"),

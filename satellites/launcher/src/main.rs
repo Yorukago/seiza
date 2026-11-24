@@ -6,10 +6,12 @@
 //! opens in the current star. SEIZA_LAUNCHER_DRY=1 prints the command instead.
 //! `seiza-launcher --dump out.ppm [list|stars] [query]` draws one frame to a file; `--dump out.ppm clip [query]`
 //! draws the clipboard picker (`seiza-launcher --clip`, see clip.rs) from $XDG_RUNTIME_DIR/seiza-clip.
+//! `seiza-launcher --pass` is the vault card (see pass.rs); `--dump out.ppm pass [query]` draws it with the
+//! vault's passphrase read from $SEIZA_PASS_PASSPHRASE (a dev aid: the card itself only ever asks on screen).
 mod calc;
 mod clip;
-mod pass;
 mod emoji;
+mod pass;
 mod ui;
 
 use seiza_common::{apps::load_apps, draw::Canvas};
@@ -37,6 +39,7 @@ use smithay_client_toolkit::{
 };
 use std::time::Instant;
 use clip::{ClipUi, Hit};
+use pass::{CLEAR_AFTER, Enter, PassUi, copy_secret};
 use ui::{Style, Ui};
 
 const OPEN_SECS: f32 = 0.35;
@@ -91,6 +94,7 @@ struct Launcher {
     shown: f32, // the visibility last drawn
     ui: Ui,
     clip: Option<ClipUi>, // `--clip`: the clipboard picker takes the place of `ui`
+    pass: Option<PassUi>, // `--pass`: the vault card, likewise
 }
 
 impl Launcher {
@@ -187,7 +191,60 @@ impl Launcher {
         self.dirty = true;
     }
 
+    fn pass_key(&mut self, event: &KeyEvent) {
+        let Some(p) = self.pass.as_mut() else { return };
+        p.error = None;
+        match event.keysym {
+            Keysym::Escape => {
+                if !p.back() {
+                    return self.close();
+                }
+            }
+            Keysym::Return | Keysym::KP_Enter => match p.enter() {
+                Enter::User(u) => copy_secret(&u, None),
+                Enter::Password(pw) => {
+                    copy_secret(&pw, Some(CLEAR_AFTER));
+                    return self.close(); // closing locks it: the process exits and the vault leaves memory
+                }
+                Enter::Nothing => {}
+            },
+            Keysym::Tab | Keysym::Right => p.cycle(1),
+            Keysym::Left => p.cycle(-1),
+            Keysym::BackSpace => p.backspace(),
+            Keysym::Up => p.step(-1),
+            Keysym::Down => p.step(1),
+            _ => match event.utf8.as_deref() {
+                Some(s) if !self.chord && !s.is_empty() && !s.chars().any(char::is_control) => p.type_str(s),
+                _ => return,
+            },
+        }
+        self.dirty = true;
+    }
+
+    fn pass_pointer(&mut self, e: &PointerEvent) {
+        let Some(p) = self.pass.as_mut() else { return };
+        let hit = p.hit(e.position.0 as f32, e.position.1 as f32);
+        match e.kind {
+            PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
+                if let Hit::Row(k) = hit {
+                    p.select(k);
+                }
+            }
+            PointerEventKind::Press { button: BTN_LEFT, .. } => match hit {
+                Hit::Outside => return self.close(),
+                Hit::Row(k) => p.select(k),
+                _ => {}
+            },
+            PointerEventKind::Axis { vertical, .. } => p.scroll_by(if vertical.absolute > 0.0 { 1 } else { -1 }),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
     fn key(&mut self, event: &KeyEvent) {
+        if self.pass.is_some() {
+            return self.pass_key(event);
+        }
         if self.clip.is_some() {
             return self.clip_key(event);
         }
@@ -234,9 +291,10 @@ impl Launcher {
         }
         self.dirty = false;
         self.shown = e;
-        let cv = match self.clip.as_mut() {
-            Some(c) => c.render(e),
-            None => self.ui.render(e),
+        let cv = match (self.pass.as_mut(), self.clip.as_mut()) {
+            (Some(p), _) => p.render(e),
+            (_, Some(c)) => c.render(e),
+            _ => self.ui.render(e),
         };
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         // shortcut: assumes a little-endian host, which Argb8888 in memory then matches.
@@ -284,6 +342,9 @@ impl LayerShellHandler for Launcher {
         (self.ui.w, self.ui.h) = size;
         if let Some(c) = self.clip.as_mut() {
             c.resize(size.0, size.1);
+        }
+        if let Some(p) = self.pass.as_mut() {
+            p.resize(size.0, size.1);
         }
         self.configured = true;
         self.opened.get_or_insert_with(Instant::now);
@@ -347,6 +408,10 @@ impl PointerHandler for Launcher {
     fn pointer_frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         for e in events {
             if &e.surface != self.layer.wl_surface() {
+                continue;
+            }
+            if self.pass.is_some() {
+                self.pass_pointer(e);
                 continue;
             }
             if self.clip.is_some() {
@@ -429,8 +494,26 @@ fn clip_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("seiza-clip")
 }
 
+/// $SEIZA_PASS_VAULT, else ~/.local/share/seiza/vault.kdbx.
+fn vault_path() -> std::path::PathBuf {
+    std::env::var_os("SEIZA_PASS_VAULT").map(Into::into).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::PathBuf::from(home).join(".local/share/seiza/vault.kdbx")
+    })
+}
+
 fn dump(path: &str, args: &[String]) {
-    let cv: Canvas = if args.first().map(String::as_str) == Some("clip") {
+    let cv: Canvas = if args.first().map(String::as_str) == Some("pass") {
+        let mut ui = PassUi::new(vault_path(), 1920.0, 1080.0);
+        if let Ok(pw) = std::env::var("SEIZA_PASS_PASSPHRASE") {
+            ui.type_str(&pw);
+            ui.enter();
+        }
+        if let Some(q) = args.get(1) {
+            ui.type_str(q);
+        }
+        ui.render(1.0)
+    } else if args.first().map(String::as_str) == Some("clip") {
         let mut ui = ClipUi::new(clip::load(&clip_dir()), 1920.0, 1080.0);
         if let Some(q) = args.get(1) {
             ui.type_str(q);
@@ -457,8 +540,9 @@ fn main() {
         return;
     }
     let clip = args.iter().any(|a| a == "--clip");
+    let pass = args.iter().any(|a| a == "--pass");
     let windows = args.iter().any(|a| a == "--windows");
-    let style = args.first().and_then(|a| style_arg(a)).unwrap_or(if clip || windows { Style::List } else { config_style() });
+    let style = args.first().and_then(|a| style_arg(a)).unwrap_or(if clip || pass || windows { Style::List } else { config_style() });
 
     let conn = Connection::connect_to_env().expect("no Wayland compositor to connect to");
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
@@ -500,10 +584,11 @@ fn main() {
         opened: None,
         closing: None,
         shown: 0.0,
-        ui: Ui::new(if windows { load_windows(&windows_file()) } else if clip { vec![] } else { load_apps() }, style, 1.0, 1.0),
+        ui: Ui::new(if windows { load_windows(&windows_file()) } else if clip || pass { vec![] } else { load_apps() }, style, 1.0, 1.0),
         clip: clip.then(|| ClipUi::new(clip::load(&clip_dir()), 1.0, 1.0)),
+        pass: pass.then(|| PassUi::new(vault_path(), 1.0, 1.0)),
     };
-    app.ui.picker = clip || windows;
+    app.ui.picker = clip || pass || windows;
     app.ui.refresh();
     if windows && app.ui.item(1).is_some() {
         app.ui.select(1); // the window before this one: Super+Tab flips back and forth
