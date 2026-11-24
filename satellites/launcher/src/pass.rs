@@ -1,7 +1,12 @@
 //! The vault card (`seiza-launcher --pass`): a read-only view of a KeePass vault. The model here has no
 //! Wayland in it, so unlock, grouping and find are tested anywhere. All crypto is the `keepass` crate's.
 
-use std::path::Path;
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use keepass::{
     Database, DatabaseKey,
@@ -62,6 +67,35 @@ fn walk(g: &GroupRef<'_>, space: &str, out: &mut Vec<Login>) {
 fn login(e: &EntryRef<'_>, space: &str) -> Login {
     let get = |k: &str| e.get(k).unwrap_or("").to_string();
     Login { title: get(fields::TITLE), user: get(fields::USERNAME), url: get(fields::URL), space: space.to_string(), password: get(fields::PASSWORD) }
+}
+
+/// `wl-copy --sensitive` marks the copy; scripts/seiza-clip-store skips marked copies, so it stays out of the history.
+fn copy_cmd() -> Command {
+    let mut c = Command::new("wl-copy");
+    c.arg("--sensitive");
+    c
+}
+
+/// Runs detached, so it outlives the card. shortcut: clears whatever is on the clipboard after the delay, even
+/// a later copy; upgrade if that bites.
+fn clear_cmd(after: Duration) -> Command {
+    let mut c = Command::new("sh");
+    c.args(["-c", &format!("sleep {}; wl-copy --clear", after.as_secs())]);
+    c
+}
+
+/// Put `text` on the clipboard (on stdin, never in argv) and clear it after `clear_after`.
+pub fn copy_secret(text: &str, clear_after: Duration) {
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(mut child) = copy_cmd().stdin(Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        let _ = clear_cmd(clear_after).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    }
 }
 
 /// One row of the card: every login of a site within a space.
@@ -138,6 +172,13 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         db.save(&mut f, DatabaseKey::new().with_password(PASS)).unwrap();
         path
+    }
+
+    #[test]
+    fn secret_commands_are_sensitive_and_hold_no_text() {
+        let args = |c: &Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(args(&copy_cmd()), ["--sensitive"]);
+        assert_eq!(args(&clear_cmd(Duration::from_secs(20))), ["-c", "sleep 20; wl-copy --clear"]);
     }
 
     #[test]

@@ -7,6 +7,8 @@ d=${XDG_RUNTIME_DIR:-/tmp}/seiza-clip
 mkdir -p -m 700 "$d"
 new=$(mktemp "$d/.new.XXXXXX")
 cat > "$new"
+# A copy marked sensitive (`wl-copy --sensitive`, as seiza-pass does) never reaches the history.
+if wl-paste --list-types 2>/dev/null | grep -qx x-kde-passwordManagerHint; then rm -f "$new"; exit 0; fi
 newest=$(ls "$d" | sort | tail -n 1)
 dup=
 for f in "$d"/*.pin; do [ -e "$f" ] && cmp -s "$new" "$f" && dup=1; done
