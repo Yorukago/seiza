@@ -79,8 +79,12 @@ impl Now {
     fn set_position(&self, _track: ObjectPath<'_>, position: i64) {
         self.with(|p| p.seek((position as f64 / 1e6).max(0.0)));
     }
+    /// A link joins the queue as a real track when yt-dlp knows it (so the window shows it), else it just plays.
     fn open_uri(&self, uri: &str) {
-        self.with(|p| p.load(uri));
+        match crate::search::search(uri, 1).ok().and_then(|r| r.into_iter().next()) {
+            Some(t) => self.with(|p| p.play_now(t)),
+            None => self.with(|p| { let _ = p.load(uri); }),
+        }
     }
 
     #[zbus(property)]
