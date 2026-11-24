@@ -34,6 +34,19 @@ pub fn clean(title: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What to ask lrclib, best guess first: the cleaned title, then the title without "feat. ..." plus the artist
+/// (lrclib files many songs under the bare title, and a video's length often matches only those).
+fn queries(t: &Track) -> Vec<String> {
+    let first = clean(&t.title);
+    let lower = first.to_lowercase();
+    let cut = [" feat.", " feat ", " ft.", " ft "].iter().filter_map(|m| lower.find(m)).min().unwrap_or(first.len());
+    let mut second = first[..cut].trim().to_string();
+    if !t.artist.is_empty() && !second.to_lowercase().contains(&t.artist.to_lowercase()) {
+        second = format!("{second} {}", t.artist);
+    }
+    if second == first { vec![first] } else { vec![first, second] }
+}
+
 /// `[01:02.50] words` lines (and `[t][t] words`); a line with no words is kept: it is a pause.
 fn parse_lrc(s: &str) -> Vec<(f32, String)> {
     let mut out = vec![];
@@ -70,12 +83,10 @@ fn pick(json: &str, secs: u64) -> Option<Lyrics> {
 
 /// Blocks on the network: call it from a thread. None when lrclib has nothing for this track.
 pub fn fetch(t: &Track) -> Option<Lyrics> {
-    let out = Command::new("curl")
-        .args(["-s", "-m", "15", "-A", "seiza-wonder", "-G", "https://lrclib.net/api/search", "--data-urlencode"])
-        .arg(format!("q={}", clean(&t.title)))
-        .output()
-        .ok()?;
-    pick(&String::from_utf8_lossy(&out.stdout), t.secs)
+    queries(t).into_iter().find_map(|q| {
+        let out = Command::new("curl").args(["-s", "-m", "15", "-A", "seiza-wonder", "-G", "https://lrclib.net/api/search", "--data-urlencode"]).arg(format!("q={q}")).output().ok()?;
+        pick(&String::from_utf8_lossy(&out.stdout), t.secs)
+    })
 }
 
 #[cfg(test)]
@@ -87,6 +98,14 @@ mod tests {
         assert_eq!(clean("【Hatsune Miku】 World is Mine / ryo（supercell）【初音ミク】"), "World is Mine ryo");
         assert_eq!(clean("Song (Official Video) [4K]"), "Song");
         assert_eq!(clean("Plain Title"), "Plain Title");
+    }
+
+    #[test]
+    fn a_second_query_drops_feat_and_adds_the_artist() {
+        let t = |title: &str, artist: &str| Track { id: "x".into(), title: title.into(), artist: artist.into(), secs: 0 };
+        assert_eq!(queries(&t("ワンダー / r-906 feat. 初音ミク", "r-906")), vec!["ワンダー r-906 feat. 初音ミク", "ワンダー r-906"]);
+        assert_eq!(queries(&t("Song (Official Video)", "Band")), vec!["Song", "Song Band"]);
+        assert_eq!(queries(&t("Song", "")), vec!["Song"]);
     }
 
     #[test]
