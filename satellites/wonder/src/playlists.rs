@@ -17,8 +17,7 @@ impl Playlist {
 }
 
 fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/share")))?;
-    Some(base.join("seiza/wonder/playlists"))
+    crate::cache::data_dir().map(|d| d.join("playlists"))
 }
 
 /// A playlist is named after its first song, and how many more follow.

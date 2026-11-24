@@ -21,6 +21,17 @@ pub struct State {
     pub title: String,
 }
 
+const DEFAULT_VOLUME: f64 = 30.0;
+
+fn volume_file() -> Option<PathBuf> {
+    crate::cache::data_dir().map(|d| d.join("volume"))
+}
+
+/// The saved volume, or the default when there is none (or the file says something else).
+fn parse_volume(text: &str) -> f64 {
+    text.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map_or(DEFAULT_VOLUME, |v| v.clamp(0.0, 100.0))
+}
+
 /// The tracks to play and which one is on. Pure, so it is tested without an mpv.
 #[derive(Default)]
 pub struct Queue {
@@ -71,6 +82,7 @@ pub struct Player {
     pub queue: Queue,
     pub shuffle: bool,
     pub repeat: bool,
+    pub volume: f64, // 0 to 100, remembered between runs
     pick: Option<usize>,     // the shuffled next track, chosen once so what is pre-fetched is what plays
     requested: std::collections::HashSet<String>, // ids already sent to the cache this run
     pub last: State, // as of the last `poll`: what the window and MPRIS read
@@ -86,8 +98,9 @@ impl Player {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| "/tmp".into());
         let sock = dir.join("seiza-wonder.sock"); // one name: a killed wonder leaves a file the next start replaces
         let _ = std::fs::remove_file(&sock);
+        let volume = volume_file().and_then(|f| std::fs::read_to_string(f).ok()).map_or(DEFAULT_VOLUME, |t| parse_volume(&t));
         let mut cmd = Command::new("mpv");
-        cmd.args(["--idle=yes", "--no-video", "--no-terminal", "--keep-open=no", "--ytdl-format=bestaudio/best"])
+        cmd.arg(format!("--volume={volume}")).args(["--idle=yes", "--no-video", "--no-terminal", "--keep-open=no", "--ytdl-format=bestaudio/best"])
             .arg(format!("--input-ipc-server={}", sock.display()))
             .args(extra)
             .stdin(Stdio::null());
@@ -103,7 +116,7 @@ impl Player {
         for _ in 0..50 {
             if let Ok(s) = UnixStream::connect(&sock) {
                 let (queue, last, ended, loaded_at) = (Queue::default(), State { idle: true, ..Default::default() }, false, Instant::now());
-                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, pick: None, requested: Default::default(), last, ended, loaded_at });
+                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, volume, pick: None, requested: Default::default(), last, ended, loaded_at });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -202,6 +215,16 @@ impl Player {
         self.ipc.ask(r#""stop""#).is_some()
     }
 
+    /// Volume steps are in percent of mpv's own scale (the system volume sits above it).
+    pub fn set_volume(&mut self, v: f64) {
+        self.volume = v.clamp(0.0, 100.0);
+        self.ipc.ask(&format!(r#""set_property","volume",{}"#, self.volume));
+        if let Some(f) = volume_file() {
+            let _ = f.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(f, format!("{}\n", self.volume));
+        }
+    }
+
     pub fn pause(&mut self, on: bool) -> bool {
         self.last.paused = on;
         self.ipc.ask(&format!(r#""set_property","pause",{on}"#)).is_some()
@@ -257,6 +280,12 @@ mod tests {
 
     fn t(id: &str) -> Track {
         Track { id: id.into(), title: id.into(), artist: String::new(), secs: 0 }
+    }
+
+    #[test]
+    fn a_saved_volume_is_read_and_anything_odd_falls_back() {
+        assert_eq!((parse_volume("55\n"), parse_volume(" 0 "), parse_volume("250")), (55.0, 0.0, 100.0));
+        assert_eq!((parse_volume(""), parse_volume("loud"), parse_volume("NaN")), (30.0, 30.0, 30.0));
     }
 
     #[test]

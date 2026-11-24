@@ -294,7 +294,7 @@ impl ProvidesRegistryState for Wonder {
 smithay_client_toolkit::delegate_dispatch2!(Wonder);
 
 fn engine(args: &[String]) -> player::Shared {
-    let extra: &[&str] = if args.iter().any(|a| a == "--silent") { &["--ao=null"] } else { &["--volume=30"] };
+    let extra: &[&str] = if args.iter().any(|a| a == "--silent") { &["--ao=null"] } else { &[] };
     player::Player::spawn(extra).expect("mpv did not start: is it installed?")
 }
 

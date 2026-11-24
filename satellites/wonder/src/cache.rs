@@ -14,6 +14,12 @@ pub fn root() -> Option<PathBuf> {
     Some(base.join("seiza/wonder"))
 }
 
+/// Where wonder keeps what it saves (playlists, the volume): `~/.local/share/seiza/wonder`.
+pub fn data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/share")))?;
+    Some(base.join("seiza/wonder"))
+}
+
 fn audio_dir() -> Option<PathBuf> {
     root().map(|r| r.join("audio"))
 }

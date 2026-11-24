@@ -65,6 +65,7 @@ pub struct Ui {
     st: State,
     shuffle: bool,
     repeat: bool,
+    volume: f64,
     track_id: Option<String>, // the track the lyrics and cover below are for
     lyrics: Job<Lyrics>,
     cover: Option<Canvas>,
@@ -113,6 +114,7 @@ struct Geo {
     lyric_mid: f32, // the baseline of the line being sung
     queue_y: f32,
     save: (f32, f32, f32, f32), // the "save as playlist" button: x, y, w, h
+    volume: (f32, f32, f32),    // the volume thread: x0, x1, y
     queue: Thread,
     tabs: Thread,
 }
@@ -137,6 +139,7 @@ impl Ui {
             st: State { idle: true, ..Default::default() },
             shuffle: false,
             repeat: false,
+            volume: 30.0,
             track_id: None,
             lyrics: Job::Idle,
             cover: None,
@@ -213,6 +216,7 @@ impl Ui {
             lyric_mid: oy + 330.0,
             queue_y: qy,
             save: (ox + self.w - PAD - SAVE_W, qy - 74.0, SAVE_W, 30.0),
+            volume: (lx + 34.0, lx + LEFT_W - 52.0, oy + 546.0),
             queue: Thread::new(lx, ox + self.w - PAD, qy, n),
             tabs: Thread::new(ox + 150.0, ox + 150.0 + 150.0 * PAGES.len() as f32, oy + 40.0, PAGES.len()),
         }
@@ -261,7 +265,7 @@ impl Ui {
         if let Some(s) = &self.shared {
             let p = s.lock().unwrap();
             (self.queue, self.at, self.st) = (p.queue.items.clone(), p.queue.at, p.last.clone());
-            (self.shuffle, self.repeat) = (p.shuffle, p.repeat);
+            (self.shuffle, self.repeat, self.volume) = (p.shuffle, p.repeat, p.volume);
         }
         let id = self.current().map(|t| t.id.clone());
         if id != self.track_id {
@@ -297,7 +301,7 @@ impl Ui {
             Job::Done(v) => 2 + v.len(),
             Job::Failed(_) => 99,
         };
-        format!("{}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{}", self.saved_at.is_some(), self.at, self.queue.len(), self.st.paused, self.st.pos as u32, self.st.len as u32, line, self.cover.is_some(), r, self.track_id.is_some())
+        format!("{}|{}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{}", self.volume, self.saved_at.is_some(), self.at, self.queue.len(), self.st.paused, self.st.pos as u32, self.st.len as u32, line, self.cover.is_some(), r, self.track_id.is_some())
     }
 
     /// True while a frame is still owed: something changed, or something moves by itself.
@@ -392,6 +396,10 @@ impl Ui {
     }
 
     pub fn move_sel(&mut self, d: isize) {
+        if self.page == 0 {
+            self.volume_by(-5.0 * d as f64); // up is louder
+            return;
+        }
         if self.page == 2 {
             if !self.lists.is_empty() {
                 self.psel = (self.psel as isize + d).clamp(0, self.lists.len() as isize - 1) as usize;
@@ -403,6 +411,17 @@ impl Ui {
             self.sel = (self.sel as isize + d).clamp(0, v.len() as isize - 1) as usize;
             self.stale = true;
         }
+    }
+
+    fn set_volume(&mut self, v: f64) {
+        self.volume = v.clamp(0.0, 100.0);
+        let v = self.volume;
+        self.with_player(|p| p.set_volume(v));
+        self.stale = true;
+    }
+
+    fn volume_by(&mut self, d: f64) {
+        self.set_volume(self.volume + d);
     }
 
     /// Ctrl+S or the button: keep the queue as a playlist.
@@ -481,6 +500,11 @@ impl Ui {
         }
         if self.page == 2 {
             self.press_list(&g, x, y);
+            return true;
+        }
+        let (vx0, vx1, vy) = g.volume;
+        if (y - vy).abs() < 12.0 && x >= vx0 - 4.0 && x <= vx1 + 4.0 {
+            self.set_volume((((x - vx0) / (vx1 - vx0)).clamp(0.0, 1.0) as f64 * 20.0).round() * 5.0); // in steps of 5
             return true;
         }
         let (bx, by, bw, bh) = g.save;
@@ -592,7 +616,7 @@ impl Ui {
         }
         let base = g.oy + self.h - 22.0;
         let hint = match self.page {
-            0 => "click a star to change page  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  ctrl+s: save the queue",
+            0 => "up/down: volume  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  ctrl+s: save the queue",
             1 => "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now",
             _ => "enter or click: play it, replacing the queue  \u{b7}  up/down: choose  \u{b7}  Delete or x: remove",
         };
@@ -645,6 +669,7 @@ impl Ui {
             self.t13.draw(cv, x1 - tw, y + 25.0, &total, rgba(p.text, 0.45));
         }
         self.draw_buttons(cv, g);
+        self.draw_volume(cv, g);
         self.draw_lyrics(cv, g);
         self.draw_queue(cv, g);
     }
@@ -751,6 +776,18 @@ impl Ui {
             self.with_player(|p| { p.seek(at); });
         }
         Mini::Stay
+    }
+
+    fn draw_volume(&mut self, cv: &mut Canvas, g: &Geo) {
+        let p = palette();
+        let (x0, x1, y) = g.volume;
+        let f = (self.volume / 100.0) as f32;
+        let xm = x0 + (x1 - x0) * f;
+        cv.icon_speaker(x0 - 16.0, y, 8.0, 3.0 * f, self.volume == 0.0, rgba(p.text, 0.6));
+        cv.polyline(&[(x0, y), (x1, y)], 1.3, rgba(p.star, 0.3));
+        cv.polyline(&[(x0, y), (xm, y)], 1.8, rgba(p.star, 0.95));
+        cv.sparkle(xm, y, 6.0, rgba(p.star, 1.0));
+        self.t13.draw(cv, x1 + 14.0, y + 4.5, &format!("{}%", self.volume.round()), rgba(p.text, 0.45));
     }
 
     fn draw_buttons(&mut self, cv: &mut Canvas, g: &Geo) {
@@ -999,6 +1036,23 @@ mod tests {
         let (lx, top) = (g.lyrics.0, g.lyrics.1);
         assert_eq!(ui.lyric_at(&g, lx + 20.0, top + 28.0 - 6.0), Some(0));
         assert_eq!(ui.lyric_at(&g, lx + 20.0, top + 28.0 + 36.0 - 6.0), Some(1));
+    }
+
+    #[test]
+    fn the_volume_thread_and_the_arrow_keys_set_the_volume_in_fives() {
+        let mut ui = Ui::demo(0);
+        let (w, h) = (1440.0, 900.0);
+        ui.fit(w, h);
+        let (x0, x1, y) = ui.geo(w, h).volume;
+        ui.press((x0 + x1) / 2.0, y, w, h);
+        assert_eq!(ui.volume, 50.0);
+        ui.press(x1 + 3.0, y, w, h);
+        assert_eq!(ui.volume, 100.0, "the very end is the top");
+        ui.move_sel(-1);
+        assert_eq!(ui.volume, 100.0, "up cannot go past full");
+        ui.move_sel(1);
+        ui.move_sel(1);
+        assert_eq!(ui.volume, 90.0);
     }
 
     #[test]
