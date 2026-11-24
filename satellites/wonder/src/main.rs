@@ -32,9 +32,20 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
-use ui::Ui;
+use std::{rc::Rc, sync::mpsc::Receiver};
+use ui::{Mini, Ui};
 
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+
+/// What the window asks for when it ends.
+#[derive(Clone, Copy, PartialEq)]
+enum Next {
+    Full,
+    Mini,
+    Hide,
+    Gone, // the compositor went away
+}
 
 struct Wonder {
     registry_state: RegistryState,
@@ -51,6 +62,9 @@ struct Wonder {
     dirty: bool,
     exit: bool,
     ctrl: bool,
+    mini: bool,
+    next: Next,
+    raised: Rc<Receiver<()>>,
     anim: seiza_common::kit::Anim,
     shown: f32, // the visibility last drawn
     ui: Ui,
@@ -64,13 +78,21 @@ impl Wonder {
     }
 
     fn close(&mut self) {
-        self.anim.close();
+        if self.mini {
+            self.exit = true; // the pill has no fade
+        } else {
+            self.anim.close();
+        }
         self.dirty = true;
     }
 
     fn key(&mut self, event: &KeyEvent) {
         match event.keysym {
             Keysym::v | Keysym::V if self.ctrl => self.ui.paste(),
+            Keysym::m | Keysym::M if self.ctrl => {
+                self.next = Next::Mini;
+                self.close();
+            }
             Keysym::Escape => {
                 if !self.ui.clear_query() {
                     self.close();
@@ -96,13 +118,13 @@ impl Wonder {
         if !self.configured || self.frame_pending {
             return;
         }
-        let (e, moving) = self.visibility();
+        let (e, moving) = if self.mini { (1.0, false) } else { self.visibility() };
         if self.exit || !(self.dirty || moving || self.ui.pending() || e != self.shown) {
             return;
         }
         self.dirty = false;
         self.shown = e;
-        let cv: Canvas = self.ui.render(self.size.0 as usize, self.size.1 as usize, e);
+        let cv: Canvas = if self.mini { self.ui.render_mini() } else { self.ui.render(self.size.0 as usize, self.size.1 as usize, e) };
         let (buffer, canvas) = self.pool.create_buffer(cv.w as i32, cv.h as i32, cv.w as i32 * 4, wl_shm::Format::Argb8888).expect("create buffer");
         // shortcut: assumes a little-endian host, which Argb8888 in memory then matches.
         let bytes = unsafe { std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 4) };
@@ -210,6 +232,15 @@ impl PointerHandler for Wonder {
             }
             let at = (e.position.0 as f32, e.position.1 as f32);
             match e.kind {
+                PointerEventKind::Press { button: BTN_RIGHT, .. } if self.mini => self.close(), // hides the pill
+                PointerEventKind::Press { button: BTN_LEFT, .. } if self.mini => {
+                    if let Mini::Expand = self.ui.press_mini(at.0, at.1) {
+                        self.next = Next::Full;
+                        self.close();
+                    }
+                    self.dirty = true;
+                }
+                _ if self.mini => {}
                 PointerEventKind::Press { button: BTN_LEFT, .. } => self.dirty |= self.ui.press(at.0, at.1, w, h),
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.dirty |= self.ui.hover(Some(at), w, h),
                 PointerEventKind::Leave { .. } => self.dirty |= self.ui.hover(None, w, h),
@@ -236,6 +267,10 @@ struct Tick;
 
 impl Dispatch<wl_callback::WlCallback, Tick> for Wonder {
     fn event(state: &mut Self, _: &wl_callback::WlCallback, _: wl_callback::Event, _: &Tick, _: &Connection, qh: &QueueHandle<Self>) {
+        if state.mini && state.raised.try_recv().is_ok() {
+            (state.next, state.exit) = (Next::Full, true); // running wonder again opens the whole window
+            return;
+        }
         if state.ui.tick() {
             state.dirty = true;
             state.draw(qh);
@@ -262,6 +297,12 @@ fn engine(args: &[String]) -> player::Shared {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--dump-mini") => {
+            let cv = Ui::demo(0).render_mini();
+            let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
+            ppm.extend(cv.px.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+            std::fs::write(args.get(1).expect("--dump-mini needs a file"), ppm).unwrap();
+        }
         Some("--dump") => {
             let size = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
             let mut ui = Ui::demo(size(2, 0));
@@ -310,16 +351,25 @@ fn window(args: &[String]) {
     let player = engine(args);
     let (raise, raised) = std::sync::mpsc::channel();
     let _bus = mpris::serve(player.clone(), raise).map_err(|e| eprintln!("seiza-wonder: no MPRIS ({e})")).ok();
-    while show(&player) {
-        while raised.try_recv().is_ok() {} // a raise sent while the window was closing
-        if raised.recv().is_err() {
-            break;
-        }
+    let raised = Rc::new(raised);
+    let mut next = Next::Full;
+    loop {
+        next = match show(&player, next == Next::Mini, &raised) {
+            Next::Gone => break,
+            Next::Hide => {
+                while raised.try_recv().is_ok() {} // a raise sent while the window was closing
+                if raised.recv().is_err() {
+                    break;
+                }
+                Next::Full
+            }
+            n => n,
+        };
     }
 }
 
-/// One window, until it closes. False when the compositor went away, which ends wonder too.
-fn show(player: &player::Shared) -> bool {
+/// One window (or the mini pill), until it ends; what it asks for next. Gone ends wonder too.
+fn show(player: &player::Shared, mini: bool, raised: &Rc<Receiver<()>>) -> Next {
     let conn = Connection::connect_to_env().expect("no Wayland compositor to connect to");
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
@@ -328,12 +378,21 @@ fn show(player: &player::Shared) -> bool {
     let shm = Shm::bind(&globals, &qh).expect("wl_shm missing");
 
     let layer = layer_shell.create_layer_surface(&qh, compositor.create_surface(&qh), Layer::Overlay, Some("seiza-wonder"), None);
-    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_exclusive_zone(-1);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-    layer.set_size(0, 0);
+    if mini {
+        layer.set_anchor(Anchor::BOTTOM); // centred, clicks only where the pill is, no keyboard
+        layer.set_margin(0, 0, 60, 0);
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_size(ui::MINI.0, ui::MINI.1);
+    } else {
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_size(0, 0);
+    }
     layer.commit();
 
+    while raised.try_recv().is_ok() {} // a raise from before this window is not for it
     let (tick_conn, tick_qh) = (conn.clone(), qh.clone());
     let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let still_open = open.clone();
@@ -358,17 +417,19 @@ fn show(player: &player::Shared) -> bool {
         dirty: true,
         exit: false,
         ctrl: false,
+        mini,
+        next: Next::Hide,
+        raised: raised.clone(),
         anim: Default::default(),
         shown: -1.0,
         ui: Ui::new(Some(player.clone())),
     };
-    let mut alive = true;
     while !app.exit {
         if event_queue.blocking_dispatch(&mut app).is_err() {
-            alive = false; // the compositor went away
+            app.next = Next::Gone;
             break;
         }
     }
     open.store(false, std::sync::atomic::Ordering::Relaxed);
-    alive
+    app.next
 }

@@ -4,7 +4,7 @@ use crate::cover;
 use crate::lyrics::{self, Lyrics};
 use crate::player::{Shared, State};
 use crate::search::{self, Track};
-use seiza_common::draw::{shared_font, Canvas, Text};
+use seiza_common::draw::{blend, shared_font, Canvas, Text};
 use seiza_common::kit::{self, Glide, Thread, PILL_W};
 use seiza_common::palette::{palette, rgba};
 use std::collections::HashSet;
@@ -19,6 +19,19 @@ const ROW_H: f32 = 76.0; // a search result
 const ROW_GAP: f32 = 10.0;
 const QUEUE_MAX: usize = 7; // stars shown at once
 const PAGES: [&str; 2] = ["now", "find"];
+
+/// The mini pill: its size, and where the cover (x, y, radius), the seek thread and the play button sit in it.
+pub const MINI: (u32, u32) = (480, 76);
+const MINI_COVER: (f32, f32, f32) = (39.0, 38.0, 22.0);
+const MINI_TEXT_X: f32 = 75.0;
+const MINI_SEEK: (f32, f32, f32) = (35.0, 445.0, 62.0);
+const MINI_PLAY: (f32, f32, f32) = (441.0, 36.0, 17.0);
+
+/// What a click on the pill asks for.
+pub enum Mini {
+    Stay,
+    Expand,
+}
 
 /// A job running on another thread.
 enum Job<T> {
@@ -483,7 +496,7 @@ impl Ui {
         let base = g.oy + self.h - 22.0;
         let hint = if self.page == 0 { "click a star to change page  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  left/right: previous, next" } else { "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now" };
         self.t13.draw(&mut cv, g.ox + PAD, base, hint, rgba(p.text, 0.4));
-        let quit = "Esc: clear / close";
+        let quit = "ctrl+m: mini  \u{b7}  Esc: clear / close";
         let qw = self.t13.width(quit);
         self.t13.draw(&mut cv, g.ox + self.w - PAD - qw, base, quit, rgba(p.text, 0.4));
         cv
@@ -522,21 +535,9 @@ impl Ui {
         let by = fit(&mut self.t13, &if loading { t.title.clone() } else { by }, LEFT_W);
         self.t13.draw(cv, cx, g.oy + 409.0, &by, rgba(p.text, 0.55));
 
-        // the seek thread: a gold wave, brighter where it has been, with a sparkle where it is
-        let (x0, x1, y) = g.seek;
-        if loading {
-            let ph = self.t0.elapsed().as_secs_f32() * 6.0;
-            let pts: Vec<(f32, f32)> = (0..=60).map(|i| (x0 + (x1 - x0) * i as f32 / 60.0, y + 5.0 * (i as f32 * 0.5 - ph).sin())).collect();
-            cv.polyline(&pts, 1.6, rgba(p.star, 0.8));
-        } else {
-            let wob = |x: f32| y + 2.2 * (x * 0.045).sin() + 1.2 * (x * 0.11 + 1.0).sin();
-            let f = if self.st.len > 0.0 { (self.st.pos / self.st.len).clamp(0.0, 1.0) as f32 } else { 0.0 };
-            let xm = x0 + (x1 - x0) * f;
-            let pts = |a: f32, b: f32| -> Vec<(f32, f32)> { (0..=((b - a) / 4.0).ceil().max(1.0) as usize).map(|i| { let x = (a + i as f32 * 4.0).min(b); (x, wob(x)) }).collect() };
-            cv.polyline(&pts(xm, x1), 1.3, rgba(p.star, 0.3));
-            cv.polyline(&pts(x0, xm), 1.8, rgba(p.star, 0.95));
-            cv.round_rect(xm - 14.0, wob(xm) - 14.0, 28.0, 28.0, 14.0, rgba(p.star, 0.08));
-            cv.sparkle(xm, wob(xm), 9.0, rgba(p.star, 1.0));
+        self.seek_thread(cv, g.seek);
+        if !loading {
+            let (x0, x1, y) = g.seek;
             self.t13.draw(cv, x0, y + 25.0, &clock(self.st.pos), rgba(p.text, 0.45));
             let total = clock(self.st.len);
             let tw = self.t13.width(&total);
@@ -545,6 +546,110 @@ impl Ui {
         self.draw_buttons(cv, g);
         self.draw_lyrics(cv, g);
         self.draw_queue(cv, g);
+    }
+
+    /// The seek thread: a gold wave, brighter where it has been, with a sparkle where it is; a ripple while fetching.
+    fn seek_thread(&self, cv: &mut Canvas, (x0, x1, y): (f32, f32, f32)) {
+        let p = palette();
+        if self.loading() {
+            let ph = self.t0.elapsed().as_secs_f32() * 6.0;
+            let pts: Vec<(f32, f32)> = (0..=60).map(|i| (x0 + (x1 - x0) * i as f32 / 60.0, y + 5.0 * (i as f32 * 0.5 - ph).sin())).collect();
+            cv.polyline(&pts, 1.6, rgba(p.star, 0.8));
+            return;
+        }
+        let wob = |x: f32| y + 2.2 * (x * 0.045).sin() + 1.2 * (x * 0.11 + 1.0).sin();
+        let f = if self.st.len > 0.0 { (self.st.pos / self.st.len).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        let xm = x0 + (x1 - x0) * f;
+        let pts = |a: f32, b: f32| -> Vec<(f32, f32)> { (0..=((b - a) / 4.0).ceil().max(1.0) as usize).map(|i| { let x = (a + i as f32 * 4.0).min(b); (x, wob(x)) }).collect() };
+        cv.polyline(&pts(xm, x1), 1.3, rgba(p.star, 0.3));
+        cv.polyline(&pts(x0, xm), 1.8, rgba(p.star, 0.95));
+        cv.round_rect(xm - 14.0, wob(xm) - 14.0, 28.0, 28.0, 14.0, rgba(p.star, 0.08));
+        cv.sparkle(xm, wob(xm), 9.0, rgba(p.star, 1.0));
+    }
+
+    // ---- the mini pill ----
+
+    /// What the pill says: the line being sung, or else the track; and the small line under it.
+    fn mini_lines(&self) -> (String, String) {
+        let Some(t) = self.current() else { return ("nothing playing".into(), "open wonder and search the sky..".into()) };
+        if self.loading() {
+            return ("fetching..".into(), t.title.clone());
+        }
+        let line = match &self.lyrics {
+            Job::Done(l) if l.synced => l.current(self.st.pos as f32).map(|i| l.lines[i].1.clone()).filter(|s| !s.is_empty()),
+            _ => None,
+        };
+        let by = |s: &str| if t.artist.is_empty() { s.to_string() } else { format!("{} \u{b7} {s}", t.artist) };
+        match (line, &self.lyrics) {
+            (Some(line), _) => (line, by(&t.title)),
+            (None, Job::Busy) => (t.title.clone(), t.artist.clone()),
+            (None, _) => (t.title.clone(), by("no lyrics for this one..")),
+        }
+    }
+
+    pub fn render_mini(&mut self) -> Canvas {
+        let p = palette();
+        let (w, h) = (MINI.0 as usize, MINI.1 as usize);
+        let mut cv = Canvas { w, h, px: vec![0; w * h] };
+        cv.round_rect(0.0, 0.0, w as f32, h as f32, h as f32 / 2.0, rgba(p.star, 0.3));
+        cv.round_rect(1.2, 1.2, w as f32 - 2.4, h as f32 - 2.4, h as f32 / 2.0 - 1.2, rgba(p.panel, 0.96));
+
+        // the cover as a disc, or a dim sky with a star when there is no picture
+        let (cx, cy, r) = MINI_COVER;
+        match &self.cover {
+            Some(c) => {
+                let d = (2.0 * r) as usize;
+                for y in 0..d {
+                    for x in 0..d {
+                        let (dx, dy) = (x as f32 + 0.5 - r, y as f32 + 0.5 - r);
+                        let cover = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+                        let s = c.px[(y * c.h / d) * c.w + (c.w - c.h) / 2 + x * c.h / d]; // the middle square of the picture
+                        let rgb = [(s >> 16 & 255) as f32 / 255.0, (s >> 8 & 255) as f32 / 255.0, (s & 255) as f32 / 255.0, 1.0];
+                        blend(&mut cv.px[(y + (cy - r) as usize) * w + x + (cx - r) as usize], rgb, cover);
+                    }
+                }
+            }
+            None => {
+                cv.round_rect(cx - r, cy - r, 2.0 * r, 2.0 * r, r, rgba(p.sky, 1.0));
+                cv.sparkle(cx, cy, 8.0, rgba(p.star, 0.8));
+            }
+        }
+
+        let room = MINI_PLAY.0 - MINI_PLAY.2 - 14.0 - MINI_TEXT_X;
+        let (title, sub) = self.mini_lines();
+        let (title, sub) = (fit(&mut self.t15, &title, room), fit(&mut self.t13, &sub, room));
+        self.t15.draw(&mut cv, MINI_TEXT_X, 33.0, &title, rgba(p.text, 1.0));
+        self.t13.draw(&mut cv, MINI_TEXT_X, 51.0, &sub, rgba(p.text, 0.55));
+        self.seek_thread(&mut cv, MINI_SEEK);
+
+        let (x, y, r) = MINI_PLAY;
+        let ink = rgba(p.star, 1.0);
+        cv.round_rect(x - r, y - r, 2.0 * r, 2.0 * r, r, rgba(p.star, if self.loading() { 0.35 } else { 0.9 }));
+        cv.round_rect(x - r + 1.2, y - r + 1.2, 2.0 * r - 2.4, 2.0 * r - 2.4, r - 1.2, rgba(p.panel, 1.0));
+        if self.st.paused || self.st.idle {
+            cv.shape(x + 1.0, y, 8.0, ink, |px, py| px - x >= -5.0 && px - x <= 6.0 && (py - y).abs() <= (6.0 - (px - x)) * 0.57);
+        } else {
+            cv.round_rect(x - 5.5, y - 6.0, 4.0, 12.0, 1.2, ink);
+            cv.round_rect(x + 1.5, y - 6.0, 4.0, 12.0, 1.2, ink);
+        }
+        self.shown = self.state_key();
+        self.stale = false;
+        cv
+    }
+
+    pub fn press_mini(&mut self, x: f32, y: f32) -> Mini {
+        let (px, py, pr) = MINI_PLAY;
+        let (cx, cy, cr) = MINI_COVER;
+        let (sx0, sx1, sy) = MINI_SEEK;
+        if (x - px).hypot(y - py) <= pr + 4.0 {
+            self.toggle();
+        } else if (x - cx).hypot(y - cy) <= cr + 4.0 {
+            return Mini::Expand;
+        } else if (y - sy).abs() < 8.0 && x >= sx0 - 4.0 && x <= sx1 + 4.0 && self.st.len > 0.0 {
+            let at = ((x - sx0) / (sx1 - sx0)).clamp(0.0, 1.0) as f64 * self.st.len;
+            self.with_player(|p| { p.seek(at); });
+        }
+        Mini::Stay
     }
 
     fn draw_buttons(&mut self, cv: &mut Canvas, g: &Geo) {
@@ -739,6 +844,16 @@ mod tests {
         assert_eq!(ui.lyric_at(&g, lx + 20.0, g.lyric_mid - 5.0), Some(2), "the middle line is the one at 1:40");
         assert_eq!(ui.lyric_at(&g, lx + 20.0, g.lyric_mid + line_offset(2, 3)), Some(3));
         assert_eq!(ui.lyric_at(&g, lx - 20.0, g.lyric_mid), None, "left of the lyrics");
+    }
+
+    #[test]
+    fn the_pill_shows_the_sung_line_else_the_track() {
+        let mut ui = Ui::demo(0);
+        assert_eq!(ui.mini_lines(), ("眠れないなら 一緒に歩こう".to_string(), "kotoza demo \u{b7} hoshi no ito".to_string()));
+        ui.lyrics = Job::Failed(String::new());
+        assert_eq!(ui.mini_lines(), ("hoshi no ito".to_string(), "kotoza demo \u{b7} no lyrics for this one..".to_string()));
+        ui.st.len = 0.0;
+        assert_eq!(ui.mini_lines().0, "fetching..");
     }
 
     #[test]
