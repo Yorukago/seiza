@@ -7,7 +7,7 @@
 #   make install-session   list Seiza as a session in SDDM/GDM (asks for sudo: it writes /usr/share/wayland-sessions)
 #   seiza-update   (installed by make install) rebuild, install and restart the satellites from inside the session
 
-PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
+PKGS    := wlroots-0.20 libinput scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
 LDLIBS  := $(shell pkg-config --libs $(PKGS))
 

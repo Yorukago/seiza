@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
+#include <wlr/backend/libinput.h>
+#include <libinput.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <drm_fourcc.h>
@@ -2321,6 +2323,13 @@ static void server_new_pointer(struct tinywl_server *server,
 	 * is proxied through wlr_cursor. On another compositor, you might take this
 	 * opportunity to do libinput configuration on the device to set
 	 * acceleration, etc. */
+	/* SEIZA: libinput leaves tap-to-click off, so a laptop touchpad would not click when tapped. */
+	if (wlr_input_device_is_libinput(device)) {
+		struct libinput_device *li = wlr_libinput_get_device_handle(device);
+		if (libinput_device_config_tap_get_finger_count(li) > 0) {
+			libinput_device_config_tap_set_enabled(li, LIBINPUT_CONFIG_TAP_ENABLED);
+		}
+	}
 	wlr_cursor_attach_input_device(server->cursor, device);
 }
 
@@ -2840,14 +2849,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		server->pan_last_y = server->cursor->y;
 		return;
 	}
-	/* Notify the client with pointer focus that a button press has occurred */
-	wlr_seat_pointer_notify_button(server->seat,
-			event->time_msec, event->button, event->state);
-	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		/* If you released any buttons, we exit interactive move/resize mode. */
-		reset_cursor_mode(server);
-	} else {
-		/* Focus that client if the button was _pressed_ */
+	/* SEIZA: a press focuses the window first and only then reaches it: Electron apps (Vesktop) drop a
+	 * click that arrives before their window is active, so they needed two. */
+	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
 		double sx, sy;
 		struct wlr_surface *surface = NULL;
 		struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
@@ -2857,6 +2861,13 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		if (ls && ls->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) {
 			layer_focus(server, surface);
 		}
+	}
+	/* Notify the client with pointer focus that a button event has occurred */
+	wlr_seat_pointer_notify_button(server->seat,
+			event->time_msec, event->button, event->state);
+	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		/* If you released any buttons, we exit interactive move/resize mode. */
+		reset_cursor_mode(server);
 	}
 }
 
