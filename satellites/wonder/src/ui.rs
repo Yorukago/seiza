@@ -66,6 +66,12 @@ pub struct Ui {
     shuffle: bool,
     repeat: bool,
     volume: f64,
+    vol_shown: f32,  // the volume as drawn: it slides to `volume`
+    pos_shown: f64,  // the position as drawn: the last poll plus the time since, so the star glides
+    pos_at: Instant, // when the polled position last changed
+    frame_at: Instant,
+    synced: bool,    // the first tick has copied the player's state
+    pub smooth: bool, // keep drawing while a song plays (the mini pill); the big window redraws only when something changes
     track_id: Option<String>, // the track the lyrics and cover below are for
     lyrics: Job<Lyrics>,
     cover: Option<Canvas>,
@@ -79,6 +85,7 @@ pub struct Ui {
     shown: String, // what was last drawn, to tell whether a tick changed anything
     content: Option<Canvas>,
     back: Option<Canvas>,
+    mini_back: Option<Canvas>, // the pill's outline and fill, which never change
     t0: Instant,
     t13: Text,
     t15: Text,
@@ -140,6 +147,12 @@ impl Ui {
             shuffle: false,
             repeat: false,
             volume: 30.0,
+            vol_shown: 30.0,
+            pos_shown: 0.0,
+            pos_at: Instant::now(),
+            frame_at: Instant::now(),
+            synced: false,
+            smooth: false,
             track_id: None,
             lyrics: Job::Idle,
             cover: None,
@@ -153,6 +166,7 @@ impl Ui {
             shown: String::new(),
             content: None,
             back: None,
+            mini_back: None,
             t0: Instant::now(),
             t13: Text::new(f.clone(), 13.0),
             t15: Text::new(f.clone(), 15.0),
@@ -264,8 +278,15 @@ impl Ui {
         }
         if let Some(s) = &self.shared {
             let p = s.lock().unwrap();
+            let old = self.st.pos;
             (self.queue, self.at, self.st) = (p.queue.items.clone(), p.queue.at, p.last.clone());
+            if self.st.pos != old {
+                self.pos_at = Instant::now();
+            }
             (self.shuffle, self.repeat, self.volume) = (p.shuffle, p.repeat, p.volume);
+            if !self.synced {
+                (self.vol_shown, self.synced) = (self.volume as f32, true); // start where it is, not sliding from 30
+            }
         }
         let id = self.current().map(|t| t.id.clone());
         if id != self.track_id {
@@ -310,7 +331,32 @@ impl Ui {
     }
 
     fn animating(&self) -> bool {
-        self.glide.active() || self.loading() || matches!(self.results, Job::Busy) && self.page == 1
+        self.glide.active() || self.loading() || matches!(self.results, Job::Busy) && self.page == 1 || (self.volume as f32 - self.vol_shown).abs() > 0.2 || self.smooth && self.playing()
+    }
+
+    fn playing(&self) -> bool {
+        !self.st.paused && !self.st.idle && self.st.len > 0.0
+    }
+
+    /// Move what is drawn toward what is true, `dt` seconds on: the volume slides, and the position runs on between polls.
+    fn advance(&mut self, dt: f32) {
+        let k = 1.0 - (-14.0 * dt.min(0.1)).exp();
+        self.vol_shown += (self.volume as f32 - self.vol_shown) * k;
+        if (self.volume as f32 - self.vol_shown).abs() < 0.2 {
+            self.vol_shown = self.volume as f32;
+        }
+        let guess = if self.playing() { (self.st.pos + self.pos_at.elapsed().as_secs_f64()).min(self.st.len) } else { self.st.pos };
+        // a small step back (a poll that was older than the guess) is not drawn; a seek is
+        if guess > self.pos_shown || (guess - self.pos_shown).abs() > 1.0 {
+            self.pos_shown = guess;
+        }
+    }
+
+    fn tick_frame(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.frame_at).as_secs_f32();
+        self.frame_at = now;
+        self.advance(dt);
     }
 
     // ---- keys ----
@@ -585,6 +631,7 @@ impl Ui {
 
     pub fn render(&mut self, w: usize, h: usize, e: f32) -> Canvas {
         self.fit(w as f32, h as f32);
+        self.tick_frame();
         if self.stale || self.animating() || self.content.as_ref().is_none_or(|c| c.w != w || c.h != h) {
             self.shown = self.state_key();
             self.content = Some(self.draw_card(w, h));
@@ -684,7 +731,7 @@ impl Ui {
             return;
         }
         let wob = |x: f32| y + 2.2 * (x * 0.045).sin() + 1.2 * (x * 0.11 + 1.0).sin();
-        let f = if self.st.len > 0.0 { (self.st.pos / self.st.len).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        let f = if self.st.len > 0.0 { (self.pos_shown / self.st.len).clamp(0.0, 1.0) as f32 } else { 0.0 };
         let xm = x0 + (x1 - x0) * f;
         let pts = |a: f32, b: f32| -> Vec<(f32, f32)> { (0..=((b - a) / 4.0).ceil().max(1.0) as usize).map(|i| { let x = (a + i as f32 * 4.0).min(b); (x, wob(x)) }).collect() };
         cv.polyline(&pts(xm, x1), 1.3, rgba(p.star, 0.3));
@@ -714,11 +761,15 @@ impl Ui {
     }
 
     pub fn render_mini(&mut self) -> Canvas {
+        self.tick_frame();
         let p = palette();
         let (w, h) = (MINI.0 as usize, MINI.1 as usize);
-        let mut cv = Canvas { w, h, px: vec![0; w * h] };
-        cv.round_rect(0.0, 0.0, w as f32, h as f32, h as f32 / 2.0, rgba(p.star, 0.3));
-        cv.round_rect(1.2, 1.2, w as f32 - 2.4, h as f32 - 2.4, h as f32 / 2.0 - 1.2, rgba(p.panel, 0.96));
+        let mut cv = self.mini_back.get_or_insert_with(|| {
+            let mut b = Canvas { w, h, px: vec![0; w * h] };
+            b.round_rect(0.0, 0.0, w as f32, h as f32, h as f32 / 2.0, rgba(p.star, 0.3));
+            b.round_rect(1.2, 1.2, w as f32 - 2.4, h as f32 - 2.4, h as f32 / 2.0 - 1.2, rgba(p.panel, 0.96));
+            b
+        }).clone();
 
         // the cover as a disc, or a dim sky with a star when there is no picture
         let (cx, cy, r) = MINI_COVER;
@@ -781,7 +832,7 @@ impl Ui {
     fn draw_volume(&mut self, cv: &mut Canvas, g: &Geo) {
         let p = palette();
         let (x0, x1, y) = g.volume;
-        let f = (self.volume / 100.0) as f32;
+        let f = self.vol_shown / 100.0;
         let xm = x0 + (x1 - x0) * f;
         cv.icon_speaker(x0 - 16.0, y, 8.0, 3.0 * f, self.volume == 0.0, rgba(p.text, 0.6));
         cv.polyline(&[(x0, y), (x1, y)], 1.3, rgba(p.star, 0.3));
@@ -1053,6 +1104,47 @@ mod tests {
         ui.move_sel(1);
         ui.move_sel(1);
         assert_eq!(ui.volume, 90.0);
+    }
+
+    #[test]
+    fn the_drawn_volume_slides_and_the_drawn_position_runs_on_without_stepping_back() {
+        let mut ui = Ui::demo(0);
+        (ui.volume, ui.vol_shown) = (100.0, 30.0);
+        ui.advance(0.016);
+        assert!(ui.vol_shown > 30.0 && ui.vol_shown < 100.0, "one frame is a step, not a jump");
+        (0..60).for_each(|_| ui.advance(0.016));
+        assert_eq!(ui.vol_shown, 100.0, "and it arrives");
+
+        ui.st = State { pos: 100.0, len: 222.0, ..Default::default() };
+        ui.pos_at = Instant::now() - std::time::Duration::from_secs(2);
+        ui.advance(0.016);
+        assert!((ui.pos_shown - 102.0).abs() < 0.1, "two seconds since the poll");
+        ui.st.pos = 101.5; // a poll that is a little behind the guess
+        ui.pos_at = Instant::now();
+        ui.advance(0.016);
+        assert!(ui.pos_shown > 101.9, "no small step back");
+        ui.st.pos = 20.0; // a seek is real
+        ui.advance(0.016);
+        assert!(ui.pos_shown < 21.0);
+    }
+
+    /// `cargo test -p seiza-wonder -- --ignored --nocapture`: what a frame of the mini pill and of the window cost.
+    #[test]
+    #[ignore]
+    fn how_long_a_frame_takes() {
+        let mut ui = Ui::demo(0);
+        ui.smooth = true;
+        drop(ui.render_mini()); // the first one parses the CJK font
+        let t = Instant::now();
+        (0..200).for_each(|_| drop(ui.render_mini()));
+        println!("mini pill: {:.2} ms a frame", t.elapsed().as_secs_f64() * 1000.0 / 200.0);
+        drop(ui.render(1920, 1080, 1.0));
+        let t = Instant::now();
+        (0..30).for_each(|_| {
+            ui.stale = true;
+            drop(ui.render(1920, 1080, 1.0));
+        });
+        println!("window at 1920x1080: {:.2} ms a frame", t.elapsed().as_secs_f64() * 1000.0 / 30.0);
     }
 
     #[test]

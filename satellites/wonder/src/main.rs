@@ -426,7 +426,11 @@ fn show(player: &player::Shared, mini: bool, raised: &Rc<Receiver<()>>) -> Next 
         raised: raised.clone(),
         anim: Default::default(),
         shown: -1.0,
-        ui: Ui::new(Some(player.clone())),
+        ui: {
+            let mut ui = Ui::new(Some(player.clone()));
+            ui.smooth = mini;
+            ui
+        },
     };
     while !app.exit {
         if event_queue.blocking_dispatch(&mut app).is_err() {
