@@ -39,6 +39,7 @@ struct cmd_ops {
 	int  (*focus_window)(void *ud, int n);           /* window n of that list (1-based): fly to its star and focus it; -1 if no such window */
 	void (*toggle_tile)(void *ud);                   /* tile or untile the star the camera is on */
 	int  (*night)(void *ud, const char *mode);       /* night light: "on", "off" or "auto" (the schedule); -1 if it is none of those */
+	int  (*keymap)(void *ud, const char *layout);    /* every keyboard to this xkb layout ("pt", "br", "us"...); -1 if xkb does not know it */
 };
 
 /* Run one command line. `seiza <verb> [args]` goes to the ops table; any other

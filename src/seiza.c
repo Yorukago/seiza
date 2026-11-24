@@ -2168,6 +2168,29 @@ static int op_focus_window(void *ud, int n) {
 	return -1;
 }
 
+/* Give a keyboard the xkb layout `layout` (e.g. "pt", "br", "us"; other rules come from XKB_DEFAULT_*). -1 and no change if xkb does not know it. */
+static int keyboard_set_layout(struct wlr_keyboard *kb, const char *layout) {
+	struct xkb_rule_names names = {.layout = layout};
+	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	if (keymap) {
+		wlr_keyboard_set_keymap(kb, keymap);
+		xkb_keymap_unref(keymap);
+	}
+	xkb_context_unref(context);
+	return keymap ? 0 : -1;
+}
+
+static int op_keymap(void *ud, const char *layout) {
+	struct tinywl_server *server = ud;
+	struct tinywl_keyboard *k;
+	int r = 0;
+	wl_list_for_each(k, &server->keyboards, link) {
+		r |= keyboard_set_layout(k->wlr_keyboard, layout);
+	}
+	return r ? -1 : 0;
+}
+
 static int op_night(void *ud, const char *mode) {
 	if (!strcmp(mode, "on")) {
 		g_night_force = 1;
@@ -2187,7 +2210,7 @@ static const struct cmd_ops seiza_ops = {
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
 	op_toggle_maximize, op_set_figure, op_rename_star, op_add_star_at, op_move_star, op_debug_windows, op_debug_pointer, op_toggle_link,
-	op_switcher, op_focus_window, op_toggle_tile, op_night,
+	op_switcher, op_focus_window, op_toggle_tile, op_night, op_keymap,
 };
 
 /* Run the binding for this key combo, if there is one. True if it was one. */
@@ -2268,15 +2291,8 @@ static void server_new_keyboard(struct tinywl_server *server,
 	keyboard->server = server;
 	keyboard->wlr_keyboard = wlr_keyboard;
 
-	/* We need to prepare an XKB keymap and assign it to the keyboard. This
-	 * assumes the defaults (e.g. layout = "us"). */
-	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL,
-		XKB_KEYMAP_COMPILE_NO_FLAGS);
-
-	wlr_keyboard_set_keymap(wlr_keyboard, keymap);
-	xkb_keymap_unref(keymap);
-	xkb_context_unref(context);
+	const char *layout = getenv("XKB_DEFAULT_LAYOUT");
+	keyboard_set_layout(wlr_keyboard, layout ? layout : "pt");
 	wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
 
 	/* Here we set up listeners for keyboard events. */

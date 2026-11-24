@@ -195,6 +195,7 @@ int cmd_run(const struct cmd_ops *ops, void *ud, const char *line, char *out, si
 	if (IS("figure")) { NEED(1); return reply(out, outn, ops->set_figure(ud, w[2]), "no such figure"); }
 	if (IS("maximize")) { NEED(0); ops->toggle_maximize(ud); return reply(out, outn, 0, ""); }
 	if (IS("night")) { NEED(1); return reply(out, outn, ops->night(ud, w[2]), "night takes on, off or auto"); }
+	if (IS("keymap")) { NEED(1); return reply(out, outn, ops->keymap(ud, w[2]), "unknown keyboard layout"); }
 	if (IS("tile")) { NEED(0); ops->toggle_tile(ud); return reply(out, outn, 0, ""); }
 	if (IS("close-window")) { NEED(0); ops->close_window(ud); return reply(out, outn, 0, ""); }
 	if (IS("move-window") || IS("resize-window") || IS("focus")) {
