@@ -343,7 +343,9 @@ static struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, doubl
 	if (tl->xsurface) {
 		return tl->xsurface->surface ? wlr_surface_surface_at(tl->xsurface->surface, x, y, sx, sy) : NULL;
 	}
-	return wlr_xdg_surface_surface_at(tl->xdg_toplevel->base, x, y, sx, sy);
+	/* x,y start at the window geometry, but wlroots wants surface coordinates (a CSD shadow margin comes first) */
+	struct wlr_box g = tl->xdg_toplevel->base->geometry;
+	return wlr_xdg_surface_surface_at(tl->xdg_toplevel->base, x + g.x, y + g.y, sx, sy);
 }
 
 static pid_t tl_pid(const struct tinywl_toplevel *tl) {
