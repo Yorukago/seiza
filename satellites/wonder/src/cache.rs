@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The audio folder is trimmed to this, oldest files first.
-const AUDIO_LIMIT: u64 = 2 << 30;
+/// The audio folder is trimmed to this many bytes, oldest files first: `wonder/cache_gb` in the settings (2 GB).
+fn audio_limit() -> u64 {
+    let gb = seiza_common::config::get("wonder", "cache_gb").and_then(|v| v.parse::<f64>().ok()).unwrap_or(2.0);
+    (gb.clamp(1.0, 100.0) * (1u64 << 30) as f64) as u64
+}
 
 pub fn root() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".cache")))?;
@@ -43,7 +46,7 @@ pub fn fetch(id: &str) {
             let m = e.metadata().ok()?;
             Some((m.modified().ok()?, m.len(), e.path()))
         });
-        evict(files.collect(), AUDIO_LIMIT).into_iter().for_each(|p| drop(std::fs::remove_file(p)));
+        evict(files.collect(), audio_limit()).into_iter().for_each(|p| drop(std::fs::remove_file(p)));
     }
 }
 

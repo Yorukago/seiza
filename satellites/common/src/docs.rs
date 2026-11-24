@@ -95,6 +95,7 @@ pub const FILES: Cards = &[
         ("look", "clock format, wallpaper, palette style, slideshow minutes."),
         ("widgets", "which cards show; weather, agenda, updates and voyager are opt-in."),
         ("launcher", "style, search and terminal."),
+        ("wonder", "cache_gb: how many gigabytes of songs to keep."),
         ("autostart", "programs to start with Seiza, one per line."),
     ]),
     ("yours to make", &[

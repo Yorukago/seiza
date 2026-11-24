@@ -42,6 +42,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("calendar", "the agenda card (add `agenda` to the widgets file)"),
     ("yoru", "Yoru's lines and the menus"),
     ("launcher", "the app launcher"),
+    ("wonder", "the music player"),
 ];
 
 pub const OPTS: &[Opt] = &[
@@ -93,6 +94,7 @@ pub const OPTS: &[Opt] = &[
     o("launcher", "style", Pick(&["list", "stars"]), "list", "apps as a list, or as stars"),
     o("launcher", "search", Pick(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo", "what a query that is no app asks"),
     o("launcher", "terminal", Text, "", "runs apps that want one; kitty if empty"),
+    o("wonder", "cache_gb", Num(1.0, 100.0), "2", "gigabytes of songs kept on disk for instant replays; the oldest go first"),
 ];
 
 /// Things a bind can do: name, fewest and most numbers it takes, what it does.

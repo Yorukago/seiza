@@ -121,7 +121,7 @@ pub fn pages() -> Vec<Page> {
                 tog("panel/calendar", "calendar", "this month, today lit", "0"),
             ]),
         ]},
-        Page { name: "yoru", blurb: "how the launcher and the menus behave.", cards: vec![
+        Page { name: "yoru", blurb: "how the launcher, the menus and the music player behave.", cards: vec![
             card("yoru", vec![
                 tog("yoru/lines", "Yoru's lines", "the little quips on the lock screen and launcher", "1"),
                 tog("yoru/confirm", "confirm power actions", "press twice to shut down or log out", "1"),
@@ -131,6 +131,9 @@ pub fn pages() -> Vec<Page> {
                 row("launcher/style", "launcher look", "a list, or apps as stars", Ctl::Choice(&["list", "stars"]), "list"),
                 row("launcher/search", "web search", "what a query that is no app asks", Ctl::Choice(&["duckduckgo", "google", "startpage", "brave"]), "duckduckgo"),
                 row("launcher/terminal", "terminal", "runs apps that want one; kitty if empty", Ctl::Path, ""),
+            ]),
+            card("wonder", vec![
+                row("wonder/cache_gb", "music cache", "gigabytes of songs kept for instant replays, the oldest go first", Ctl::Slider(1.0, 20.0, 1.0), "2"),
             ]),
         ]},
         Page { name: "keys", blurb: "keys are written in ~/.config/seiza/seiza.kdl.", cards: vec![
