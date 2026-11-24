@@ -6,11 +6,14 @@ use crate::search::Track;
 use std::collections::HashMap;
 use zbus::zvariant::{ObjectPath, Value};
 
-struct Root;
+/// Raise asks the window to show itself again: the process outlives the window so the music keeps playing.
+struct Root(std::sync::mpsc::Sender<()>);
 
 #[zbus::interface(name = "org.mpris.MediaPlayer2")]
 impl Root {
-    fn raise(&self) {}
+    fn raise(&self) {
+        let _ = self.0.send(()); // nobody listening (serve mode) is fine
+    }
     fn quit(&self) {}
 
     #[zbus(property)]
@@ -19,7 +22,7 @@ impl Root {
     }
     #[zbus(property)]
     fn can_raise(&self) -> bool {
-        false
+        true
     }
     #[zbus(property)]
     fn has_track_list(&self) -> bool {
@@ -153,12 +156,19 @@ fn metadata(s: &State, track: Option<&Track>) -> HashMap<String, Value<'static>>
 }
 
 /// Own `org.mpris.MediaPlayer2.wonder` for as long as the returned connection lives.
-pub fn serve(p: Shared) -> zbus::Result<zbus::blocking::Connection> {
+pub fn serve(p: Shared, raise: std::sync::mpsc::Sender<()>) -> zbus::Result<zbus::blocking::Connection> {
     zbus::blocking::connection::Builder::session()?
         .name("org.mpris.MediaPlayer2.wonder")?
-        .serve_at("/org/mpris/MediaPlayer2", Root)?
+        .serve_at("/org/mpris/MediaPlayer2", Root(raise))?
         .serve_at("/org/mpris/MediaPlayer2", Now(p))?
         .build()
+}
+
+/// Ask a running wonder to show its window; false when none is running.
+pub fn raise_running() -> bool {
+    zbus::blocking::Connection::session()
+        .and_then(|c| c.call_method(Some("org.mpris.MediaPlayer2.wonder"), "/org/mpris/MediaPlayer2", Some("org.mpris.MediaPlayer2"), "Raise", &()))
+        .is_ok()
 }
 
 #[cfg(test)]

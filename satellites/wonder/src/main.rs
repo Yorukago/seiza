@@ -288,7 +288,7 @@ fn main() {
                     player.lock().unwrap().add(t); // the first results of any words after the flags
                 }
             }
-            let _bus = mpris::serve(player).expect("the MPRIS name is taken or there is no session bus");
+            let _bus = mpris::serve(player, std::sync::mpsc::channel().0).expect("the MPRIS name is taken or there is no session bus");
             loop {
                 std::thread::park();
             }
@@ -297,9 +297,25 @@ fn main() {
     }
 }
 
+/// The window comes and goes; the player and its MPRIS name live on, so closing the window keeps the music going.
+/// Running `seiza-wonder` again (or MPRIS Raise) brings the window back.
 fn window(args: &[String]) {
+    if mpris::raise_running() {
+        return;
+    }
     let player = engine(args);
-    let _bus = mpris::serve(player.clone()).map_err(|e| eprintln!("seiza-wonder: no MPRIS ({e})")).ok();
+    let (raise, raised) = std::sync::mpsc::channel();
+    let _bus = mpris::serve(player.clone(), raise).map_err(|e| eprintln!("seiza-wonder: no MPRIS ({e})")).ok();
+    while show(&player) {
+        while raised.try_recv().is_ok() {} // a raise sent while the window was closing
+        if raised.recv().is_err() {
+            break;
+        }
+    }
+}
+
+/// One window, until it closes. False when the compositor went away, which ends wonder too.
+fn show(player: &player::Shared) -> bool {
     let conn = Connection::connect_to_env().expect("no Wayland compositor to connect to");
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
@@ -315,7 +331,9 @@ fn window(args: &[String]) {
     layer.commit();
 
     let (tick_conn, tick_qh) = (conn.clone(), qh.clone());
-    std::thread::spawn(move || loop {
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let still_open = open.clone();
+    std::thread::spawn(move || while still_open.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(250));
         tick_conn.display().sync(&tick_qh, Tick);
         let _ = tick_conn.flush();
@@ -337,11 +355,15 @@ fn window(args: &[String]) {
         exit: false,
         anim: Default::default(),
         shown: -1.0,
-        ui: Ui::new(Some(player)),
+        ui: Ui::new(Some(player.clone())),
     };
+    let mut alive = true;
     while !app.exit {
         if event_queue.blocking_dispatch(&mut app).is_err() {
-            break; // the compositor went away
+            alive = false; // the compositor went away
+            break;
         }
     }
+    open.store(false, std::sync::atomic::Ordering::Relaxed);
+    alive
 }
