@@ -466,6 +466,9 @@ impl Ui {
     }
 
     fn set_volume(&mut self, v: f64) {
+        if !self.animating() {
+            self.frame_at = Instant::now(); // the clock starts now: after a long idle the first frame is not "seconds later"
+        }
         self.volume = v.clamp(0.0, 100.0);
         let v = self.volume;
         self.with_player(|p| p.set_volume(v));
@@ -1148,6 +1151,16 @@ mod tests {
         ui.stale = true;
         drop(ui.render(1440, 900, 1.0));
         assert!(!ui.tick(), "another page has no star");
+    }
+
+    #[test]
+    fn the_first_frame_of_a_volume_change_after_a_long_idle_is_a_small_step() {
+        let mut ui = Ui::demo(0);
+        (ui.volume, ui.vol_shown) = (30.0, 30.0);
+        ui.frame_at = Instant::now() - std::time::Duration::from_secs(10);
+        ui.set_volume(100.0);
+        ui.tick_frame();
+        assert!(ui.vol_shown < 40.0, "{} is a jump, not the start of a slide", ui.vol_shown);
     }
 
     /// `cargo test -p seiza-wonder -- --ignored --nocapture`: what a frame of the mini pill and of the window cost.
