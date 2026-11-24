@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=wonder
+GenericName=Music Player
+Comment=Seiza's music player: YouTube search, synced lyrics and a queue
+Exec=seiza-wonder
+Keywords=music;player;youtube;lyrics;song;
+Categories=AudioVideo;Audio;Player;
+Terminal=false

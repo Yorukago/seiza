@@ -78,6 +78,7 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-conf $(PREFIX)/bin/seiza-conf
 	install -Dm755 satellites/target/release/seiza-help $(PREFIX)/bin/seiza-help
 	install -Dm755 satellites/target/release/seiza-wonder $(PREFIX)/bin/seiza-wonder
+	install -Dm644 scripts/seiza-wonder.desktop $(PREFIX)/share/applications/seiza-wonder.desktop
 	install -Dm755 satellites/target/release/seiza-hh $(PREFIX)/bin/seiza-hh
 	install -Dm755 satellites/target/release/seiza-sleep $(PREFIX)/bin/seiza-sleep
 	install -Dm644 portals/seiza-portals.conf $(HOME)/.config/xdg-desktop-portal/seiza-portals.conf
