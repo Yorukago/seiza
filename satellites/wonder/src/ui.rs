@@ -305,7 +305,7 @@ impl Ui {
             self.saved_at = None;
         }
         let key = self.state_key();
-        let changed = key != self.shown;
+        let changed = key != self.shown || self.glides(); // a gliding star is a change every tick
         self.stale |= changed;
         changed
     }
@@ -332,6 +332,12 @@ impl Ui {
 
     fn animating(&self) -> bool {
         self.glide.active() || self.loading() || matches!(self.results, Job::Busy) && self.page == 1 || (self.volume as f32 - self.vol_shown).abs() > 0.2 || self.smooth && self.playing()
+    }
+
+    /// The window's progress star moves a pixel and a half a second: redrawing on each tick (four a second) is enough to
+    /// glide it, and far cheaper than a frame loop. The pill runs a frame loop of its own (`smooth`).
+    pub fn glides(&self) -> bool {
+        self.page == 0 && !self.smooth && self.playing()
     }
 
     fn playing(&self) -> bool {
@@ -1126,6 +1132,22 @@ mod tests {
         ui.st.pos = 20.0; // a seek is real
         ui.advance(0.016);
         assert!(ui.pos_shown < 21.0);
+    }
+
+    #[test]
+    fn the_window_redraws_each_tick_only_while_a_song_plays_on_the_now_page() {
+        let mut ui = Ui::demo(0);
+        drop(ui.render(1440, 900, 1.0));
+        assert!(ui.tick(), "playing on the now page: the star glides");
+        ui.st.paused = true;
+        ui.stale = true;
+        drop(ui.render(1440, 900, 1.0));
+        assert!(!ui.tick(), "paused: nothing to draw");
+        ui.st.paused = false;
+        ui.page = 1;
+        ui.stale = true;
+        drop(ui.render(1440, 900, 1.0));
+        assert!(!ui.tick(), "another page has no star");
     }
 
     /// `cargo test -p seiza-wonder -- --ignored --nocapture`: what a frame of the mini pill and of the window cost.
