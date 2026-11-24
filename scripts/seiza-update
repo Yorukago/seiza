@@ -1,0 +1,16 @@
+#!/bin/sh
+# Rebuild and install Seiza from the checkout it was installed from, then restart the satellites in place.
+# The compositor itself keeps running (swapping it would drop every window): its new binary starts at the next login.
+set -u
+prefix=${PREFIX:-$HOME/.local}
+src=$(cat "$prefix/share/seiza/source" 2>/dev/null)
+say() { notify-send -a seiza "$1" "${2:-}" 2>/dev/null; echo "$1 ${2:-}"; }
+[ -d "$src" ] || { say "seiza update failed" "no source path: run make install once from the checkout"; exit 1; }
+# the old version keeps running while this compiles
+make -C "$src" install PREFIX="$prefix" || { say "seiza update failed" "the build broke, nothing was changed"; exit 1; }
+# shortcut: a fixed list like the compositor's own, and one starfield (extra monitors get theirs back on the next hotplug).
+for sat in seiza-starfield seiza-bar seiza-widgets seiza-osd seiza-notify seiza-sleep; do
+	pkill -x "$sat"
+	setsid "$prefix/bin/$sat" >/dev/null 2>&1 &
+done
+say "seiza updated" "bar, widgets and the rest are new now; the compositor is new at the next login"

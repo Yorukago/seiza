@@ -5,6 +5,7 @@
 #   make test   build and run tests/test_*.c
 #   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor, constellation view) into $(PREFIX)/bin; Seiza autostarts them
 #   make install-session   list Seiza as a session in SDDM/GDM (asks for sudo: it writes /usr/share/wayland-sessions)
+#   seiza-update   (installed by make install) rebuild, install and restart the satellites from inside the session
 
 PKGS    := wlroots-0.20 scenefx-0.5 wayland-server xkbcommon xcb xcb-icccm xcb-ewmh
 CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(PKGS))
@@ -81,6 +82,8 @@ install: seiza
 	install -Dm755 satellites/target/release/seiza-sleep $(PREFIX)/bin/seiza-sleep
 	install -Dm644 portals/seiza-portals.conf $(HOME)/.config/xdg-desktop-portal/seiza-portals.conf
 	test -e $(HOME)/.config/xdg-desktop-portal-wlr/config || install -Dm644 portals/xdpw.conf $(HOME)/.config/xdg-desktop-portal-wlr/config
+	install -Dm755 scripts/seiza-update $(PREFIX)/bin/seiza-update
+	mkdir -p $(PREFIX)/share/seiza && echo '$(CURDIR)' > $(PREFIX)/share/seiza/source
 	install -Dm755 scripts/seiza-shot $(PREFIX)/bin/seiza-shot
 	install -Dm755 scripts/seiza-wallpaper $(PREFIX)/bin/seiza-wallpaper
 	install -Dm755 scripts/seiza-clip-store $(PREFIX)/bin/seiza-clip-store
