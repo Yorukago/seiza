@@ -1,6 +1,7 @@
 //! wonder: the Seiza music player. `seiza-wonder` opens its window; the other forms are for trying the parts
 //! without one: `search <words>`, `lyrics <words>`, `serve [--silent] [words]` (the player alone, on the bus) and
 //! `--dump out.ppm [page [width height [visibility 0..1]]]` (one frame of the window to a file).
+mod cache;
 mod cover;
 mod ipc;
 mod lyrics;

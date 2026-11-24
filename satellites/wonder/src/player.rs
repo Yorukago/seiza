@@ -71,6 +71,8 @@ pub struct Player {
     pub queue: Queue,
     pub shuffle: bool,
     pub repeat: bool,
+    pick: Option<usize>,     // the shuffled next track, chosen once so what is pre-fetched is what plays
+    prefetched: Option<String>, // the id last sent to the cache
     pub last: State, // as of the last `poll`: what the window and MPRIS read
     ended: bool,     // the last track finished and there is no next one
     loaded_at: Instant,
@@ -101,7 +103,7 @@ impl Player {
         for _ in 0..50 {
             if let Ok(s) = UnixStream::connect(&sock) {
                 let (queue, last, ended, loaded_at) = (Queue::default(), State { idle: true, ..Default::default() }, false, Instant::now());
-                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, last, ended, loaded_at });
+                return Ok(Player { ipc: Ipc::new(s)?, child, sock, queue, shuffle: false, repeat: false, pick: None, prefetched: None, last, ended, loaded_at });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -139,8 +141,9 @@ impl Player {
 
     pub fn play_at(&mut self, i: usize) -> bool {
         let Some(t) = self.queue.items.get(i) else { return false };
-        let url = t.url();
+        let url = crate::cache::audio(&t.id).map_or_else(|| t.url(), |f| f.display().to_string()); // the pre-fetched file when there is one
         self.queue.at = Some(i);
+        self.pick = None;
         self.ended = false;
         self.load_url(&url)
     }
@@ -159,9 +162,18 @@ impl Player {
         self.play_at(i);
     }
 
-    pub fn next(&mut self) {
+    /// Where the music goes after this track: stable while it plays, so the pre-fetch and `next` agree.
+    fn upcoming(&mut self) -> Option<usize> {
+        if !self.shuffle {
+            return self.queue.after(false, self.repeat, 0);
+        }
         let roll = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() as usize);
-        match self.queue.after(self.shuffle, self.repeat, roll) {
+        self.pick = self.pick.filter(|i| *i < self.queue.items.len()).or_else(|| self.queue.after(true, self.repeat, roll));
+        self.pick
+    }
+
+    pub fn next(&mut self) {
+        match self.upcoming() {
             Some(i) => drop(self.play_at(i)),
             None => {
                 self.ended = true;
@@ -213,6 +225,13 @@ impl Player {
         }
         if over {
             self.next();
+        } else if settled && !self.last.idle && self.last.pos > 5.0 && self.queue.at.is_some() {
+            // well into a track: fetch the next one, so it starts without the wait
+            let next = self.upcoming().and_then(|i| self.queue.items.get(i)).map(|t| t.id.clone());
+            if let Some(id) = next.filter(|id| self.prefetched.as_ref() != Some(id)) {
+                self.prefetched = Some(id.clone());
+                std::thread::spawn(move || crate::cache::fetch(&id));
+            }
         }
     }
 }
@@ -250,7 +269,7 @@ mod tests {
     #[test]
     fn shuffle_never_picks_the_current_track_and_repeat_wraps_the_end() {
         let mut q = Queue::default();
-        (0..3).for_each(|i| drop(q.push(t(&i.to_string()))));
+        (0..3).for_each(|i| { q.push(t(&i.to_string())); });
         q.at = Some(1);
         assert!((0..9).all(|r| matches!(q.after(true, false, r), Some(0 | 2))));
         q.at = Some(2);

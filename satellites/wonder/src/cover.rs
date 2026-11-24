@@ -12,7 +12,7 @@ pub fn fetch(t: &Track) -> Option<Canvas> {
     if t.id.is_empty() || !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return None; // the id becomes a file name
     }
-    let cache = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(".cache")))?.join("seiza/wonder");
+    let cache = crate::cache::root()?;
     std::fs::create_dir_all(&cache).ok()?;
     let file = cache.join(format!("{}.jpg", t.id));
     if !file.exists() {
