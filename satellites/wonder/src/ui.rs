@@ -284,6 +284,16 @@ impl Ui {
         self.stale = true;
     }
 
+    /// Ctrl+V: the clipboard goes into the pill, and a link is looked up at once.
+    pub fn paste(&mut self) {
+        let Ok(out) = std::process::Command::new("wl-paste").args(["--no-newline", "--type", "text"]).output() else { return };
+        let text = String::from_utf8_lossy(&out.stdout).trim().replace('\n', " ");
+        self.type_str(&text);
+        if text.starts_with("http") {
+            self.enter();
+        }
+    }
+
     pub fn backspace(&mut self) {
         self.query.pop();
         self.stale = true;
@@ -471,7 +481,7 @@ impl Ui {
             self.draw_find(&mut cv, &g);
         }
         let base = g.oy + self.h - 22.0;
-        let hint = if self.page == 0 { "click a star to change page  \u{b7}  type to search  \u{b7}  space: play or pause  \u{b7}  left/right: previous, next" } else { "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now" };
+        let hint = if self.page == 0 { "click a star to change page  \u{b7}  type or paste to search  \u{b7}  space: play or pause  \u{b7}  left/right: previous, next" } else { "enter: search, then add to the queue  \u{b7}  up/down: choose  \u{b7}  click: play now" };
         self.t13.draw(&mut cv, g.ox + PAD, base, hint, rgba(p.text, 0.4));
         let quit = "Esc: clear / close";
         let qw = self.t13.width(quit);

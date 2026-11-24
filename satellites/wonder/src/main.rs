@@ -50,6 +50,7 @@ struct Wonder {
     frame_pending: bool,
     dirty: bool,
     exit: bool,
+    ctrl: bool,
     anim: seiza_common::kit::Anim,
     shown: f32, // the visibility last drawn
     ui: Ui,
@@ -69,6 +70,7 @@ impl Wonder {
 
     fn key(&mut self, event: &KeyEvent) {
         match event.keysym {
+            Keysym::v | Keysym::V if self.ctrl => self.ui.paste(),
             Keysym::Escape => {
                 if !self.ui.clear_query() {
                     self.close();
@@ -194,7 +196,9 @@ impl KeyboardHandler for Wonder {
         }
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: RawModifiers, _: u32) {}
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: RawModifiers, _: u32) {
+        self.ctrl = m.ctrl;
+    }
 }
 
 impl PointerHandler for Wonder {
@@ -353,6 +357,7 @@ fn show(player: &player::Shared) -> bool {
         frame_pending: false,
         dirty: true,
         exit: false,
+        ctrl: false,
         anim: Default::default(),
         shown: -1.0,
         ui: Ui::new(Some(player.clone())),
