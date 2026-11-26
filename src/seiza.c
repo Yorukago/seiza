@@ -1,4 +1,4 @@
-/* SEIZA: promoted from spike/ on 2026-10-22 (design: docs/2026-10-22-constellations-design.md) */
+/* SEIZA: the compositor. */
 #include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>

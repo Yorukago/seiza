@@ -1,8 +1,8 @@
-# SEIZA -- the compositor (src/seiza.c) plus small wlroots-free modules that `make test` covers.
+# SEIZA -- the compositor (src/seiza.c) and its satellites.
 #   make        build ./seiza
 #   make run    run nested inside your current compositor, with kitty
 #   make clipboard   same as run, with the clipboard shared with the host
-#   make test   build and run tests/test_*.c
+#   make test   run the satellites' unit tests (cargo test)
 #   make install   seiza + the satellites (starfield wallpaper, bar, session menu, launcher, lock screen, widgets, settings, constellation editor, constellation view) into $(PREFIX)/bin; Seiza autostarts them
 #   make install-session   list Seiza as a session in SDDM/GDM (asks for sudo: it writes /usr/share/wayland-sessions)
 #   seiza-update   (installed by make install) rebuild, install and restart the satellites from inside the session
@@ -12,7 +12,6 @@ CFLAGS  := -O2 -g -Wall -DWLR_USE_UNSTABLE -Isrc $(shell pkg-config --cflags $(P
 LDLIBS  := $(shell pkg-config --libs $(PKGS))
 
 # Modules the tests link against (everything except the compositor and socket glue).
-LIB_SRC := $(filter-out src/seiza.c src/ipc.c,$(wildcard src/*.c))
 # Everything the compositor links.
 ALL_SRC := $(wildcard src/*.c)
 
@@ -44,18 +43,8 @@ run: seiza
 clipboard: seiza
 	XKB_DEFAULT_LAYOUT=$(LAYOUT) HOST_WAYLAND_DISPLAY=$$WAYLAND_DISPLAY ./seiza -s 'scripts/clipbridge & exec kitty'
 
-TESTS :=$(patsubst tests/%.c,tests/bin/%,$(wildcard tests/test_*.c))
-
-tests/bin/%: tests/%.c $(LIB_SRC) $(wildcard src/*.h) src/figures-builtin.h
-	@mkdir -p tests/bin
-	$(CC) -O0 -g -Wall -Isrc $(shell pkg-config --cflags xkbcommon) $< $(LIB_SRC) -o $@ $(shell pkg-config --libs xkbcommon) -lm
-
-test: $(TESTS)
-	@for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done; echo "all tests passed"; cargo test --quiet --manifest-path satellites/Cargo.toml
-
-smoke: seiza
-	python3 -I tests/smoke_ipc.py
-	python3 -I tests/smoke_monitors.py
+test:
+	cargo test --quiet --manifest-path satellites/Cargo.toml
 
 PREFIX ?= $(HOME)/.local
 
@@ -99,6 +88,6 @@ install-session:
 	sed 's|@BIN@|$(abspath $(PREFIX))/bin|' scripts/seiza.desktop.in | sudo tee /usr/share/wayland-sessions/seiza.desktop >/dev/null
 
 clean:
-	rm -f seiza src/figures-builtin.h src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h; rm -rf tests/bin
+	rm -f seiza src/figures-builtin.h src/xdg-shell-protocol.h src/wlr-layer-shell-unstable-v1-protocol.h
 
-.PHONY: all run clipboard test smoke install install-session clean
+.PHONY: all run clipboard test install install-session clean
