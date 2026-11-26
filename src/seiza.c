@@ -1,290 +1,16 @@
 /* SEIZA: the compositor. */
-#include <assert.h>
-#include <getopt.h>
-#include <stdbool.h>
-#include <math.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <ctype.h>
-#include <stdio.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <time.h>
-#include <unistd.h>
-#include <wayland-server-core.h>
-#include <wlr/backend.h>
-#include <wlr/backend/libinput.h>
-#include <libinput.h>
-#include <wlr/render/allocator.h>
-#include <wlr/render/wlr_renderer.h>
-#include <drm_fourcc.h>
-#include <wlr/interfaces/wlr_buffer.h>
-#include <wlr/types/wlr_buffer.h>
-#include <wlr/types/wlr_cursor.h>
-#include <wlr/types/wlr_compositor.h>
-#include <wlr/types/wlr_data_control_v1.h>
-#include <wlr/types/wlr_screencopy_v1.h>
-#include <wlr/types/wlr_pointer_constraints_v1.h>
-#include <wlr/types/wlr_relative_pointer_v1.h>
-#include <wlr/types/wlr_ext_image_copy_capture_v1.h>
-#include <wlr/types/wlr_ext_image_capture_source_v1.h>
-#include <wlr/types/wlr_data_device.h>
-#include <wlr/types/wlr_input_device.h>
-#include <wlr/types/wlr_layer_shell_v1.h>
-#include <linux/input-event-codes.h>
-#include <wlr/types/wlr_keyboard.h>
-#include <wlr/types/wlr_output.h>
-#include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_pointer.h>
-#include <scenefx/types/wlr_scene.h>
-#include <scenefx/render/fx_renderer/fx_renderer.h>
-#include <wlr/types/wlr_seat.h>
-#include <wlr/types/wlr_session_lock_v1.h>
-#include <wlr/types/wlr_idle_inhibit_v1.h>
-#include <wlr/xwayland.h>
-#include <wlr/types/wlr_viewporter.h>
-#include <wlr/types/wlr_xdg_output_v1.h>
-#include <wlr/types/wlr_subcompositor.h>
-#include <wlr/types/wlr_xcursor_manager.h>
-#include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/types/wlr_xdg_decoration_v1.h>
-#include <wlr/util/log.h>
-#include <xkbcommon/xkbcommon.h>
-#include <sys/inotify.h>
-#include "cmd.h"
-#include "constellation.h"
-#include "ipc.h"
-#include "procinfo.h"
-#include "keys.h"
-#include "palette.h"
-#include "motion.h"
-#include "night.h"
-#include "frame.h"
-#include "figure.h"
-
-/* For brevity's sake, struct members are annotated where they are used. */
-enum tinywl_cursor_mode {
-	TINYWL_CURSOR_PASSTHROUGH,
-	TINYWL_CURSOR_MOVE,
-	TINYWL_CURSOR_RESIZE,
-	TINYWL_CURSOR_PAN, /* SEIZA: dragging the canvas */
-};
-
-/* SEIZA: a star is a workspace: a named spot on the canvas that owns windows.
- * Its `marker` (a dot plus a frame around its territory) only shows in the
- * overview. All positions here are in world coordinates. */
-struct star {
-	struct wl_list link;
-	char name[32];
-	double cx, cy; /* center of the star's territory */
-	struct wlr_scene_tree *marker;
-	struct wlr_scene_rect *frame[4];
-	struct wlr_scene_rect *dot;
-	float color[4];
-	char apps[CSTAR_APPS_MAX][256]; /* remembered launch commands (never auto-launched) */
-	int napps;
-	int tiled; /* 0 follows the layout config, 1 tiled, -1 floating (Super+t) */
-};
-
-/* An X11 override-redirect window: a menu, a tooltip, a drop-down. The program places it itself,
- * in X coordinates, which are relative to its window's origin (every managed window sits at X
- * (0,0)); so it is drawn at that window's place on the canvas plus those coordinates, and nobody
- * manages it. */
-struct xunmanaged {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_xwayland_surface *xs;
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_surface *surf; /* while mapped */
-	bool attached;                  /* map/unmap are listened to on the X11 surface */
-	bool committing;                /* so is commit, while it is shown */
-	double ax, ay;                  /* the world place of the window it belongs to, taken when it was shown */
-	struct wl_listener associate, dissociate, destroy, map, unmap, set_geometry, request_configure, commit;
-};
-
-struct tinywl_server {
-	struct wl_display *wl_display;
-	struct wlr_backend *backend;
-	struct wlr_renderer *renderer;
-	struct wlr_allocator *allocator;
-	struct wlr_scene *scene;
-	struct wlr_scene_output_layout *scene_layout;
-
-	/* SEIZA: every window lives under `canvas`. Windows have a position in
-	 * WORLD coordinates (tl->wx, tl->wy). What is on screen is
-	 *     screen = world * zoom - cam
-	 * so cam is in screen pixels at the current zoom, and the canvas node's
-	 * offset is -cam. */
-	struct wlr_scene_tree *canvas;
-	double cam_x, cam_y;
-	double zoom;
-
-	double pan_last_x, pan_last_y; /* cursor position at the last canvas-drag step */
-	struct wl_list stars;
-	struct wl_list ghosts;     /* closed windows still fading out */
-	struct star *current_star; /* the star new windows land in */
-	char cfg_dir[400];         /* ~/.config/seiza */
-	struct keymap_cfg keys;    /* built-in defaults + ~/.config/seiza/keys */
-	char constellation_name[32]; /* the active constellation (autosaved) */
-	bool overview;             /* zoomed-out constellation view */
-	struct star *hover_star;   /* star under the cursor in the overview */
-	struct {                   /* a camera glide: world-space centre and zoom, from -> to */
-		bool on;
-		double t0, dur, cx0, cy0, z0, cx1, cy1, z1;
-	} anim;
-	double press_x, press_y;   /* where a star was pressed in the overview */
-	bool drag_moved;           /* it moved far enough to be a drag, not a click */
-	struct star *drag_star;    /* star being moved with Shift+drag in the overview */
-	double drag_x0, drag_y0;   /* where it started, to revert an overlapping drop */
-
-	/* SEIZA: layer-shell surfaces (bars, launchers, wallpapers) are screen-fixed,
-	 * not part of the canvas: they live in trees around it, in protocol order
-	 * (background, bottom, [canvas], top, overlay). */
-	struct wlr_scene_tree *layers[4];
-	/* SEIZA: ext-session-lock. While locked, a black rect and the lock client's
-	 * surfaces cover everything and all input goes to the lock client. */
-	struct wlr_session_lock_manager_v1 *lock_mgr;
-	struct wl_listener new_lock;
-	struct wlr_session_lock_v1 *lock;  /* the live lock client; NULL if none or it died */
-	struct wl_listener lock_new_surface, lock_unlock, lock_destroy;
-	struct wlr_scene_tree *lock_tree;
-	struct wlr_scene_rect *lock_bg;
-	bool locked;
-	int links[CONST_LINKS_MAX][2]; /* threads between stars, as indexes in creation order */
-	int nlinks;
-	struct wlr_xwayland *xwayland;
-	struct wl_listener new_xwayland_surface, xwayland_ready;
-	struct wl_list unmanaged; /* struct xunmanaged */
-	struct wlr_scene_tree *xtop; /* in the canvas, raised above the windows: where those menus draw */
-	int idle_dim, idle_lock, idle_off; /* seconds without input until the screen dims / seiza-lock / screens off; 0 = never. From seiza.kdl */
-	int panel_corner, panel_dwell; /* hot corner that opens seiza-panel: 0 off, 1 top-right, 2 top-left, 3 bottom-right, 4 bottom-left; dwell in ms. From seiza.kdl */
-	struct wlr_idle_inhibit_manager_v1 *idle_inhibit; /* a client holding an inhibitor (a video) keeps the screen awake */
-	struct wlr_scene_rect *dim_rect;
-	struct motion motion; /* pan duration and easing, from ~/.config/seiza/motion */
-	struct wlr_box full, usable; /* the output, and what the layer surfaces (the bar) leave of it; set by layers_arrange */
-	struct wlr_scene_tree *corner_tree; /* above everything: black corner masks make the screen rounded */
-	struct wlr_layer_shell_v1 *layer_shell;
-	struct wl_listener new_layer_surface;
-	struct wl_list layer_surfaces;
-
-	struct wlr_xdg_shell *xdg_shell;
-	struct wl_listener new_xdg_toplevel;
-	struct wl_listener new_xdg_popup;
-	struct wl_list toplevels;     /* mapped windows, front to back */
-	struct wl_list all_toplevels; /* SEIZA: every window that exists; each holds a star pointer */
-
-	struct wlr_cursor *cursor;
-	struct wlr_xcursor_manager *cursor_mgr;
-	struct wl_listener cursor_motion;
-	struct wl_listener cursor_motion_absolute;
-	struct wl_listener cursor_button;
-	struct wl_listener cursor_axis;
-	struct wl_listener cursor_frame;
-
-	struct wlr_seat *seat;
-	struct wl_listener new_input;
-	struct wl_listener request_cursor;
-	struct wl_listener pointer_focus_change;
-	struct wlr_pointer_constraints_v1 *constraints;
-	struct wlr_relative_pointer_manager_v1 *relative_pointer;
-	struct wlr_pointer_constraint_v1 *constraint; /* the one in force on the pointer-focused surface, or NULL */
-	struct wl_listener new_constraint, constraint_destroy;
-	struct wl_listener request_set_selection;
-	struct wl_list keyboards;
-	enum tinywl_cursor_mode cursor_mode;
-	struct tinywl_toplevel *grabbed_toplevel;
-	double grab_x, grab_y;
-	struct wlr_box grab_geobox;
-	uint32_t resize_edges;
-
-	struct wlr_output_layout *output_layout;
-	struct wl_list outputs;
-	struct wl_listener new_output;
-};
-
-struct tinywl_output {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_output *wlr_output;
-	struct wl_listener frame;
-	struct wl_listener request_state;
-	struct wl_listener destroy;
-	struct wlr_scene_buffer *corner[4]; /* SEIZA: the screen's rounded corners, TL TR BL BR */
-	int corner_r; /* radius the corners were built with */
-};
-
-struct tinywl_toplevel {
-	struct wl_list link;
-	struct wl_list all_link; /* SEIZA: in server->all_toplevels from creation to destroy, mapped or not */
-	struct tinywl_server *server;
-	struct wlr_xdg_toplevel *xdg_toplevel; /* a Wayland window... */
-	struct wlr_xwayland_surface *xsurface; /* ...or an X11 one (then xdg_toplevel is NULL) */
-	struct wlr_scene_surface *x_scene;     /* the X11 window's surface in the scene, while it is mapped */
-	bool x_attached;                       /* map/unmap/commit are listened to on the X11 window's surface */
-	struct wl_listener associate, dissociate, request_configure, request_activate; /* X11 only */
-	struct wlr_scene_tree *scene_tree;
-	double wx, wy; /* SEIZA: window origin in world coordinates */
-	struct star *star; /* SEIZA: the workspace this window belongs to */
-	/* SEIZA window frame: a rounded plate behind the window (only its rim shows) and a bloom while focused. */
-	struct wlr_scene_rect *border;
-	struct wlr_scene_shadow *glow;
-	int mode; /* 0 normal, 1 maximized */
-	float faded;    /* 0 when fully shown; while it fades in, how much is still missing (the frame follows it) */
-	double open_t0; /* when it was mapped, while it is still fading in; 0 otherwise */
-	double saved_wx, saved_wy; /* where it was, and how big, before it left mode 0 */
-	int saved_w, saved_h;
-	struct wl_listener map;
-	struct wl_listener unmap;
-	struct wl_listener commit;
-	struct wl_listener destroy;
-	struct wl_listener request_move;
-	struct wl_listener request_resize;
-	struct wl_listener request_maximize;
-	struct wl_listener request_fullscreen;
-};
-
-struct seiza_layer {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_layer_surface_v1 *surf;
-	struct wlr_scene_layer_surface_v1 *scene;
-	struct wl_listener commit, map, unmap, destroy;
-};
-
-struct tinywl_popup {
-	struct wlr_xdg_popup *xdg_popup;
-	struct wl_listener commit;
-	struct wl_listener destroy;
-};
-
-struct tinywl_keyboard {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_keyboard *wlr_keyboard;
-
-	struct wl_listener modifiers;
-	struct wl_listener key;
-	struct wl_listener destroy;
-};
+#include "seiza.h"
 
 /* SEIZA window frame: a rounded plate behind the window (only its rim shows)
  * plus a soft gold bloom while focused. Thickness and radius are in screen px
  * at zoom 1; the radius follows the zoom, the thickness does not. */
-#define GLOW_SIGMA 18
-#define OPEN_POPIN 0.2 /* Hyprland's `popin 80%`: a window opens at 80% size and grows to 100% along its fade */
-static struct frame FRAME; /* radius, border and glow: from the frame file, set by frame_colors_load() */
-#define WIN_RADIUS FRAME.radius
-#define BORDER_W FRAME.border
-static float BORDER_FOCUSED[4], BORDER_IDLE[4], GLOW_FOCUSED[4]; /* set by frame_colors_load() */
-static const float GLOW_IDLE[4]      = {0, 0, 0, 0};
 
 /* A window is a Wayland one (xdg) or an X11 one (XWayland); the rest of the compositor asks these. */
-static struct wlr_surface *tl_surface(const struct tinywl_toplevel *tl) {
+struct wlr_surface *tl_surface(const struct tinywl_toplevel *tl) {
 	return tl->xsurface ? tl->xsurface->surface : tl->xdg_toplevel->base->surface;
 }
 
-static struct wlr_box tl_geometry(const struct tinywl_toplevel *tl) {
+struct wlr_box tl_geometry(const struct tinywl_toplevel *tl) {
 	if (tl->xsurface) {
 		return (struct wlr_box){0, 0, tl->xsurface->width, tl->xsurface->height};
 	}
@@ -292,14 +18,14 @@ static struct wlr_box tl_geometry(const struct tinywl_toplevel *tl) {
 }
 
 /* True once the client has something to configure: xdg is initialized, X11 is mapped. */
-static bool tl_ready(const struct tinywl_toplevel *tl) {
+bool tl_ready(const struct tinywl_toplevel *tl) {
 	if (tl->xsurface) {
 		return tl->xsurface->surface && tl->xsurface->surface->mapped;
 	}
 	return tl->xdg_toplevel->base->initialized;
 }
 
-static void tl_set_size(struct tinywl_toplevel *tl, int w, int h) {
+void tl_set_size(struct tinywl_toplevel *tl, int w, int h) {
 	if (!tl->xsurface) {
 		wlr_xdg_toplevel_set_size(tl->xdg_toplevel, w, h);
 	} else if (w > 0 && h > 0) {
@@ -323,7 +49,7 @@ static void tl_activate(struct tinywl_toplevel *tl, bool on) {
 	}
 }
 
-static void tl_set_maximized(struct tinywl_toplevel *tl, bool on) {
+void tl_set_maximized(struct tinywl_toplevel *tl, bool on) {
 	if (tl->xsurface) {
 		wlr_xwayland_surface_set_maximized(tl->xsurface, on, on);
 	} else {
@@ -331,7 +57,7 @@ static void tl_set_maximized(struct tinywl_toplevel *tl, bool on) {
 	}
 }
 
-static void tl_set_fullscreen(struct tinywl_toplevel *tl, bool on) {
+void tl_set_fullscreen(struct tinywl_toplevel *tl, bool on) {
 	if (tl->xsurface) {
 		wlr_xwayland_surface_set_fullscreen(tl->xsurface, on);
 	} else {
@@ -339,7 +65,7 @@ static void tl_set_fullscreen(struct tinywl_toplevel *tl, bool on) {
 	}
 }
 
-static struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, double x, double y, double *sx, double *sy) {
+struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, double x, double y, double *sx, double *sy) {
 	if (tl->xsurface) {
 		return tl->xsurface->surface ? wlr_surface_surface_at(tl->xsurface->surface, x, y, sx, sy) : NULL;
 	}
@@ -348,7 +74,7 @@ static struct wlr_surface *tl_surface_at(const struct tinywl_toplevel *tl, doubl
 	return wlr_xdg_surface_surface_at(tl->xdg_toplevel->base, x + g.x, y + g.y, sx, sy);
 }
 
-static pid_t tl_pid(const struct tinywl_toplevel *tl) {
+pid_t tl_pid(const struct tinywl_toplevel *tl) {
 	pid_t pid = 0;
 	if (tl->xsurface) {
 		return tl->xsurface->pid;
@@ -358,7 +84,7 @@ static pid_t tl_pid(const struct tinywl_toplevel *tl) {
 }
 
 /* The window that had keyboard focus, whichever kind it is, is told it no longer does. */
-static void surface_deactivate(struct wlr_surface *surface) {
+void surface_deactivate(struct wlr_surface *surface) {
 	struct wlr_xdg_toplevel *xdg = wlr_xdg_toplevel_try_from_wlr_surface(surface);
 	struct wlr_xwayland_surface *x = wlr_xwayland_surface_try_from_wlr_surface(surface);
 	if (xdg) {
@@ -393,7 +119,7 @@ static void frame_fit(struct wlr_scene_rect *border, struct wlr_scene_shadow *gl
 	wlr_scene_node_set_position(&glow->node, gx - t - bloom, gy - t - bloom);
 }
 
-static void update_border(struct tinywl_toplevel *tl) {
+void update_border(struct tinywl_toplevel *tl) {
 	struct wlr_box geo = tl_geometry(tl);
 	bool focused = tl_surface(tl) && tl->server->seat->keyboard_state.focused_surface == tl_surface(tl);
 	frame_fit(tl->border, tl->glow, &geo, tl->server->zoom * (1 - OPEN_POPIN * tl->faded), !tl->mode, focused,
@@ -402,10 +128,6 @@ static void update_border(struct tinywl_toplevel *tl) {
 
 /* SEIZA stars. Territory size and grid spacing, in world units. New stars are
  * placed on a 3-column grid, left to right, then down. */
-#define STAR_W 1920
-#define STAR_H 1080
-#define STAR_DX 2400
-#define STAR_DY 1500
 #define STAR_DOT 12    /* screen px, constant at any zoom */
 #define STAR_HIT 24    /* screen px: how close a click must be to a star's dot */
 
@@ -434,7 +156,7 @@ static void layout_star(struct tinywl_server *server, struct star *s) {
 }
 
 /* Make a star at a world position. Its color follows its creation order. */
-static struct star *star_create_at(struct tinywl_server *server, const char *name,
+struct star *star_create_at(struct tinywl_server *server, const char *name,
 		double cx, double cy) {
 	static const float palette[6][3] = {
 		{0.95f, 0.60f, 0.90f}, {0.55f, 0.80f, 0.95f}, {0.98f, 0.85f, 0.50f},
@@ -457,10 +179,9 @@ static struct star *star_create_at(struct tinywl_server *server, const char *nam
 	return s;
 }
 
-static struct star *star_at(struct tinywl_server *server, double wx, double wy);
 
 /* The first free slot of the 3-column grid. */
-static int grid_slot(struct tinywl_server *server, double *cx, double *cy) {
+int grid_slot(struct tinywl_server *server, double *cx, double *cy) {
 	int slot = 0;
 	for (;; slot++) {
 		*cx = STAR_W / 2.0 + (slot % 3) * STAR_DX;
@@ -472,7 +193,7 @@ static int grid_slot(struct tinywl_server *server, double *cx, double *cy) {
 }
 
 /* A name no star has yet: "star N" for the first N that is free. */
-static void star_new_name(struct tinywl_server *server, char name[32]) {
+void star_new_name(struct tinywl_server *server, char name[32]) {
 	for (int n = 0;; n++) {
 		snprintf(name, 32, "star %d", n);
 		struct star *s;
@@ -487,7 +208,7 @@ static void star_new_name(struct tinywl_server *server, char name[32]) {
 }
 
 /* Make a new star in the first free slot of the grid. */
-static struct star *star_create(struct tinywl_server *server) {
+struct star *star_create(struct tinywl_server *server) {
 	double cx, cy;
 	int slot = grid_slot(server, &cx, &cy);
 	char name[32];
@@ -496,7 +217,7 @@ static struct star *star_create(struct tinywl_server *server) {
 }
 
 /* Which star's territory contains this world point, if any. */
-static struct star *star_at(struct tinywl_server *server, double wx, double wy) {
+struct star *star_at(struct tinywl_server *server, double wx, double wy) {
 	struct star *s;
 	wl_list_for_each(s, &server->stars, link) {
 		if (fabs(wx - s->cx) <= STAR_W / 2.0 && fabs(wy - s->cy) <= STAR_H / 2.0) {
@@ -508,7 +229,7 @@ static struct star *star_at(struct tinywl_server *server, double wx, double wy) 
 
 /* SEIZA persistence: the active constellation is rewritten whenever its
  * structure changes (never per frame). A failed save is logged, not fatal. */
-static int persist_write(struct tinywl_server *server, const char *name, bool make_last) {
+int persist_write(struct tinywl_server *server, const char *name, bool make_last) {
 	struct constellation c = {0};
 	snprintf(c.name, sizeof(c.name), "%s", name);
 	struct star *s;
@@ -539,12 +260,12 @@ static int persist_write(struct tinywl_server *server, const char *name, bool ma
 	return 0;
 }
 
-static void persist_save(struct tinywl_server *server) {
+void persist_save(struct tinywl_server *server) {
 	persist_write(server, server->constellation_name, true);
 }
 
 /* Build the stars of `c` and make the first one current. */
-static void persist_apply(struct tinywl_server *server, const struct constellation *c) {
+void persist_apply(struct tinywl_server *server, const struct constellation *c) {
 	snprintf(server->constellation_name, sizeof(server->constellation_name), "%s", c->name);
 	memcpy(server->links, c->links, sizeof(server->links));
 	server->nlinks = c->nlinks;
@@ -609,7 +330,7 @@ static size_t json_str(char *buf, size_t n, size_t at, const char *s) {
 /* Tell subscribers (satellites) the state they draw from. Screen position of a
  * world point is  world * zoom - cam;  star boxes are centered on x,y. Call
  * whenever any of this may have changed: ipc_publish drops repeats. */
-static void publish_state(struct tinywl_server *server) {
+void publish_state(struct tinywl_server *server) {
 	static char buf[16384];
 	double sw, sh;
 	screen_center(server, &sw, &sh);
@@ -646,7 +367,7 @@ static void publish_state(struct tinywl_server *server) {
 
 /* The current star follows the camera: whichever star's territory is under the
  * screen center. In empty space between stars it stays as it was. */
-static void update_current_star(struct tinywl_server *server) {
+void update_current_star(struct tinywl_server *server) {
 	double sx, sy;
 	screen_center(server, &sx, &sy);
 	struct star *s = star_at(server, (sx + server->cam_x) / server->zoom,
@@ -662,8 +383,6 @@ static void update_current_star(struct tinywl_server *server) {
  * windows become unreadable specks. Window sizes are in world units. */
 #define ZOOM_MIN 0.25
 #define ZOOM_MAX 2.0
-#define MIN_WIN_W 200
-#define MIN_WIN_H 120
 
 /* SEIZA zoom. wlroots has no "scale this subtree", so each surface buffer is
  * drawn at a scaled size. wlroots resets that size on every client commit, so
@@ -679,7 +398,6 @@ struct scale_arg {
 	struct wlr_box geo;
 };
 
-static double mono_s(void);
 #define OPEN_SECS 0.3 /* Hyprland's speed 3 (units of 100 ms), as in the user's windowsIn */
 
 #define OPEN_CURVE "expressiveFastSpatial" /* the open animation's curve; emphasizedDecel is the calm one */
@@ -720,7 +438,7 @@ static void scale_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data
 }
 
 /* Put one window where world + camera + zoom say it should be. */
-static void layout_toplevel(struct tinywl_toplevel *tl) {
+void layout_toplevel(struct tinywl_toplevel *tl) {
 	float alpha = open_alpha(tl);
 	tl->faded = 1.0f - alpha;
 	double z = tl->server->zoom, pz = z * (1 - OPEN_POPIN * tl->faded); /* pz: zoom while popping in */
@@ -750,7 +468,7 @@ static void layout_toplevel(struct tinywl_toplevel *tl) {
 	update_border(tl);
 }
 
-static void layout_unmanaged(struct xunmanaged *u) {
+void layout_unmanaged(struct xunmanaged *u) {
 	double z = u->server->zoom;
 	wlr_scene_node_set_position(&u->tree->node, lround((u->ax + u->xs->x) * z), lround((u->ay + u->xs->y) * z));
 	struct scale_arg arg = {z, 0, 1.0f};
@@ -758,7 +476,7 @@ static void layout_unmanaged(struct xunmanaged *u) {
 }
 
 /* Re-place the canvas and every window; call after the camera or zoom changes. */
-static void relayout_all(struct tinywl_server *server) {
+void relayout_all(struct tinywl_server *server) {
 	/* The screen center may stray one screen width/height outside the stars' bounding box. */
 	if (!wl_list_empty(&server->stars)) {
 		double x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18, sx, sy;
@@ -789,11 +507,10 @@ static void relayout_all(struct tinywl_server *server) {
 	publish_state(server);
 }
 
-static void anim_cancel(struct tinywl_server *server);
 
 /* Multiply the zoom by `factor`, keeping the world point under the cursor
  * fixed on screen (so it zooms toward the pointer, like a map). */
-static void zoom_at(struct tinywl_server *server, double factor) {
+void zoom_at(struct tinywl_server *server, double factor) {
 	if (server->overview) {
 		return; /* the overview has its own fixed fit; leave it with Super+O */
 	}
@@ -810,20 +527,20 @@ static void zoom_at(struct tinywl_server *server, double factor) {
  * ease over the motion file's pan_secs, moving the world point at the screen centre in
  * a straight line and the zoom in log space, so zooming looks even. */
 
-static double mono_s(void) {
+double mono_s(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-static void anim_cancel(struct tinywl_server *server) {
+void anim_cancel(struct tinywl_server *server) {
 	server->anim.on = false;
 }
 
 /* One step of the glide, to the camera the clock says it should have now. It runs
  * from output_frame, so every frame shown has exactly one step in it: a separate
  * timer drifts against the screen's refresh and makes the glide stutter. */
-static void anim_step(struct tinywl_server *server) {
+void anim_step(struct tinywl_server *server) {
 	if (!server->anim.on) {
 		return;
 	}
@@ -843,7 +560,7 @@ static void anim_step(struct tinywl_server *server) {
 	}
 }
 
-static void frames_all(struct tinywl_server *server) {
+void frames_all(struct tinywl_server *server) {
 	struct tinywl_output *o;
 	wl_list_for_each(o, &server->outputs, link) {
 		wlr_output_schedule_frame(o->wlr_output);
@@ -851,7 +568,7 @@ static void frames_all(struct tinywl_server *server) {
 }
 
 /* One step of every window that is still fading in; true while any is. */
-static bool open_step(struct tinywl_server *server) {
+bool open_step(struct tinywl_server *server) {
 	bool any = false;
 	struct tinywl_toplevel *tl;
 	wl_list_for_each(tl, &server->toplevels, link) {
@@ -894,7 +611,7 @@ static void grab_buffer(struct wlr_scene_buffer *sb, int sx, int sy, void *data)
 }
 
 /* Called as a window unmaps, while its scene still shows the last frame. */
-static void ghost_start(struct tinywl_toplevel *tl) {
+void ghost_start(struct tinywl_toplevel *tl) {
 	struct wlr_surface *surface = tl_surface(tl);
 	if (!surface || !surface->mapped || tl->server->motion.reduce || tl->server->overview) {
 		return;
@@ -927,7 +644,7 @@ static void ghost_free(struct ghost *g) {
 }
 
 /* One step of every closing ghost; true while any is left. */
-static bool ghost_step(struct tinywl_server *server) {
+bool ghost_step(struct tinywl_server *server) {
 	bool any = false;
 	struct ghost *g, *tmp;
 	wl_list_for_each_safe(g, tmp, &server->ghosts, link) {
@@ -973,7 +690,7 @@ static void set_overview(struct tinywl_server *server, bool on) {
 }
 
 /* Glide into a star at 1:1 zoom and make it the star new windows land in. */
-static void fly_to_star(struct tinywl_server *server, struct star *s) {
+void fly_to_star(struct tinywl_server *server, struct star *s) {
 	double sx, sy;
 	screen_center(server, &sx, &sy);
 	server->current_star = s;
@@ -988,7 +705,7 @@ static void fly_to_star(struct tinywl_server *server, struct star *s) {
  * ignores ZOOM_MIN on purpose: fitting the whole constellation needs more.
  * shortcut: fit uses star centers + territory, so it is wrong if the output
  * is a different aspect ratio than 16:9, fine for the spike. */
-static void enter_overview(struct tinywl_server *server) {
+void enter_overview(struct tinywl_server *server) {
 	double minx = 1e18, miny = 1e18, maxx = -1e18, maxy = -1e18;
 	struct star *s;
 	wl_list_for_each(s, &server->stars, link) {
@@ -1011,7 +728,7 @@ static void enter_overview(struct tinywl_server *server) {
 }
 
 /* The star whose dot is under a screen point, if any. */
-static struct star *star_dot_at(struct tinywl_server *server, double x, double y) {
+struct star *star_dot_at(struct tinywl_server *server, double x, double y) {
 	struct star *s, *best = NULL;
 	double best_d = STAR_HIT;
 	wl_list_for_each(s, &server->stars, link) {
@@ -1025,7 +742,7 @@ static struct star *star_dot_at(struct tinywl_server *server, double x, double y
 }
 
 /* Overview pointer handling: highlight the star under the cursor. */
-static void overview_pointer(struct tinywl_server *server) {
+void overview_pointer(struct tinywl_server *server) {
 	struct star *s = star_dot_at(server, server->cursor->x, server->cursor->y);
 	if (s != server->hover_star) {
 		server->hover_star = s;
@@ -1033,12 +750,12 @@ static void overview_pointer(struct tinywl_server *server) {
 	}
 }
 
-static bool main_mod_held(struct tinywl_server *server) {
+bool main_mod_held(struct tinywl_server *server) {
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
 	return kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO);
 }
 
-static void focus_toplevel(struct tinywl_toplevel *toplevel) {
+void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL || toplevel->server->locked) {
 		return;
@@ -1086,7 +803,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	}
 }
 
-static void keyboard_handle_modifiers(
+void keyboard_handle_modifiers(
 		struct wl_listener *listener, void *data) {
 	/* This event is raised when a modifier key, such as shift or alt, is
 	 * pressed. We simply communicate this to the client. */
@@ -1113,717 +830,7 @@ static void pan_camera(struct tinywl_server *server, double dx, double dy) {
 	update_current_star(server);
 }
 
-/* SEIZA: the operations behind every command (keys, socket, CLI). cmd.c does
- * the parsing; these do the work. `ud` is always the server. */
-static void op_overview(void *ud) {
-	struct tinywl_server *server = ud;
-	if (server->overview) {
-		fly_to_star(server, server->current_star);
-	} else {
-		enter_overview(server);
-	}
-}
-
-static int op_new_star(void *ud) {
-	struct tinywl_server *server = ud;
-	fly_to_star(server, star_create(server));
-	persist_save(server);
-	return 0;
-}
-
-static void star_move(struct tinywl_server *server, struct star *s, double dx, double dy);
-
-/* Lay the constellation's stars out on a figure, in order, making stars for the points that
- * have none, and join them with the figure's threads; "none" cuts every thread. The figure is
- * only a template: afterwards the stars are free to move and the threads are the constellation's own. */
-static int op_set_figure(void *ud, const char *name) {
-	struct tinywl_server *server = ud;
-	struct star *s;
-	if (strcmp(name, "none") == 0) {
-		server->nlinks = 0;
-	} else {
-		struct figure f;
-		if (figure_find(server->cfg_dir, name, &f) != 0) {
-			return -1;
-		}
-		double scale = figure_scale(&f, STAR_DX, STAR_DY), x, y;
-		int have = wl_list_length(&server->stars);
-		if (f.n > CONST_STARS_MAX) {
-			return -1;
-		}
-		for (int i = have; i < f.n; i++) { /* a star for every point that has none */
-			char nm[32];
-			star_new_name(server, nm);
-			figure_point(&f, i, scale, STAR_W / 2.0, STAR_H / 2.0, &x, &y);
-			star_create_at(server, nm, x, y);
-		}
-		int i = 0;
-		wl_list_for_each(s, &server->stars, link) {
-			if (i < f.n) {
-				figure_point(&f, i, scale, STAR_W / 2.0, STAR_H / 2.0, &x, &y);
-				star_move(server, s, x - s->cx, y - s->cy);
-			}
-			i++;
-		}
-		i = 0;
-		wl_list_for_each(s, &server->stars, link) { /* stars past the last point go to free grid slots */
-			if (i++ >= f.n) {
-				int slot = grid_slot(server, &x, &y);
-				(void)slot;
-				star_move(server, s, x - s->cx, y - s->cy);
-			}
-		}
-		server->nlinks = 0;
-		for (int l = 0; l < f.nlinks && server->nlinks < CONST_LINKS_MAX; l++) {
-			server->links[server->nlinks][0] = f.links[l][0];
-			server->links[server->nlinks++][1] = f.links[l][1];
-		}
-	}
-	persist_save(server);
-	relayout_all(server);
-	return 0;
-}
-
-/* Drop every star marker (the windows are not touched; the caller reassigns them). */
-static void stars_clear(struct tinywl_server *server) {
-	struct star *s, *tmp;
-	wl_list_for_each_safe(s, tmp, &server->stars, link) {
-		wl_list_remove(&s->link);
-		wlr_scene_node_destroy(&s->marker->node);
-		free(s);
-	}
-	server->current_star = NULL;
-	server->hover_star = NULL;
-	server->nlinks = 0;
-}
-
-/* Star n of the constellation, counting from 1 in creation order; 0 is the current one. */
-static struct star *star_nth(struct tinywl_server *server, int n) {
-	if (n == 0) {
-		return server->current_star;
-	}
-	struct star *s;
-	wl_list_for_each(s, &server->stars, link) {
-		if (--n == 0) {
-			return s;
-		}
-	}
-	return NULL;
-}
-
-/* Only an empty star can go, and there is always at least one. */
-static int op_delete_star(void *ud, int n) {
-	struct tinywl_server *server = ud;
-	struct star *s = star_nth(server, n);
-	struct tinywl_toplevel *tl;
-	if (!s || wl_list_length(&server->stars) <= 1) {
-		return -1;
-	}
-	wl_list_for_each(tl, &server->all_toplevels, all_link) { /* unmapped windows count too */
-		if (tl->star == s) {
-			return -1;
-		}
-	}
-	struct star *next = wl_container_of(s->link.next == &server->stars ?
-		server->stars.next : s->link.next, next, link);
-	bool was_current = s == server->current_star;
-	int gone = 0; /* its place in the list: the threads to it go, and later stars move up one */
-	for (struct star *t = s; t->link.prev != &server->stars; ) {
-		t = wl_container_of(t->link.prev, t, link);
-		gone++;
-	}
-	int kept = 0;
-	for (int l = 0; l < server->nlinks; l++) {
-		int a = server->links[l][0], b = server->links[l][1];
-		if (a != gone && b != gone) {
-			server->links[kept][0] = a > gone ? a - 1 : a;
-			server->links[kept++][1] = b > gone ? b - 1 : b;
-		}
-	}
-	server->nlinks = kept;
-	wl_list_remove(&s->link);
-	wlr_scene_node_destroy(&s->marker->node);
-	free(s);
-	server->hover_star = NULL;
-	if (was_current) {
-		fly_to_star(server, next);
-	} else {
-		relayout_all(server); /* the camera stays where it is */
-	}
-	persist_save(server);
-	return 0;
-}
-
-/* A star's name is a line in the constellation file: printable, one line, and short. */
-static int op_rename_star(void *ud, int n, const char *name) {
-	struct tinywl_server *server = ud;
-	struct star *s = star_nth(server, n);
-	size_t len = strlen(name);
-	if (!s || len == 0 || len >= sizeof(s->name)) {
-		return -1;
-	}
-	for (size_t i = 0; i < len; i++) {
-		if ((unsigned char)name[i] < 0x20 || name[i] == 0x7f) {
-			return -1;
-		}
-	}
-	snprintf(s->name, sizeof(s->name), "%s", name);
-	persist_save(server);
-	relayout_all(server);
-	return 0;
-}
-
-/* True if a star other than `except` sits so near (x, y) that their territories would overlap. */
-static bool star_too_near(struct tinywl_server *server, const struct star *except, double x, double y) {
-	struct star *o;
-	wl_list_for_each(o, &server->stars, link) {
-		if (o != except && fabs(o->cx - x) < STAR_W && fabs(o->cy - y) < STAR_H) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/* A star at a place of your choosing (the center of its territory), if there is room. */
-static int op_add_star_at(void *ud, double x, double y) {
-	struct tinywl_server *server = ud;
-	if (wl_list_length(&server->stars) >= CONST_STARS_MAX || star_too_near(server, NULL, x, y)) {
-		return -1;
-	}
-	char name[32];
-	star_new_name(server, name);
-	star_create_at(server, name, x, y);
-	persist_save(server);
-	relayout_all(server);
-	return 0;
-}
-
-static int op_move_star(void *ud, int n, double x, double y) {
-	struct tinywl_server *server = ud;
-	struct star *s = star_nth(server, n);
-	if (!s || star_too_near(server, s, x, y)) {
-		return -1;
-	}
-	star_move(server, s, x - s->cx, y - s->cy);
-	persist_save(server);
-	return 0;
-}
-
-/* Say, in the log, what Seiza thinks every window is: for working out why a program misbehaves. */
-static void op_debug_windows(void *ud) {
-	struct tinywl_server *server = ud;
-	struct tinywl_toplevel *tl;
-	int i = 0;
-	wlr_log(WLR_INFO, "seiza windows: zoom %.2f, camera (%.0f,%.0f), pointer focus %p, keyboard focus %p",
-		server->zoom, server->cam_x, server->cam_y, (void *)server->seat->pointer_state.focused_surface, (void *)server->seat->keyboard_state.focused_surface);
-	wl_list_for_each(tl, &server->all_toplevels, all_link) { /* mapped ones, and ones that exist but are not shown */
-		struct wlr_box g = tl_geometry(tl);
-		int star = 0;
-		struct star *s;
-		wl_list_for_each(s, &server->stars, link) {
-			if (s == tl->star) {
-				break;
-			}
-			star++;
-		}
-		wlr_log(WLR_INFO, "seiza windows: #%d %s %s star %d at (%.0f,%.0f) %dx%d (drawn %dx%d) mode %d surface %p class '%s' title '%s'", i++,
-			tl->xsurface ? "x11" : "wayland", tl->scene_tree->node.enabled ? "shown" : "NOT SHOWN", star, tl->wx, tl->wy, g.width, g.height,
-			tl->x_scene ? tl->x_scene->buffer->dst_width : -1, tl->x_scene ? tl->x_scene->buffer->dst_height : -1, tl->mode, (void *)tl_surface(tl),
-			tl->xsurface && tl->xsurface->class ? tl->xsurface->class : (tl->xdg_toplevel && tl->xdg_toplevel->app_id ? tl->xdg_toplevel->app_id : ""),
-			tl->xsurface && tl->xsurface->title ? tl->xsurface->title : (tl->xdg_toplevel && tl->xdg_toplevel->title ? tl->xdg_toplevel->title : ""));
-	}
-	struct xunmanaged *um;
-	wl_list_for_each(um, &server->unmanaged, link) {
-		wlr_log(WLR_INFO, "seiza windows: x11 menu/tooltip at (%d,%d) in window at (%.0f,%.0f) %dx%d %s class '%s'", um->xs->x, um->xs->y, um->ax, um->ay, um->xs->width, um->xs->height,
-			um->surf ? "shown" : "hidden", um->xs->class ? um->xs->class : "");
-	}
-}
-
-/* For tests on a machine with no mouse: put the pointer there and click, through the same code a
- * real pointer goes through. Off unless SEIZA_DEBUG_INPUT is set. */
-static void server_cursor_button(struct wl_listener *listener, void *data);
-static void process_cursor_motion(struct tinywl_server *server, uint32_t time);
-static struct tinywl_toplevel *desktop_toplevel_at(struct tinywl_server *server, double lx, double ly, struct wlr_surface **surface, double *sx, double *sy);
-static int op_debug_pointer(void *ud, double x, double y, int act) {
-	struct tinywl_server *server = ud;
-	if (!getenv("SEIZA_DEBUG_INPUT")) {
-		return -1;
-	}
-	wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
-	static uint32_t now_ms = 1000; /* real events carry rising times, and X programs drop ones that do not */
-	now_ms += 50;
-	wlr_cursor_warp(server->cursor, NULL, x, y);
-	process_cursor_motion(server, now_ms);
-	wlr_seat_pointer_notify_frame(server->seat); /* a real device ends each event with a frame */
-	{
-		double sx = 0, sy = 0;
-		struct wlr_surface *surf = NULL;
-		struct tinywl_toplevel *t = desktop_toplevel_at(server, server->cursor->x, server->cursor->y, &surf, &sx, &sy);
-		wlr_log(WLR_INFO, "seiza debug: asked (%.0f,%.0f) cursor (%.1f,%.1f) cam (%.0f,%.0f) zoom %.2f -> window %p surface %p local (%.1f,%.1f)",
-			x, y, server->cursor->x, server->cursor->y, server->cam_x, server->cam_y, server->zoom, (void *)t, (void *)surf, sx, sy);
-	}
-	if (act == 2) {
-		zoom_at(server, 1 / 1.1); /* one wheel notch out, like Super+scroll */
-		process_cursor_motion(server, now_ms += 50);
-		wlr_seat_pointer_notify_frame(server->seat);
-	}
-	if (act == 1 || act == 3) { /* click, or just the press */
-		struct wlr_pointer_button_event ev = {.time_msec = now_ms, .button = BTN_LEFT, .state = WL_POINTER_BUTTON_STATE_PRESSED};
-		server_cursor_button(&server->cursor_button, &ev);
-		wlr_seat_pointer_notify_frame(server->seat);
-	}
-	if (act == 1 || act == 4) { /* click, or just the release */
-		struct wlr_pointer_button_event ev = {.time_msec = now_ms += 50, .button = BTN_LEFT, .state = WL_POINTER_BUTTON_STATE_RELEASED};
-		server_cursor_button(&server->cursor_button, &ev);
-		wlr_seat_pointer_notify_frame(server->seat);
-	}
-	return 0;
-}
-
-/* A thread between stars a and b (1-based): there is one afterwards if there was none, and not if there was. */
-static int op_toggle_link(void *ud, int a, int b) {
-	struct tinywl_server *server = ud;
-	int count = wl_list_length(&server->stars);
-	if (a < 1 || b < 1 || a > count || b > count || a == b) {
-		return -1;
-	}
-	a--;
-	b--;
-	for (int l = 0; l < server->nlinks; l++) {
-		if ((server->links[l][0] == a && server->links[l][1] == b) || (server->links[l][0] == b && server->links[l][1] == a)) {
-			server->links[l][0] = server->links[server->nlinks - 1][0];
-			server->links[l][1] = server->links[--server->nlinks][1];
-			goto done;
-		}
-	}
-	if (server->nlinks >= CONST_LINKS_MAX) {
-		return -1;
-	}
-	server->links[server->nlinks][0] = a;
-	server->links[server->nlinks++][1] = b;
-done:
-	persist_save(server);
-	relayout_all(server);
-	return 0;
-}
-
-/* A preset is a copy of the active constellation under another name. */
-static int op_save(void *ud, const char *name) {
-	return persist_write(ud, name, false);
-}
-
-/* Replace the active constellation with `name`. Windows move to its first star. */
-static int op_load(void *ud, const char *name) {
-	struct tinywl_server *server = ud;
-	struct constellation c;
-	if (constellation_load(server->cfg_dir, name, &c) != 0) {
-		return -1;
-	}
-	stars_clear(server);
-	persist_apply(server, &c);
-	int n = 0;
-	struct tinywl_toplevel *tl;
-	wl_list_for_each(tl, &server->all_toplevels, all_link) {
-		tl->star = server->current_star;
-		tl->wx = tl->star->cx - STAR_W / 2.0 + 60 + 40 * (n % 8);
-		tl->wy = tl->star->cy - STAR_H / 2.0 + 60 + 40 * (n % 8);
-		n++;
-	}
-	constellation_set_last(server->cfg_dir, name);
-	fly_to_star(server, server->current_star);
-	return 0;
-}
-
-/* A new constellation, empty but for one star, and open it. The one you were in is kept as it was. */
-static int op_new_constellation(void *ud, const char *name) {
-	struct tinywl_server *server = ud;
-	struct constellation c;
-	if (constellation_load(server->cfg_dir, name, &c) == 0) {
-		return -1; /* never overwrite one that is there */
-	}
-	constellation_default(&c);
-	snprintf(c.name, sizeof(c.name), "%s", name);
-	if (constellation_save(&c, server->cfg_dir) != 0) {
-		return -1;
-	}
-	return op_load(server, name);
-}
-
-/* One part of ~/.config/seiza/seiza.kdl ("motion", "frame", "keys", "autostart") in the old flat
- * file format, from `seiza-conf export`, which also logs mistakes in the file to stderr. NULL when
- * there is no seiza.kdl or it says nothing about that part. Parsed after the old file, so it wins. */
-static char *cfg_kdl(const struct tinywl_server *server, const char *part) {
-	static char text[65536];
-	char path[512], cmd[64];
-	snprintf(path, sizeof(path), "%s/seiza.kdl", server->cfg_dir);
-	snprintf(cmd, sizeof(cmd), "seiza-conf export %s", part);
-	FILE *p = access(path, R_OK) == 0 ? popen(cmd, "r") : NULL;
-	if (!p) {
-		return NULL;
-	}
-	size_t n = fread(text, 1, sizeof(text) - 1, p);
-	pclose(p);
-	text[n] = '\0';
-	return n ? text : NULL;
-}
-
-static void op_spawn(void *ud, const char *cmdline);
-static struct wl_event_source *g_idle_timer;
-static int64_t g_last_input_ms;
-static bool g_dimmed, g_locked_by_idle, g_off; /* what the idle clock has done since the last input */
-
-static int64_t now_ms(void) {
-	struct timespec t;
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
-
-static void outputs_power(struct tinywl_server *server, bool on) {
-	struct tinywl_output *o;
-	wl_list_for_each(o, &server->outputs, link) {
-		struct wlr_output_state st;
-		wlr_output_state_init(&st);
-		wlr_output_state_set_enabled(&st, on);
-		wlr_output_commit_state(o->wlr_output, &st);
-		wlr_output_state_finish(&st);
-		if (on) {
-			wlr_output_schedule_frame(o->wlr_output);
-		}
-	}
-}
-
-/* Night light: the screens' colour follows the schedule in seiza.kdl (night { temp; from; to }), or `seiza night on|off|auto`.
- * The scene hands this colour table (g_night_tr) to the output: a real display applies it in hardware; whether a nested or headless one does is up to its backend. */
-static double g_night_temp;                   /* kelvin at full warmth; 0 = no schedule */
-static int g_night_from = 20 * 60, g_night_to = 7 * 60; /* minutes of the day */
-static int g_night_force = -1;                /* -1 follow the schedule, 0 off, 1 on */
-static double g_night_last = 6500;            /* the temperature the screens were last set to */
-static struct wlr_color_transform *g_night_tr; /* NULL = colours untouched */
-static struct wl_event_source *g_night_timer;
-
-static void night_apply(struct tinywl_server *server) {
-	double f = g_night_force >= 0 ? g_night_force : 0;
-	if (g_night_force < 0 && g_night_temp > 0) {
-		time_t now = time(NULL);
-		struct tm tm;
-		localtime_r(&now, &tm);
-		f = night_factor(tm.tm_hour * 60 + tm.tm_min, g_night_from, g_night_to);
-	}
-	double warm = g_night_temp > 0 ? g_night_temp : 3500; /* `seiza night on` without a schedule */
-	double k = 6500 + (warm - 6500) * f, m[3];
-	if (k == g_night_last) {
-		return; /* nothing changed (this also covers daylight with nothing to undo) */
-	}
-	g_night_last = k;
-	night_rgb(k, m);
-	if (g_night_tr) {
-		wlr_color_transform_unref(g_night_tr);
-		g_night_tr = NULL;
-	}
-	if (k < 6500) {
-		/* Three 1D tables, like wlsunset's: a real display can take these straight into the hardware. */
-		uint16_t lut[3][256];
-		for (int c = 0; c < 3; c++) {
-			for (int i = 0; i < 256; i++) {
-				lut[c][i] = (uint16_t)lround(65535.0 * i / 255 * m[c]);
-			}
-		}
-		g_night_tr = wlr_color_transform_init_lut_3x1d(256, lut[0], lut[1], lut[2]);
-	}
-	frames_all(server);
-}
-
-static int night_tick(void *data) {
-	night_apply(data);
-	wl_event_source_timer_update(g_night_timer, 30000); /* the ramp is 30 minutes long: twice a minute is plenty */
-	return 0;
-}
-
-/* Any key, pointer move, button or scroll: the idle clock starts over, the dim lifts and sleeping screens wake. */
-static void idle_activity(struct tinywl_server *server) {
-	g_last_input_ms = now_ms();
-	if (g_off) {
-		outputs_power(server, true);
-	}
-	if (g_dimmed) {
-		wlr_scene_node_set_enabled(&server->dim_rect->node, false);
-	}
-	g_dimmed = g_locked_by_idle = g_off = false;
-}
-
-static int idle_tick(void *data) {
-	struct tinywl_server *server = data;
-	if (!wl_list_empty(&server->idle_inhibit->inhibitors)) {
-		g_last_input_ms = now_ms(); /* shortcut: any inhibitor counts, even from a hidden window; upgrade if that bites */
-	}
-	int64_t idle = (now_ms() - g_last_input_ms) / 1000;
-	if (server->idle_dim > 0 && idle >= server->idle_dim && !g_dimmed) {
-		g_dimmed = true;
-		wlr_scene_rect_set_size(server->dim_rect, server->full.width, server->full.height);
-		wlr_scene_node_set_position(&server->dim_rect->node, server->full.x, server->full.y);
-		wlr_scene_node_set_enabled(&server->dim_rect->node, true);
-	}
-	if (server->idle_lock > 0 && idle >= server->idle_lock && !g_locked_by_idle) {
-		g_locked_by_idle = true;
-		if (!server->locked) {
-			op_spawn(server, "seiza-lock");
-		}
-	}
-	if (server->idle_off > 0 && idle >= server->idle_off && !g_off) {
-		g_off = true;
-		outputs_power(server, false);
-	}
-	wl_event_source_timer_update(g_idle_timer, 1000);
-	return 0;
-}
-
-/* Frame colors from the palette file (the star color, a dim mix of it with the
- * sky for unfocused windows, and the star color as a soft premultiplied bloom),
- * and how the camera moves, from the motion file. */
-static void frame_colors_load(struct tinywl_server *server) {
-	struct palette p;
-	palette_defaults(&p);
-	char path[512];
-	snprintf(path, sizeof(path), "%s/palette", server->cfg_dir);
-	FILE *f = fopen(path, "r");
-	if (f) {
-		static char text[65536];
-		size_t n = fread(text, 1, sizeof(text) - 1, f);
-		fclose(f);
-		text[n] = '\0';
-		palette_parse(text, &p);
-	}
-	for (int i = 0; i < 3; i++) {
-		BORDER_FOCUSED[i] = p.star[i];
-		BORDER_IDLE[i] = p.sky[i] + (p.star[i] - p.sky[i]) * 0.3f;
-		GLOW_FOCUSED[i] = p.star[i] * 0.30f;
-	}
-	BORDER_FOCUSED[3] = BORDER_IDLE[3] = 1.0f;
-	GLOW_FOCUSED[3] = 0.30f;
-
-	frame_defaults(&FRAME);
-	snprintf(path, sizeof(path), "%s/frame", server->cfg_dir);
-	if ((f = fopen(path, "r"))) {
-		static char frame_text[65536];
-		size_t n = fread(frame_text, 1, sizeof(frame_text) - 1, f);
-		fclose(f);
-		frame_text[n] = '\0';
-		frame_parse(frame_text, &FRAME);
-	}
-	char *kdl = cfg_kdl(server, "frame");
-	if (kdl) {
-		frame_parse(kdl, &FRAME);
-	}
-	/* the bloom: off, or the star color at 0.3 (soft) or about twice that (bright), premultiplied */
-	float strength = FRAME.glow == GLOW_OFF ? 0.0f : FRAME.glow == GLOW_BRIGHT ? 0.55f : 0.30f;
-	for (int i = 0; i < 3; i++) {
-		GLOW_FOCUSED[i] = p.star[i] * strength;
-	}
-	GLOW_FOCUSED[3] = strength;
-
-	motion_defaults(&server->motion);
-	snprintf(path, sizeof(path), "%s/motion", server->cfg_dir);
-	if ((f = fopen(path, "r"))) {
-		static char text[65536];
-		size_t n = fread(text, 1, sizeof(text) - 1, f);
-		fclose(f);
-		text[n] = '\0';
-		motion_parse(text, &server->motion);
-	}
-	if ((kdl = cfg_kdl(server, "motion"))) {
-		motion_parse(kdl, &server->motion);
-	}
-	server->idle_dim = server->idle_lock = server->idle_off = 0;
-	if ((kdl = cfg_kdl(server, "idle"))) {
-		const char *dim = strstr(kdl, "dim="), *lock = strstr(kdl, "lock="), *off = strstr(kdl, "off=");
-		if (dim) {
-			sscanf(dim, "dim=%d", &server->idle_dim);
-		}
-		if (lock) {
-			sscanf(lock, "lock=%d", &server->idle_lock);
-		}
-		if (off) {
-			sscanf(off, "off=%d", &server->idle_off);
-		}
-	}
-	g_night_temp = 0;
-	g_night_from = 20 * 60;
-	g_night_to = 7 * 60;
-	if ((kdl = cfg_kdl(server, "night"))) {
-		const char *t = strstr(kdl, "temp="), *f = strstr(kdl, "from="), *e = strstr(kdl, "to=");
-		int h, m;
-		if (t) {
-			sscanf(t, "temp=%lf", &g_night_temp);
-		}
-		if (f && sscanf(f, "from=%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
-			g_night_from = h * 60 + m;
-		}
-		if (e && sscanf(e, "to=%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) {
-			g_night_to = h * 60 + m;
-		}
-	}
-	night_apply(server);
-	server->panel_corner = 1;
-	server->panel_dwell = 150;
-	if ((kdl = cfg_kdl(server, "panel"))) {
-		const char *c = strstr(kdl, "corner="), *d = strstr(kdl, "dwell=");
-		if (c) {
-			server->panel_corner = !strncmp(c + 7, "off", 3) ? 0 : !strncmp(c + 7, "top-left", 8) ? 2 : !strncmp(c + 7, "bottom-right", 12) ? 3 : !strncmp(c + 7, "bottom-left", 11) ? 4 : 1;
-		}
-		if (d) {
-			sscanf(d, "dwell=%d", &server->panel_dwell);
-		}
-	}
-	if (g_idle_timer) {
-		wl_event_source_timer_update(g_idle_timer, server->idle_dim > 0 || server->idle_lock > 0 || server->idle_off > 0 ? 1000 : 0);
-	}
-}
-
-/* The live bindings, in the keys file's own syntax, for seiza-help to show: rewritten on every
- * (re)load, so the help never goes stale. */
-static void keys_dump(const struct keymap_cfg *k) {
-	const char *dir = getenv("XDG_RUNTIME_DIR");
-	char path[300];
-	snprintf(path, sizeof(path), "%s/seiza-keys", dir ? dir : "/tmp");
-	FILE *f = fopen(path, "w");
-	if (!f) {
-		return;
-	}
-	for (int i = 0; i < k->n; i++) {
-		char name[64] = "?";
-		xkb_keysym_get_name(k->b[i].sym, name, sizeof(name));
-		fprintf(f, "%s%s%s%s%s = %s\n", k->b[i].mods & KMOD_SUPER ? "Super+" : "", k->b[i].mods & KMOD_CTRL ? "Ctrl+" : "",
-			k->b[i].mods & KMOD_ALT ? "Alt+" : "", k->b[i].mods & KMOD_SHIFT ? "Shift+" : "", name, k->b[i].cmd);
-	}
-	fclose(f);
-}
-
-static void op_spawn(void *ud, const char *cmdline);
-
-/* Defaults first, then the user's file on top. A missing file is fine. */
-static void keys_load(struct tinywl_server *server) {
-	static struct keymap_cfg fresh;
-	memset(&fresh, 0, sizeof(fresh));
-	keys_parse(KEYS_DEFAULT, &fresh);
-	char path[512];
-	snprintf(path, sizeof(path), "%s/keys", server->cfg_dir);
-	FILE *f = fopen(path, "r");
-	if (f) {
-		static char text[65536];
-		size_t n = fread(text, 1, sizeof(text) - 1, f);
-		fclose(f);
-		text[n] = '\0';
-		int bad = keys_parse(text, &fresh);
-		if (bad > 0) {
-			wlr_log(WLR_ERROR, "seiza: %d bad line(s) skipped in %s", bad, path);
-		}
-	}
-	char kdl_path[512];
-	snprintf(kdl_path, sizeof(kdl_path), "%s/seiza.kdl", server->cfg_dir);
-	bool kdl_exists = access(kdl_path, R_OK) == 0;
-	char *kdl = cfg_kdl(server, "keys");
-	if (kdl) {
-		keys_parse(kdl, &fresh);
-	}
-	server->keys = fresh;
-	keys_dump(&fresh);
-	if (kdl_exists) {
-		op_spawn(server, "seiza-conf notify"); /* a desktop notification if seiza.kdl has mistakes */
-	}
-}
-
-static void op_spawn(void *ud, const char *cmdline);
-
-/* Programs to start with the session, one command per line in ~/.config/seiza/autostart
- * ('#' comments). With no such file the satellites that ship with Seiza start;
- * an empty file starts nothing. Only run at startup, never on reload-config. */
-static void autostart(struct tinywl_server *server) {
-	static char text[8192] = "seiza-starfield\nseiza-bar\nseiza-widgets\nseiza-osd\nseiza-notify\nseiza-sleep\nwl-paste --type text --watch seiza-clip-store\nseiza-conf slideshow\n";
-	char path[512];
-	snprintf(path, sizeof(path), "%s/autostart", server->cfg_dir);
-	FILE *f = fopen(path, "r");
-	if (f) {
-		size_t n = fread(text, 1, sizeof(text) - 1, f);
-		text[n] = '\0';
-		fclose(f);
-	}
-	char *kdl = cfg_kdl(server, "autostart"); /* an autostart block replaces the list */
-	for (char *line = strtok(kdl ? kdl : text, "\n"); line; line = strtok(NULL, "\n")) {
-		while (isspace((unsigned char)*line)) {
-			line++;
-		}
-		if (*line && *line != '#') {
-			op_spawn(server, line);
-		}
-	}
-}
-
-static void rules_load(struct tinywl_server *server);
-static void tile_load(struct tinywl_server *server);
-static void place_corners(struct tinywl_output *output);
-static void tile_star(struct tinywl_server *server, struct star *s);
-static int op_reload_config(void *ud) {
-	struct tinywl_server *server = ud;
-	keys_load(server);
-	rules_load(server);
-	tile_load(server);
-	frame_colors_load(server);
-	relayout_all(server); /* a new radius or border changes every window */
-	struct tinywl_output *out;
-	wl_list_for_each(out, &server->outputs, link) {
-		place_corners(out);
-	}
-	struct star *st;
-	wl_list_for_each(st, &server->stars, link) {
-		tile_star(server, st);
-	}
-	struct tinywl_toplevel *tl;
-	wl_list_for_each(tl, &server->all_toplevels, all_link) {
-		update_border(tl);
-	}
-	return 0;
-}
-
-/* Hot-reload: watch the config dir and run reload-config ~200 ms after the last write to a file
- * it reads. The dir is watched, not the files, because editors save by rename. */
-static struct wl_event_source *g_reload_timer;
-
-static int reload_timer_fired(void *ud) {
-	wlr_log(WLR_INFO, "seiza: config changed, reloading");
-	op_reload_config(ud);
-	return 0;
-}
-
-static int config_changed(int fd, uint32_t mask, void *ud) {
-	static const char *const watched[] = {"seiza.kdl", "keys", "palette", "frame", "motion"};
-	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
-	ssize_t n = read(fd, buf, sizeof(buf));
-	for (char *p = buf; n > 0 && p < buf + n; p += sizeof(struct inotify_event) + ((struct inotify_event *)p)->len) {
-		struct inotify_event *ev = (struct inotify_event *)p;
-		for (size_t i = 0; ev->len && i < sizeof(watched) / sizeof(*watched); i++) {
-			if (strcmp(ev->name, watched[i]) == 0) {
-				wl_event_source_timer_update(g_reload_timer, 200);
-			}
-		}
-	}
-	return 0;
-}
-
-static void watch_config(struct tinywl_server *server) {
-	struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
-	int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-	if (fd < 0 || inotify_add_watch(fd, server->cfg_dir, IN_CLOSE_WRITE | IN_MOVED_TO) < 0) {
-		wlr_log(WLR_ERROR, "seiza: no config hot-reload (inotify failed)");
-		if (fd >= 0) {
-			close(fd);
-		}
-		return;
-	}
-	g_reload_timer = wl_event_loop_add_timer(loop, reload_timer_fired, server);
-	wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE, config_changed, server);
-}
-
-static void op_quit(void *ud) {
+void op_quit(void *ud) {
 	struct tinywl_server *server = ud;
 	wl_display_terminate(server->wl_display);
 }
@@ -1864,7 +871,7 @@ static int reap_children(int signo, void *data) {
 }
 
 /* Run through the configured shell, else ysh if installed, else /bin/sh. */
-static void op_spawn(void *ud, const char *cmdline) {
+void op_spawn(void *ud, const char *cmdline) {
 	struct tinywl_server *server = ud;
 	if (fork() == 0) {
 		const char *shell = server->keys.shell[0] ? server->keys.shell : "ysh";
@@ -1895,7 +902,7 @@ static struct tinywl_toplevel *focused_toplevel(struct tinywl_server *server) {
 /* Mode 1 (maximized) fills what the bar leaves over, inside the window's star; mode 2 (fullscreen, asked for by the program)
  * fills the whole output and hides the bar while that star is in view (output_frame). The window's old place is remembered
  * and comes back on mode 0. Dragging or resizing a maximized or fullscreen window un-maximizes it (begin_interactive). */
-static void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
+void toplevel_set_mode(struct tinywl_toplevel *tl, int mode) {
 	struct tinywl_server *server = tl->server;
 	if (mode == tl->mode || !tl->star || !tl_ready(tl)) {
 		return;
@@ -1937,7 +944,7 @@ static struct rule {
 } g_rules[RULES_MAX];
 static int g_nrules;
 
-static void rules_load(struct tinywl_server *server) {
+void rules_load(struct tinywl_server *server) {
 	g_nrules = 0;
 	char *kdl = cfg_kdl(server, "rules");
 	for (char *save, *line = kdl ? strtok_r(kdl, "\n", &save) : NULL; line && g_nrules < RULES_MAX; line = strtok_r(NULL, "\n", &save)) {
@@ -1957,7 +964,7 @@ static void rules_load(struct tinywl_server *server) {
 
 /* A window has just mapped: the first rule that fits sends it to its star, sizes it, maybe maximizes it.
  * A star name nobody has leaves it where it opened. */
-static void rules_apply(struct tinywl_toplevel *tl) {
+void rules_apply(struct tinywl_toplevel *tl) {
 	const char *app = tl->xsurface ? tl->xsurface->class : tl->xdg_toplevel ? tl->xdg_toplevel->app_id : NULL;
 	const char *title = tl->xsurface ? tl->xsurface->title : tl->xdg_toplevel ? tl->xdg_toplevel->title : NULL;
 	for (int i = 0; i < g_nrules; i++) {
@@ -1995,7 +1002,7 @@ static void rules_apply(struct tinywl_toplevel *tl) {
  * shortcut: no scrolling strip for the windows beyond max yet. */
 static struct { bool on; int max, gap; double master; } g_tile = {false, 3, 10, 0.55};
 
-static void tile_load(struct tinywl_server *server) {
+void tile_load(struct tinywl_server *server) {
 	g_tile.on = false;
 	g_tile.max = 3;
 	g_tile.gap = 10;
@@ -2015,7 +1022,7 @@ static bool star_tiled(const struct star *s) {
 	return s->tiled ? s->tiled > 0 : g_tile.on;
 }
 
-static void tile_star(struct tinywl_server *server, struct star *s) {
+void tile_star(struct tinywl_server *server, struct star *s) {
 	if (!s || !star_tiled(s)) {
 		return;
 	}
@@ -2189,7 +1196,7 @@ static int op_focus_window(void *ud, int n) {
 }
 
 /* Give a keyboard the xkb layout `layout` (e.g. "pt", "br", "us"; other rules come from XKB_DEFAULT_*). -1 and no change if xkb does not know it. */
-static int keyboard_set_layout(struct wlr_keyboard *kb, const char *layout) {
+int keyboard_set_layout(struct wlr_keyboard *kb, const char *layout) {
 	struct xkb_rule_names names = {.layout = layout};
 	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
@@ -2225,7 +1232,7 @@ static int op_night(void *ud, const char *mode) {
 	return 0;
 }
 
-static const struct cmd_ops seiza_ops = {
+const struct cmd_ops seiza_ops = {
 	op_overview, op_new_star, op_delete_star, op_save, op_load, op_new_constellation, op_relaunch,
 	op_reload_config, op_quit, op_pan, op_zoom_reset, op_cycle_window, op_spawn,
 	op_move_window, op_resize_window, op_close_window, op_goto_star, op_help, op_focus_dir,
@@ -2233,1697 +1240,6 @@ static const struct cmd_ops seiza_ops = {
 	op_switcher, op_focus_window, op_toggle_tile, op_night, op_keymap,
 };
 
-/* Run the binding for this key combo, if there is one. True if it was one. */
-static bool handle_keybinding(struct tinywl_server *server, uint32_t mods, xkb_keysym_t sym) {
-	/* Super+Escape (and Alt+Escape) always quit, even if the keys file is broken or rebinds them. */
-	if ((mods == KMOD_SUPER || mods == KMOD_ALT) && xkb_keysym_to_lower(sym) == XKB_KEY_Escape) {
-		op_quit(server);
-		return true;
-	}
-	const struct binding *b = keys_find(&server->keys, mods, sym);
-	if (!b || server->locked) { /* a locked session gets no compositor keys, only the lock client */
-		return false;
-	}
-	char reply[128];
-	if (cmd_run(&seiza_ops, server, b->cmd, reply, sizeof(reply)) != 0) {
-		wlr_log(WLR_INFO, "seiza: %s -> %s", b->cmd, reply);
-	}
-	return true;
-}
-
-static void keyboard_handle_key(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a key is pressed or released. */
-	struct tinywl_keyboard *keyboard =
-		wl_container_of(listener, keyboard, key);
-	struct tinywl_server *server = keyboard->server;
-	struct wlr_keyboard_key_event *event = data;
-	idle_activity(server);
-	struct wlr_seat *seat = server->seat;
-
-	/* Translate libinput keycode -> xkbcommon */
-	uint32_t keycode = event->keycode + 8;
-	/* Get a list of keysyms based on the keymap for this keyboard */
-	const xkb_keysym_t *syms;
-	int nsyms = xkb_state_key_get_syms(
-			keyboard->wlr_keyboard->xkb_state, keycode, &syms);
-
-	bool handled = false;
-	uint32_t wm = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	uint32_t modifiers = ((wm & WLR_MODIFIER_SHIFT) ? KMOD_SHIFT : 0) |
-		((wm & WLR_MODIFIER_CTRL) ? KMOD_CTRL : 0) |
-		((wm & WLR_MODIFIER_ALT) ? KMOD_ALT : 0) |
-		((wm & WLR_MODIFIER_LOGO) ? KMOD_SUPER : 0); /* caps/num lock don't count */
-	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* A pressed key is tried as a compositor keybinding first. */
-		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, modifiers, syms[i]) || handled;
-		}
-	}
-
-	if (!handled) {
-		/* Otherwise, we pass it along to the client. */
-		wlr_seat_set_keyboard(seat, keyboard->wlr_keyboard);
-		wlr_seat_keyboard_notify_key(seat, event->time_msec,
-			event->keycode, event->state);
-	}
-}
-
-static void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
-	/* This event is raised by the keyboard base wlr_input_device to signal
-	 * the destruction of the wlr_keyboard. It will no longer receive events
-	 * and should be destroyed.
-	 */
-	struct tinywl_keyboard *keyboard =
-		wl_container_of(listener, keyboard, destroy);
-	wl_list_remove(&keyboard->modifiers.link);
-	wl_list_remove(&keyboard->key.link);
-	wl_list_remove(&keyboard->destroy.link);
-	wl_list_remove(&keyboard->link);
-	free(keyboard);
-}
-
-static void server_new_keyboard(struct tinywl_server *server,
-		struct wlr_input_device *device) {
-	struct wlr_keyboard *wlr_keyboard = wlr_keyboard_from_input_device(device);
-
-	struct tinywl_keyboard *keyboard = calloc(1, sizeof(*keyboard));
-	keyboard->server = server;
-	keyboard->wlr_keyboard = wlr_keyboard;
-
-	const char *layout = getenv("XKB_DEFAULT_LAYOUT");
-	keyboard_set_layout(wlr_keyboard, layout ? layout : "pt");
-	wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
-
-	/* Here we set up listeners for keyboard events. */
-	keyboard->modifiers.notify = keyboard_handle_modifiers;
-	wl_signal_add(&wlr_keyboard->events.modifiers, &keyboard->modifiers);
-	keyboard->key.notify = keyboard_handle_key;
-	wl_signal_add(&wlr_keyboard->events.key, &keyboard->key);
-	keyboard->destroy.notify = keyboard_handle_destroy;
-	wl_signal_add(&device->events.destroy, &keyboard->destroy);
-
-	wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
-
-	/* And add the keyboard to our list of keyboards */
-	wl_list_insert(&server->keyboards, &keyboard->link);
-}
-
-static void server_new_pointer(struct tinywl_server *server,
-		struct wlr_input_device *device) {
-	/* We don't do anything special with pointers. All of our pointer handling
-	 * is proxied through wlr_cursor. On another compositor, you might take this
-	 * opportunity to do libinput configuration on the device to set
-	 * acceleration, etc. */
-	/* SEIZA: libinput leaves tap-to-click off, so a laptop touchpad would not click when tapped. */
-	if (wlr_input_device_is_libinput(device)) {
-		struct libinput_device *li = wlr_libinput_get_device_handle(device);
-		if (libinput_device_config_tap_get_finger_count(li) > 0) {
-			libinput_device_config_tap_set_enabled(li, LIBINPUT_CONFIG_TAP_ENABLED);
-		}
-	}
-	wlr_cursor_attach_input_device(server->cursor, device);
-}
-
-static void server_new_input(struct wl_listener *listener, void *data) {
-	/* This event is raised by the backend when a new input device becomes
-	 * available. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, new_input);
-	struct wlr_input_device *device = data;
-	switch (device->type) {
-	case WLR_INPUT_DEVICE_KEYBOARD:
-		server_new_keyboard(server, device);
-		break;
-	case WLR_INPUT_DEVICE_POINTER:
-		server_new_pointer(server, device);
-		break;
-	default:
-		break;
-	}
-	/* We need to let the wlr_seat know what our capabilities are, which is
-	 * communiciated to the client. In TinyWL we always have a cursor, even if
-	 * there are no pointer devices, so we always include that capability. */
-	uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
-	if (!wl_list_empty(&server->keyboards)) {
-		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
-	}
-	wlr_seat_set_capabilities(server->seat, caps);
-}
-
-static void seat_request_cursor(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(
-			listener, server, request_cursor);
-	/* This event is raised by the seat when a client provides a cursor image */
-	struct wlr_seat_pointer_request_set_cursor_event *event = data;
-	struct wlr_seat_client *focused_client =
-		server->seat->pointer_state.focused_client;
-	/* This can be sent by any client, so we check to make sure this one is
-	 * actually has pointer focus first. */
-	if (focused_client == event->seat_client) {
-		/* Once we've vetted the client, we can tell the cursor to use the
-		 * provided surface as the cursor image. It will set the hardware cursor
-		 * on the output that it's currently on and continue to do so as the
-		 * cursor moves between outputs. */
-		wlr_cursor_set_surface(server->cursor, event->surface,
-				event->hotspot_x, event->hotspot_y);
-	}
-}
-
-/* A program (a game, through XWayland) can lock the pointer: it then reads raw motion and the cursor stays put.
- * shortcut: only a lock holds the pointer, a confine is accepted but not enforced; upgrade if a game needs real confinement. */
-static void constraint_destroyed(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, constraint_destroy);
-	wl_list_remove(&server->constraint_destroy.link);
-	server->constraint = NULL;
-}
-
-static void constraint_set(struct tinywl_server *server, struct wlr_pointer_constraint_v1 *c) {
-	if (server->constraint == c) {
-		return;
-	}
-	if (server->constraint) {
-		wl_list_remove(&server->constraint_destroy.link);
-		wlr_pointer_constraint_v1_send_deactivated(server->constraint);
-	}
-	server->constraint = c;
-	if (c) {
-		server->constraint_destroy.notify = constraint_destroyed;
-		wl_signal_add(&c->events.destroy, &server->constraint_destroy);
-		wlr_pointer_constraint_v1_send_activated(c);
-	}
-}
-
-static void server_new_constraint(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, new_constraint);
-	struct wlr_pointer_constraint_v1 *c = data;
-	if (c->surface == server->seat->pointer_state.focused_surface) { /* asked for while already pointed at */
-		constraint_set(server, c);
-	}
-}
-
-static bool pointer_locked(const struct tinywl_server *server) {
-	return server->constraint && server->constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED
-		&& server->cursor_mode == TINYWL_CURSOR_PASSTHROUGH;
-}
-
-static void seat_pointer_focus_change(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(
-			listener, server, pointer_focus_change);
-	/* This event is raised when the pointer focus is changed, including when the
-	 * client is closed. We set the cursor image to its default if target surface
-	 * is NULL */
-	struct wlr_seat_pointer_focus_change_event *event = data;
-	if (event->new_surface == NULL) {
-		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
-	}
-	constraint_set(server, event->new_surface ? wlr_pointer_constraints_v1_constraint_for_surface(server->constraints, event->new_surface, server->seat) : NULL);
-}
-
-static void seat_request_set_selection(struct wl_listener *listener, void *data) {
-	/* This event is raised by the seat when a client wants to set the selection,
-	 * usually when the user copies something. wlroots allows compositors to
-	 * ignore such requests if they so choose, but in tinywl we always honor
-	 */
-	struct tinywl_server *server = wl_container_of(
-			listener, server, request_set_selection);
-	struct wlr_seat_request_set_selection_event *event = data;
-	wlr_seat_set_selection(server->seat, event->source, event->serial);
-}
-
-static void layer_focus(struct tinywl_server *server, struct wlr_surface *surface);
-
-/* The layer-shell surface under a screen point, in the upper (above windows)
- * or lower layers. Layers are not zoomed, so scene coordinates are screen ones. */
-static bool layer_surface_at(struct tinywl_server *server, double lx, double ly, bool upper,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	for (int i = 0; i < 2; i++) {
-		double nx, ny;
-		struct wlr_scene_tree *t = server->layers[upper ? 3 - i : 1 - i];
-		struct wlr_scene_node *n = wlr_scene_node_at(&t->node, lx, ly, &nx, &ny);
-		if (n && n->type == WLR_SCENE_NODE_BUFFER) {
-			struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(n));
-			if (ss) {
-				*surface = ss->surface;
-				*sx = nx;
-				*sy = ny;
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-static struct tinywl_toplevel *desktop_toplevel_at(
-		struct tinywl_server *server, double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	/* SEIZA: wlr_scene_node_at tests clicks against the UNscaled surface, so it
-	 * breaks when zoomed. Instead, convert the screen point to world coords and
-	 * ask each window, front to back (the list is in stacking order), for the
-	 * surface under that point. sx/sy come back in surface-local coords, which
-	 * is exactly what clients expect, at any zoom. */
-	if (layer_surface_at(server, lx, ly, true, surface, sx, sy)) {
-		return NULL; /* a surface, but no window: callers check `surface` */
-	}
-	if (server->overview) {
-		return NULL; /* the overview is look-and-pick only, windows get no input */
-	}
-	double wxc = (lx + server->cam_x) / server->zoom;
-	double wyc = (ly + server->cam_y) / server->zoom;
-	struct xunmanaged *um;
-	wl_list_for_each_reverse(um, &server->unmanaged, link) { /* menus and tooltips: a surface, but no window */
-		if (um->surf) {
-			struct wlr_surface *s = wlr_surface_surface_at(um->xs->surface, wxc - um->ax - um->xs->x, wyc - um->ay - um->xs->y, sx, sy);
-			if (s) {
-				*surface = s;
-				return NULL;
-			}
-		}
-	}
-	struct tinywl_toplevel *tl;
-	wl_list_for_each(tl, &server->toplevels, link) {
-		struct wlr_surface *s = tl_surface_at(tl, wxc - tl->wx, wyc - tl->wy, sx, sy);
-		if (s) {
-			*surface = s;
-			return tl;
-		}
-	}
-	layer_surface_at(server, lx, ly, false, surface, sx, sy);
-	return NULL;
-}
-
-static void reset_cursor_mode(struct tinywl_server *server) {
-	/* SEIZA: a window dropped inside another star's territory moves to that
-	 * star (judged by its center); dropped in empty space it keeps its star. */
-	struct tinywl_toplevel *tl = server->grabbed_toplevel;
-	struct star *from = tl ? tl->star : NULL;
-	if (server->cursor_mode == TINYWL_CURSOR_MOVE && tl) {
-		struct wlr_box g = tl_geometry(tl);
-		struct star *s = star_at(server, tl->wx + g.x + g.width / 2.0,
-			tl->wy + g.y + g.height / 2.0);
-		if (s) {
-			tl->star = s;
-		}
-	}
-	if (server->cursor_mode == TINYWL_CURSOR_PAN) {
-		update_current_star(server);
-	}
-	if (tl && server->cursor_mode != TINYWL_CURSOR_PASSTHROUGH) { /* a tiled star puts a moved or resized window back in its tile */
-		tile_star(server, from);
-		if (tl->star != from) {
-			tile_star(server, tl->star);
-		}
-	}
-	/* Reset the cursor mode to passthrough. */
-	server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
-	server->grabbed_toplevel = NULL;
-}
-
-static void process_cursor_move(struct tinywl_server *server) {
-	/* Move the grabbed toplevel to the new position. */
-	struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
-	toplevel->wx = (server->cursor->x + server->cam_x) / server->zoom - server->grab_x;
-	toplevel->wy = (server->cursor->y + server->cam_y) / server->zoom - server->grab_y;
-	layout_toplevel(toplevel);
-}
-
-static void process_cursor_resize(struct tinywl_server *server) {
-	/*
-	 * Resizing the grabbed toplevel can be a little bit complicated, because we
-	 * could be resizing from any corner or edge. This not only resizes the
-	 * toplevel on one or two axes, but can also move the toplevel if you resize
-	 * from the top or left edges (or top-left corner).
-	 *
-	 * Note that some shortcuts are taken here. In a more fleshed-out
-	 * compositor, you'd wait for the client to prepare a buffer at the new
-	 * size, then commit any movement that was prepared.
-	 */
-	struct tinywl_toplevel *toplevel = server->grabbed_toplevel;
-	double border_x = (server->cursor->x + server->cam_x) / server->zoom - server->grab_x;
-	double border_y = (server->cursor->y + server->cam_y) / server->zoom - server->grab_y;
-	int new_left = server->grab_geobox.x;
-	int new_right = server->grab_geobox.x + server->grab_geobox.width;
-	int new_top = server->grab_geobox.y;
-	int new_bottom = server->grab_geobox.y + server->grab_geobox.height;
-
-	if (server->resize_edges & WLR_EDGE_TOP) {
-		new_top = border_y;
-		if (new_bottom - new_top < MIN_WIN_H) {
-			new_top = new_bottom - MIN_WIN_H;
-		}
-	} else if (server->resize_edges & WLR_EDGE_BOTTOM) {
-		new_bottom = border_y;
-		if (new_bottom - new_top < MIN_WIN_H) {
-			new_bottom = new_top + MIN_WIN_H;
-		}
-	}
-	if (server->resize_edges & WLR_EDGE_LEFT) {
-		new_left = border_x;
-		if (new_right - new_left < MIN_WIN_W) {
-			new_left = new_right - MIN_WIN_W;
-		}
-	} else if (server->resize_edges & WLR_EDGE_RIGHT) {
-		new_right = border_x;
-		if (new_right - new_left < MIN_WIN_W) {
-			new_right = new_left + MIN_WIN_W;
-		}
-	}
-
-	struct wlr_box geo = tl_geometry(toplevel), *geo_box = &geo;
-	toplevel->wx = new_left - geo_box->x;
-	toplevel->wy = new_top - geo_box->y;
-	layout_toplevel(toplevel);
-
-	int new_width = new_right - new_left;
-	int new_height = new_bottom - new_top;
-	tl_set_size(toplevel, new_width, new_height);
-}
-
-/* Move a star and the windows that belong to it by a world-space delta. */
-static void star_move(struct tinywl_server *server, struct star *s, double dx, double dy) {
-	s->cx += dx;
-	s->cy += dy;
-	struct tinywl_toplevel *tl;
-	wl_list_for_each(tl, &server->all_toplevels, all_link) {
-		if (tl->star == s) {
-			tl->wx += dx;
-			tl->wy += dy;
-		}
-	}
-	relayout_all(server);
-}
-
-/* Hot corner: the pointer rests in a 4 px corner box for panel_dwell ms and seiza-panel opens. It fires once
- * per visit, so closing the panel with the pointer still in the corner does not reopen it. */
-static struct wl_event_source *g_corner_timer;
-static bool g_corner_fired;
-
-static int corner_fired(void *data) {
-	struct tinywl_server *server = data;
-	g_corner_fired = true;
-	op_spawn(server, "seiza-panel open");
-	return 0;
-}
-
-/* The hot corner of whichever monitor the pointer is on, if that corner is on the outside of the layout:
- * a corner at the seam between two monitors is not a corner, or crossing over would open the panel. */
-static bool in_corner(struct tinywl_server *server) {
-	struct wlr_output *out = wlr_output_layout_output_at(server->output_layout, server->cursor->x, server->cursor->y);
-	int c = server->panel_corner;
-	if (!out || c <= 0) {
-		return false;
-	}
-	struct wlr_box f = {0};
-	wlr_output_layout_get_box(server->output_layout, out, &f);
-	double x = server->cursor->x - f.x, y = server->cursor->y - f.y;
-	bool right = c == 1 || c == 3, bottom = c == 3 || c == 4;
-	if (!(right ? x >= f.width - 4 : x < 4) || !(bottom ? y >= f.height - 4 : y < 4)) {
-		return false;
-	}
-	double ix = right ? f.x + f.width - 2 : f.x + 1, iy = bottom ? f.y + f.height - 2 : f.y + 1; /* a point inside the corner */
-	double ox = right ? f.x + f.width + 1 : f.x - 1, oy = bottom ? f.y + f.height + 1 : f.y - 1;
-	return !wlr_output_layout_output_at(server->output_layout, ox, iy) && !wlr_output_layout_output_at(server->output_layout, ix, oy);
-}
-
-static void corner_motion(struct tinywl_server *server) {
-	if (!g_corner_timer) {
-		g_corner_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server->wl_display), corner_fired, server);
-	}
-	if (server->locked || !in_corner(server)) {
-		g_corner_fired = false;
-		wl_event_source_timer_update(g_corner_timer, 0);
-	} else if (!g_corner_fired) {
-		wl_event_source_timer_update(g_corner_timer, server->panel_dwell > 0 ? server->panel_dwell : 1);
-	}
-}
-
-static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
-	idle_activity(server);
-	corner_motion(server);
-	if (server->locked) { /* the pointer belongs to the lock surface */
-		struct wlr_session_lock_surface_v1 *ls = NULL;
-		if (server->lock && !wl_list_empty(&server->lock->surfaces)) {
-			ls = wl_container_of(server->lock->surfaces.next, ls, link);
-		}
-		if (ls) {
-			struct wlr_box b = {0};
-			wlr_output_layout_get_box(server->output_layout, ls->output, &b);
-			wlr_seat_pointer_notify_enter(server->seat, ls->surface, server->cursor->x - b.x, server->cursor->y - b.y);
-			wlr_seat_pointer_notify_motion(server->seat, time, server->cursor->x - b.x, server->cursor->y - b.y);
-		}
-		return;
-	}
-	/* SEIZA: in the overview the pointer only picks stars. */
-	if (server->overview) {
-		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
-		if (server->drag_star) {
-			if (!server->drag_moved && hypot(server->cursor->x - server->press_x, server->cursor->y - server->press_y) < 6) {
-				return; /* still a click */
-			}
-			server->drag_moved = true;
-			star_move(server, server->drag_star,
-				(server->cursor->x - server->pan_last_x) / server->zoom,
-				(server->cursor->y - server->pan_last_y) / server->zoom);
-			server->pan_last_x = server->cursor->x;
-			server->pan_last_y = server->cursor->y;
-			return;
-		}
-		overview_pointer(server);
-		return;
-	}
-	/* SEIZA: dragging the canvas: the world follows the cursor like a map. */
-	if (server->cursor_mode == TINYWL_CURSOR_PAN) {
-		anim_cancel(server);
-		server->cam_x -= server->cursor->x - server->pan_last_x;
-		server->cam_y -= server->cursor->y - server->pan_last_y;
-		server->pan_last_x = server->cursor->x;
-		server->pan_last_y = server->cursor->y;
-		relayout_all(server);
-		return;
-	}
-	/* If the mode is non-passthrough, delegate to those functions. */
-	if (server->cursor_mode == TINYWL_CURSOR_MOVE) {
-		process_cursor_move(server);
-		return;
-	} else if (server->cursor_mode == TINYWL_CURSOR_RESIZE) {
-		process_cursor_resize(server);
-		return;
-	}
-
-	/* Otherwise, find the toplevel under the pointer and send the event along. */
-	double sx, sy;
-	struct wlr_seat *seat = server->seat;
-	struct wlr_surface *surface = NULL;
-	struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
-			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-	if (!toplevel) {
-		/* If there's no toplevel under the cursor, set the cursor image to a
-		 * default. This is what makes the cursor image appear when you move it
-		 * around the screen, not over any toplevels. */
-		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
-	}
-	if (surface) {
-		/*
-		 * Send pointer enter and motion events.
-		 *
-		 * The enter event gives the surface "pointer focus", which is distinct
-		 * from keyboard focus. You get pointer focus by moving the pointer over
-		 * a window.
-		 *
-		 * Note that wlroots will avoid sending duplicate enter/motion events if
-		 * the surface has already has pointer focus or if the client is already
-		 * aware of the coordinates passed.
-		 */
-		wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
-		wlr_seat_pointer_notify_motion(seat, time, sx, sy);
-	} else {
-		/* Clear pointer focus so future button events and such are not sent to
-		 * the last client to have the cursor over it. */
-		wlr_seat_pointer_clear_focus(seat);
-	}
-}
-
-static void server_cursor_motion(struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits a _relative_
-	 * pointer motion event (i.e. a delta) */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, cursor_motion);
-	struct wlr_pointer_motion_event *event = data;
-	/* The cursor doesn't move unless we tell it to. The cursor automatically
-	 * handles constraining the motion to the output layout, as well as any
-	 * special configuration applied for the specific input device which
-	 * generated the event. You can pass NULL for the device if you want to move
-	 * the cursor around without any input. */
-	/* Raw motion for programs that read it (games), in the window's own pixels. */
-	double z = server->zoom > 0 ? server->zoom : 1;
-	wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer, server->seat, (uint64_t)event->time_msec * 1000,
-			event->delta_x / z, event->delta_y / z, event->unaccel_dx / z, event->unaccel_dy / z);
-	if (pointer_locked(server)) {
-		return; /* the cursor stays where it is while a program holds the pointer */
-	}
-	wlr_cursor_move(server->cursor, &event->pointer->base,
-			event->delta_x, event->delta_y);
-	process_cursor_motion(server, event->time_msec);
-}
-
-static void server_cursor_motion_absolute(
-		struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits an _absolute_
-	 * motion event, from 0..1 on each axis. This happens, for example, when
-	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
-	 * move the mouse over the window. You could enter the window from any edge,
-	 * so we have to warp the mouse there. There is also some hardware which
-	 * emits these events. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, cursor_motion_absolute);
-	struct wlr_pointer_motion_absolute_event *event = data;
-	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, event->x,
-		event->y);
-	process_cursor_motion(server, event->time_msec);
-}
-
-static void begin_interactive(struct tinywl_toplevel *toplevel,
-		enum tinywl_cursor_mode mode, uint32_t edges);
-
-static void server_cursor_button(struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits a button
-	 * event. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, cursor_button);
-	struct wlr_pointer_button_event *event = data;
-	idle_activity(server);
-
-	if (server->locked) {
-		wlr_seat_pointer_notify_button(server->seat, event->time_msec, event->button, event->state);
-		return;
-	}
-
-	/* SEIZA: in the constellation view a click on a star's dot flies into it and a
-	 * drag moves the star (and its windows). */
-	if (server->overview) {
-		if (event->state == WL_POINTER_BUTTON_STATE_RELEASED && server->drag_star) {
-			struct star *d = server->drag_star, *o;
-			server->drag_star = NULL;
-			if (!server->drag_moved) {
-				fly_to_star(server, d);
-				return;
-			}
-			wl_list_for_each(o, &server->stars, link) {
-				if (o != d && fabs(o->cx - d->cx) < STAR_W && fabs(o->cy - d->cy) < STAR_H) {
-					star_move(server, d, server->drag_x0 - d->cx, server->drag_y0 - d->cy);
-					return; /* dropped on another star's territory: put it back */
-				}
-			}
-			persist_save(server);
-		} else if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-			struct star *s = star_dot_at(server, server->cursor->x, server->cursor->y);
-			if (s) {
-				server->drag_star = s;
-				server->drag_moved = false;
-				server->drag_x0 = s->cx;
-				server->drag_y0 = s->cy;
-				server->press_x = server->pan_last_x = server->cursor->x;
-				server->press_y = server->pan_last_y = server->cursor->y;
-			}
-		}
-		return;
-	}
-
-	/* SEIZA: Super + left-drag moves the window under the cursor, Super +
-	 * right-drag resizes it from the nearest corner, even when the app draws
-	 * no title bar. The click is not forwarded to the app. */
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
-			(event->button == BTN_LEFT || event->button == BTN_RIGHT) &&
-			kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_LOGO)) {
-		double sx, sy;
-		struct wlr_surface *surface = NULL;
-		struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
-				server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-		if (toplevel) {
-			focus_toplevel(toplevel);
-			if (event->button == BTN_LEFT) {
-				begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
-			} else {
-				/* Pick the corner by which quadrant of the window was hit. */
-				struct wlr_box geometry = tl_geometry(toplevel), *geo = &geometry;
-				double mid_x = (toplevel->wx + geo->x + geo->width / 2.0) * server->zoom - server->cam_x;
-				double mid_y = (toplevel->wy + geo->y + geo->height / 2.0) * server->zoom - server->cam_y;
-				uint32_t edges = (server->cursor->x < mid_x ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
-					(server->cursor->y < mid_y ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
-				begin_interactive(toplevel, TINYWL_CURSOR_RESIZE, edges);
-			}
-			return;
-		}
-		/* Super-click on empty space: grab the canvas and drag it. */
-		server->cursor_mode = TINYWL_CURSOR_PAN;
-		server->pan_last_x = server->cursor->x;
-		server->pan_last_y = server->cursor->y;
-		return;
-	}
-	/* SEIZA: a press focuses the window first and only then reaches it: Electron apps (Vesktop) drop a
-	 * click that arrives before their window is active, so they needed two. */
-	if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		double sx, sy;
-		struct wlr_surface *surface = NULL;
-		struct tinywl_toplevel *toplevel = desktop_toplevel_at(server,
-				server->cursor->x, server->cursor->y, &surface, &sx, &sy);
-		focus_toplevel(toplevel);
-		struct wlr_layer_surface_v1 *ls = surface ? wlr_layer_surface_v1_try_from_wlr_surface(surface) : NULL;
-		if (ls && ls->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) {
-			layer_focus(server, surface);
-		}
-	}
-	/* Notify the client with pointer focus that a button event has occurred */
-	wlr_seat_pointer_notify_button(server->seat,
-			event->time_msec, event->button, event->state);
-	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		/* If you released any buttons, we exit interactive move/resize mode. */
-		reset_cursor_mode(server);
-	}
-}
-
-static void server_cursor_axis(struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits an axis event,
-	 * for example when you move the scroll wheel. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, cursor_axis);
-	struct wlr_pointer_axis_event *event = data;
-	idle_activity(server);
-
-	/* SEIZA: Super + scroll zooms toward the cursor (scroll up = zoom in) and is
-	 * not forwarded to the app. */
-	if (!server->locked && main_mod_held(server) && event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL) {
-		zoom_at(server, event->delta < 0 ? 1.1 : 1 / 1.1);
-		return;
-	}
-	/* Notify the client with pointer focus of the axis event. */
-	wlr_seat_pointer_notify_axis(server->seat,
-			event->time_msec, event->orientation, event->delta,
-			event->delta_discrete, event->source, event->relative_direction);
-}
-
-static void server_cursor_frame(struct wl_listener *listener, void *data) {
-	/* This event is forwarded by the cursor when a pointer emits an frame
-	 * event. Frame events are sent after regular pointer events to group
-	 * multiple events together. For instance, two axis events may happen at the
-	 * same time, in which case a frame event won't be sent in between. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, cursor_frame);
-	/* Notify the client with pointer focus of the frame event. */
-	wlr_seat_pointer_notify_frame(server->seat);
-}
-
-/* SEIZA rounded screen: four small black masks, one per corner, drawn above
- * everything. Each is an r x r antialiased quarter-circle bitmap; r is FRAME.screen (0 = square screen). */
-struct corner_buf {
-	struct wlr_buffer base;
-	int r;
-	uint32_t px[];
-};
-
-static void corner_destroy(struct wlr_buffer *b) {
-	struct corner_buf *cb = wl_container_of(b, cb, base);
-	free(cb);
-}
-
-static bool corner_begin(struct wlr_buffer *b, uint32_t flags, void **data, uint32_t *format, size_t *stride) {
-	struct corner_buf *cb = wl_container_of(b, cb, base);
-	if (flags & WLR_BUFFER_DATA_PTR_ACCESS_WRITE) {
-		return false;
-	}
-	*data = cb->px;
-	*format = DRM_FORMAT_ARGB8888;
-	*stride = cb->r * 4;
-	return true;
-}
-
-static void corner_end(struct wlr_buffer *b) {}
-
-static const struct wlr_buffer_impl corner_impl = {
-	.destroy = corner_destroy,
-	.begin_data_ptr_access = corner_begin,
-	.end_data_ptr_access = corner_end,
-};
-
-static struct wlr_buffer *corner_make(int r, bool flip_x, bool flip_y) {
-	struct corner_buf *cb = calloc(1, sizeof(*cb) + sizeof(uint32_t) * r * r);
-	cb->r = r;
-	wlr_buffer_init(&cb->base, &corner_impl, r, r);
-	for (int y = 0; y < r; y++) {
-		for (int x = 0; x < r; x++) {
-			int fx = flip_x ? r - 1 - x : x, fy = flip_y ? r - 1 - y : y;
-			double d = hypot(fx + 0.5 - r, fy + 0.5 - r);
-			double a = fmin(1.0, fmax(0.0, d - r + 0.5)); /* black outside the circle */
-			cb->px[y * r + x] = (uint32_t)lround(a * 255.0) << 24; /* premultiplied black */
-		}
-	}
-	return &cb->base;
-}
-
-/* Create the corners on first use, then (re)place them on this output's edges. */
-static void place_corners(struct tinywl_output *output) {
-	struct tinywl_server *server = output->server;
-	struct wlr_box box = {0};
-	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &box);
-	int r = FRAME.screen;
-	for (int i = 0; i < 4; i++) {
-		if (output->corner[i] && output->corner_r != r) { /* the radius changed: rebuild */
-			wlr_scene_node_destroy(&output->corner[i]->node);
-			output->corner[i] = NULL;
-		}
-		if (!r) {
-			continue;
-		}
-		if (!output->corner[i]) {
-			struct wlr_buffer *b = corner_make(r, i & 1, i >> 1);
-			output->corner[i] = wlr_scene_buffer_create(server->corner_tree, b);
-			wlr_buffer_drop(b);
-		}
-		wlr_scene_node_set_position(&output->corner[i]->node,
-			box.x + (i & 1 ? box.width - r : 0), box.y + (i >> 1 ? box.height - r : 0));
-	}
-	output->corner_r = r;
-}
-
-static void output_frame(struct wl_listener *listener, void *data) {
-	/* This function is called every time an output is ready to display a frame,
-	 * generally at the output's refresh rate (e.g. 60Hz). */
-	struct tinywl_output *output = wl_container_of(listener, output, frame);
-	struct wlr_scene *scene = output->server->scene;
-
-	struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(
-		scene, output->wlr_output);
-
-	anim_step(output->server);
-	bool opening = open_step(output->server);
-	opening |= ghost_step(output->server);
-
-	/* A fullscreen window on the star in view covers the bar (layer Top); the constellation view hides it anyway. */
-	bool covered = false;
-	struct tinywl_toplevel *fs;
-	wl_list_for_each(fs, &output->server->toplevels, link) {
-		struct wlr_surface *fs_surf = tl_surface(fs);
-		covered |= fs->mode == 2 && fs->star == output->server->current_star && fs_surf && fs_surf->mapped;
-	}
-	wlr_scene_node_set_enabled(&output->server->layers[2]->node, !output->server->overview && !covered);
-
-	/* Render the scene if needed and commit the output */
-	struct wlr_scene_output_state_options night = {.color_transform = g_night_tr};
-	wlr_scene_output_commit(scene_output, &night);
-	if (output->server->anim.on || opening) {
-		wlr_output_schedule_frame(output->wlr_output); /* the glide is not done: another frame */
-	}
-
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_scene_output_send_frame_done(scene_output, &now);
-}
-
-static void output_request_state(struct wl_listener *listener, void *data) {
-	/* This function is called when the backend requests a new state for
-	 * the output. For example, Wayland and X11 backends request a new mode
-	 * when the output window is resized. */
-	struct tinywl_output *output = wl_container_of(listener, output, request_state);
-	const struct wlr_output_event_request_state *event = data;
-	wlr_output_commit_state(output->wlr_output, event->state);
-	place_corners(output);
-}
-
-static bool g_lost_all_outputs; /* the last monitor went away, taking the satellites' layer surfaces with it */
-static void output_destroy(struct wl_listener *listener, void *data) {
-	struct tinywl_output *output = wl_container_of(listener, output, destroy);
-
-	struct seiza_layer *sl, *tmp;
-	wl_list_for_each_safe(sl, tmp, &output->server->layer_surfaces, link) {
-		if (sl->surf->output == output->wlr_output) {
-			wlr_layer_surface_v1_destroy(sl->surf); /* the client sees "closed" */
-		}
-	}
-	for (int i = 0; i < 4; i++) {
-		if (output->corner[i]) {
-			wlr_scene_node_destroy(&output->corner[i]->node);
-		}
-	}
-	wl_list_remove(&output->frame.link);
-	wl_list_remove(&output->request_state.link);
-	wl_list_remove(&output->destroy.link);
-	wl_list_remove(&output->link);
-	g_lost_all_outputs = wl_list_empty(&output->server->outputs);
-	free(output);
-}
-
-static bool g_env_ready; /* WAYLAND_DISPLAY is set: programs started now can reach us */
-
-/* A monitor other than the primary one: the starfield from autostart only covers the primary, so start another
- * for this one, told where it sits in the layout. It exits when the monitor goes. */
-static void start_starfield(struct tinywl_server *server, struct tinywl_output *output) {
-	if (output->link.prev == &server->outputs) {
-		return;
-	}
-	for (const char *c = output->wlr_output->name; *c; c++) {
-		if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') {
-			return;
-		}
-	}
-	struct wlr_box b = {0};
-	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &b);
-	char cmd[200];
-	snprintf(cmd, sizeof(cmd), "seiza-starfield --on %s --at %d,%d", output->wlr_output->name, b.x, b.y);
-	op_spawn(server, cmd);
-}
-
-static void server_new_output(struct wl_listener *listener, void *data) {
-	/* This event is raised by the backend when a new output (aka a display or
-	 * monitor) becomes available. */
-	struct tinywl_server *server =
-		wl_container_of(listener, server, new_output);
-	struct wlr_output *wlr_output = data;
-
-	/* Configures the output created by the backend to use our allocator
-	 * and our renderer. Must be done once, before committing the output */
-	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
-
-	/* The output may be disabled, switch it on. */
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
-
-	/* Some backends don't have modes. DRM+KMS does, and we need to set a mode
-	 * before we can use the output. The mode is a tuple of (width, height,
-	 * refresh rate), and each monitor supports only a specific set of modes. We
-	 * just pick the monitor's preferred mode, a more sophisticated compositor
-	 * would let the user configure it. */
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
-	if (mode != NULL) {
-		wlr_output_state_set_mode(&state, mode);
-	}
-
-	/* Atomically applies the new output state. */
-	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
-
-	/* Allocates and configures our state for this output */
-	struct tinywl_output *output = calloc(1, sizeof(*output));
-	output->wlr_output = wlr_output;
-	output->server = server;
-
-	/* Sets up a listener for the frame event. */
-	output->frame.notify = output_frame;
-	wl_signal_add(&wlr_output->events.frame, &output->frame);
-
-	/* Sets up a listener for the state request event. */
-	output->request_state.notify = output_request_state;
-	wl_signal_add(&wlr_output->events.request_state, &output->request_state);
-
-	/* Sets up a listener for the destroy event. */
-	output->destroy.notify = output_destroy;
-	wl_signal_add(&wlr_output->events.destroy, &output->destroy);
-
-	wl_list_insert(server->outputs.prev, &output->link); /* appended: the first monitor stays the primary one */
-
-	/* Adds this to the output layout. The add_auto function arranges outputs
-	 * from left-to-right in the order they appear. A more sophisticated
-	 * compositor would let the user configure the arrangement of outputs in the
-	 * layout.
-	 *
-	 * The output layout utility automatically adds a wl_output global to the
-	 * display, which Wayland clients can see to find out information about the
-	 * output (such as DPI, scale factor, manufacturer, etc).
-	 */
-	struct wlr_output_layout_output *l_output = wlr_output_layout_add_auto(server->output_layout,
-		wlr_output);
-	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
-	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
-	place_corners(output);
-	if (g_env_ready) {
-		start_starfield(server, output);
-	}
-	if (g_lost_all_outputs && g_env_ready) { /* e.g. after suspend the panel reappears: the satellites exited when it went */
-		g_lost_all_outputs = false;
-		/* shortcut: a fixed list, not the user's autostart (which also holds programs that survive), when it needs to follow a custom autostart */
-		for (const char *sat[] = {"seiza-starfield", "seiza-bar", "seiza-widgets", "seiza-osd", "seiza-notify", NULL}, **c = sat; *c; c++) {
-			op_spawn(server, *c);
-		}
-	}
-}
-
-/* Remember how this window's program was launched, on its star, so the star can
- * offer to relaunch it later. Closing the window does not forget it. */
-static void remember_app(struct tinywl_toplevel *tl) {
-	struct star *s = tl->star;
-	pid_t pid = tl_pid(tl);
-	char cmd[256];
-	if (pid <= 0 || procinfo_cmdline(pid, cmd, sizeof(cmd)) != 0) {
-		return;
-	}
-	struct cstar view = {.napps = s->napps}; /* reuse the de-dupe + cap logic */
-	memcpy(view.apps, s->apps, sizeof(view.apps));
-	if (constellation_add_app(&view, cmd)) {
-		s->napps = view.napps;
-		memcpy(s->apps, view.apps, sizeof(s->apps));
-		persist_save(tl->server);
-	}
-}
-
-static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
-	/* Called when the surface is mapped, or ready to display on-screen. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
-
-	if (toplevel->xsurface && !toplevel->x_scene) {
-		toplevel->x_scene = wlr_scene_surface_create(toplevel->scene_tree, toplevel->xsurface->surface);
-		/* The scene puts the drawn size back to the unscaled one on every commit, so our commit
-		 * listener (which re-applies the zoom) has to come after its own: add it again, last. */
-		wl_list_remove(&toplevel->commit.link);
-		wl_signal_add(&toplevel->xsurface->surface->events.commit, &toplevel->commit);
-		layout_toplevel(toplevel);
-	}
-	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
-	if (!toplevel->server->motion.reduce) {
-		toplevel->open_t0 = mono_s();
-		frames_all(toplevel->server);
-	}
-	layout_toplevel(toplevel); /* it is on screen from now on: show it, frame and all */
-	if (toplevel->xdg_toplevel && toplevel->xdg_toplevel->requested.fullscreen) { /* asked for before it could be answered */
-		toplevel_set_mode(toplevel, 2);
-		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, true);
-	}
-	rules_apply(toplevel);
-	tile_star(toplevel->server, toplevel->star);
-	remember_app(toplevel);
-
-	focus_toplevel(toplevel);
-	publish_state(toplevel->server);
-}
-
-static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
-	/* Called when the surface is unmapped, and should no longer be shown. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
-
-	/* Reset the cursor mode if the grabbed toplevel was unmapped. */
-	if (toplevel == toplevel->server->grabbed_toplevel) {
-		reset_cursor_mode(toplevel->server);
-	}
-
-	ghost_start(toplevel);
-	if (toplevel->x_scene) {
-		wlr_scene_node_destroy(&toplevel->x_scene->buffer->node);
-		toplevel->x_scene = NULL;
-	}
-	wl_list_remove(&toplevel->link);
-	layout_toplevel(toplevel); /* ...and not any more: take the frame away with it */
-	tile_star(toplevel->server, toplevel->star);
-	publish_state(toplevel->server);
-}
-
-static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
-	/* Called when a new surface state is committed. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
-
-	if (!toplevel->xsurface && toplevel->xdg_toplevel->base->initial_commit) {
-		/* When an xdg_surface performs an initial commit, the compositor must
-		 * reply with a configure so the client can map the surface. tinywl
-		 * configures the xdg_toplevel with 0,0 size to let the client pick the
-		 * dimensions itself. */
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
-	}
-	/* SEIZA: wlroots just reset this window's drawn size, and its geometry may
-	 * have changed, so re-apply zoom + frame. (Our listener is added after
-	 * wlroots', so it runs after it.) */
-	layout_toplevel(toplevel);
-}
-
-static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
-	/* Called when the xdg_toplevel is destroyed. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
-
-	wl_list_remove(&toplevel->all_link);
-	if (!toplevel->xsurface || toplevel->x_attached) {
-		wl_list_remove(&toplevel->map.link);
-		wl_list_remove(&toplevel->unmap.link);
-		wl_list_remove(&toplevel->commit.link);
-	}
-	if (toplevel->xsurface) {
-		wl_list_remove(&toplevel->associate.link);
-		wl_list_remove(&toplevel->dissociate.link);
-		wl_list_remove(&toplevel->request_configure.link);
-		wl_list_remove(&toplevel->request_activate.link);
-	}
-	wl_list_remove(&toplevel->destroy.link);
-	wl_list_remove(&toplevel->request_move.link);
-	wl_list_remove(&toplevel->request_resize.link);
-	wl_list_remove(&toplevel->request_maximize.link);
-	wl_list_remove(&toplevel->request_fullscreen.link);
-
-	if (toplevel->xsurface) {
-		/* The scene tree of a Wayland window goes with its surface; an X11 window's is ours,
-		 * with its frame and glow in it, and would stay on screen after the window closed. */
-		wlr_scene_node_destroy(&toplevel->scene_tree->node);
-	}
-	free(toplevel);
-}
-
-static void begin_interactive(struct tinywl_toplevel *toplevel,
-		enum tinywl_cursor_mode mode, uint32_t edges) {
-	/* This function sets up an interactive move or resize operation, where the
-	 * compositor stops propagating pointer events to clients and instead
-	 * consumes them itself, to move or resize windows. */
-	struct tinywl_server *server = toplevel->server;
-
-	if (toplevel->mode) { /* leave maximized in place; a move also gets the old size back */
-		toplevel->mode = 0;
-		tl_set_maximized(toplevel, false);
-		tl_set_fullscreen(toplevel, false);
-		if (mode == TINYWL_CURSOR_MOVE) {
-			tl_set_size(toplevel, toplevel->saved_w, toplevel->saved_h);
-		}
-		layout_toplevel(toplevel);
-	}
-
-	server->grabbed_toplevel = toplevel;
-	server->cursor_mode = mode;
-
-	/* SEIZA: all grab math is in world coordinates. */
-	double cur_wx = (server->cursor->x + server->cam_x) / server->zoom;
-	double cur_wy = (server->cursor->y + server->cam_y) / server->zoom;
-
-	if (mode == TINYWL_CURSOR_MOVE) {
-		server->grab_x = cur_wx - toplevel->wx;
-		server->grab_y = cur_wy - toplevel->wy;
-	} else {
-		struct wlr_box geometry = tl_geometry(toplevel), *geo_box = &geometry;
-
-		double border_x = (toplevel->wx + geo_box->x) +
-			((edges & WLR_EDGE_RIGHT) ? geo_box->width : 0);
-		double border_y = (toplevel->wy + geo_box->y) +
-			((edges & WLR_EDGE_BOTTOM) ? geo_box->height : 0);
-		server->grab_x = cur_wx - border_x;
-		server->grab_y = cur_wy - border_y;
-
-		server->grab_geobox = *geo_box;
-		server->grab_geobox.x += lround(toplevel->wx);
-		server->grab_geobox.y += lround(toplevel->wy);
-
-		server->resize_edges = edges;
-	}
-}
-
-static void xdg_toplevel_request_move(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * move, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provided serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_move);
-	begin_interactive(toplevel, TINYWL_CURSOR_MOVE, 0);
-}
-
-static void xdg_toplevel_request_resize(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * resize, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provided serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
-	struct wlr_xdg_toplevel_resize_event *event = data;
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_resize);
-	begin_interactive(toplevel, TINYWL_CURSOR_RESIZE, event->edges);
-}
-
-static void xdg_toplevel_request_maximize(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to maximize itself,
-	 * typically because the user clicked on the maximize button on client-side
-	 * decorations. tinywl doesn't support maximization, but to conform to
-	 * xdg-shell protocol we still must send a configure.
-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply.
-	 * However, if the request was sent before an initial commit, we don't do
-	 * anything and let the client finish the initial surface setup. */
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, request_maximize);
-	if (toplevel->xdg_toplevel->base->initialized) {
-		toplevel_set_mode(toplevel, toplevel->xdg_toplevel->requested.maximized ? 1 : 0);
-		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base); /* a reply is due even if nothing changed */
-	}
-}
-
-static void xdg_toplevel_request_fullscreen(
-		struct wl_listener *listener, void *data) {
-	/* Just as with request_maximize, we must send a configure here. */
-	struct tinywl_toplevel *toplevel =
-		wl_container_of(listener, toplevel, request_fullscreen);
-	if (toplevel->xdg_toplevel->base->initialized) {
-		/* Fullscreen covers the bar too (games, video): Super+m brings the window back. */
-		bool on = toplevel->xdg_toplevel->requested.fullscreen;
-		toplevel_set_mode(toplevel, on ? 2 : 0);
-		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, on);
-		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
-	}
-}
-
-/* What every new window gets, whichever kind: a frame, a star to live in, and a place in it. */
-static void toplevel_init_common(struct tinywl_server *server, struct tinywl_toplevel *toplevel) {
-	toplevel->border = wlr_scene_rect_create(toplevel->scene_tree, 0, 0, BORDER_IDLE);
-	toplevel->glow = wlr_scene_shadow_create(toplevel->scene_tree, 0, 0, WIN_RADIUS, GLOW_SIGMA, GLOW_IDLE);
-	wlr_scene_node_lower_to_bottom(&toplevel->border->node);
-	wlr_scene_node_lower_to_bottom(&toplevel->glow->node);
-
-	/* SEIZA: a new window lands in the star you are currently in, cascaded from
-	 * that star's top-left so windows don't open stacked exactly on top of each
-	 * other. */
-	toplevel->star = server->current_star;
-	wl_list_insert(&server->all_toplevels, &toplevel->all_link);
-	int n = 0;
-	struct tinywl_toplevel *other;
-	wl_list_for_each(other, &server->toplevels, link) {
-		n += other->star == toplevel->star;
-	}
-	n %= 8;
-	toplevel->wx = toplevel->star->cx - STAR_W / 2.0 + 60 + 40 * n;
-	toplevel->wy = toplevel->star->cy - STAR_H / 2.0 + 60 + 40 * n;
-	layout_toplevel(toplevel);
-}
-
-/* Seiza draws the only frame there is, so every client is told to leave its own title bar and buttons off.
- * wlroots only takes the mode once the surface has had its initial commit, so a decoration that comes earlier waits for it. */
-struct deco_wait {
-	struct wl_listener commit, destroy;
-	struct wlr_xdg_toplevel_decoration_v1 *d;
-};
-
-static void deco_wait_free(struct deco_wait *w) {
-	wl_list_remove(&w->commit.link);
-	wl_list_remove(&w->destroy.link);
-	free(w);
-}
-
-static void deco_commit(struct wl_listener *listener, void *data) {
-	struct deco_wait *w = wl_container_of(listener, w, commit);
-	if (!w->d->toplevel->base->initial_commit)
-		return;
-	wlr_xdg_toplevel_decoration_v1_set_mode(w->d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-	deco_wait_free(w);
-}
-
-static void deco_destroy(struct wl_listener *listener, void *data) {
-	deco_wait_free(wl_container_of(listener, (struct deco_wait *)0, destroy));
-}
-
-static void server_new_decoration(struct wl_listener *listener, void *data) {
-	struct wlr_xdg_toplevel_decoration_v1 *d = data;
-	if (d->toplevel->base->initialized) {
-		wlr_xdg_toplevel_decoration_v1_set_mode(d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-		return;
-	}
-	struct deco_wait *w = calloc(1, sizeof *w);
-	if (!w)
-		return;
-	w->d = d;
-	w->commit.notify = deco_commit;
-	wl_signal_add(&d->toplevel->base->surface->events.commit, &w->commit);
-	w->destroy.notify = deco_destroy;
-	wl_signal_add(&d->events.destroy, &w->destroy);
-}
-
-static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
-	/* This event is raised when a client creates a new toplevel (application window). */
-	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
-	struct wlr_xdg_toplevel *xdg_toplevel = data;
-
-	/* Allocate a tinywl_toplevel for this surface */
-	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
-	toplevel->server = server;
-	toplevel->xdg_toplevel = xdg_toplevel;
-	toplevel->scene_tree =
-		wlr_scene_xdg_surface_create(toplevel->server->canvas, xdg_toplevel->base);
-	toplevel->scene_tree->node.data = toplevel;
-	xdg_toplevel->base->data = toplevel->scene_tree;
-
-	toplevel_init_common(server, toplevel);
-
-	/* Listen to the various events it can emit */
-	toplevel->map.notify = xdg_toplevel_map;
-	wl_signal_add(&xdg_toplevel->base->surface->events.map, &toplevel->map);
-	toplevel->unmap.notify = xdg_toplevel_unmap;
-	wl_signal_add(&xdg_toplevel->base->surface->events.unmap, &toplevel->unmap);
-	toplevel->commit.notify = xdg_toplevel_commit;
-	wl_signal_add(&xdg_toplevel->base->surface->events.commit, &toplevel->commit);
-
-	toplevel->destroy.notify = xdg_toplevel_destroy;
-	wl_signal_add(&xdg_toplevel->events.destroy, &toplevel->destroy);
-
-	/* cotd */
-	toplevel->request_move.notify = xdg_toplevel_request_move;
-	wl_signal_add(&xdg_toplevel->events.request_move, &toplevel->request_move);
-	toplevel->request_resize.notify = xdg_toplevel_request_resize;
-	wl_signal_add(&xdg_toplevel->events.request_resize, &toplevel->request_resize);
-	toplevel->request_maximize.notify = xdg_toplevel_request_maximize;
-	wl_signal_add(&xdg_toplevel->events.request_maximize, &toplevel->request_maximize);
-	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
-	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
-}
-
-/* ---- SEIZA X11 windows (XWayland) ---- */
-
-/* The X11 window has a Wayland surface from association until dissociation; map, unmap and
- * commit are listened to on it only meanwhile. */
-static void xwl_associate(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, associate);
-	struct wlr_surface *surface = tl->xsurface->surface;
-	tl->map.notify = xdg_toplevel_map;
-	wl_signal_add(&surface->events.map, &tl->map);
-	tl->unmap.notify = xdg_toplevel_unmap;
-	wl_signal_add(&surface->events.unmap, &tl->unmap);
-	tl->commit.notify = xdg_toplevel_commit;
-	wl_signal_add(&surface->events.commit, &tl->commit);
-	tl->x_attached = true;
-}
-
-static void xwl_dissociate(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, dissociate);
-	if (tl->x_attached) {
-		wl_list_remove(&tl->map.link);
-		wl_list_remove(&tl->unmap.link);
-		wl_list_remove(&tl->commit.link);
-		tl->x_attached = false;
-	}
-}
-
-/* The program asks for a size; the position is ours to give. */
-static void xwl_request_configure(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_configure);
-	struct wlr_xwayland_surface_configure_event *e = data;
-	wlr_xwayland_surface_configure(tl->xsurface, 0, 0, e->width, e->height);
-}
-
-static void xwl_request_move(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_move);
-	begin_interactive(tl, TINYWL_CURSOR_MOVE, 0);
-}
-
-static void xwl_request_resize(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_resize);
-	struct wlr_xwayland_resize_event *e = data;
-	begin_interactive(tl, TINYWL_CURSOR_RESIZE, e->edges);
-}
-
-static void xwl_request_maximize(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_maximize);
-	toplevel_set_mode(tl, tl->xsurface->maximized_horz && tl->xsurface->maximized_vert ? 1 : 0);
-}
-
-static void xwl_request_activate(struct wl_listener *listener, void *data) {
-	struct tinywl_toplevel *tl = wl_container_of(listener, tl, request_activate);
-	if (tl_ready(tl) && tl->star == tl->server->current_star) { /* a program in another star does not pull you there */
-		focus_toplevel(tl);
-	}
-}
-
-static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
-	/* Fullscreen covers the bar, as for Wayland windows. */
-	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
-	toplevel_set_mode(toplevel, toplevel->xsurface->fullscreen ? 2 : 0);
-}
-
-static void server_new_xwayland_toplevel(struct tinywl_server *server, struct wlr_xwayland_surface *xs) {
-	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
-	toplevel->server = server;
-	toplevel->xsurface = xs;
-	toplevel->scene_tree = wlr_scene_tree_create(server->canvas);
-	toplevel->scene_tree->node.data = toplevel;
-	xs->data = toplevel;
-	toplevel_init_common(server, toplevel);
-
-	toplevel->associate.notify = xwl_associate;
-	wl_signal_add(&xs->events.associate, &toplevel->associate);
-	toplevel->dissociate.notify = xwl_dissociate;
-	wl_signal_add(&xs->events.dissociate, &toplevel->dissociate);
-	toplevel->destroy.notify = xdg_toplevel_destroy;
-	wl_signal_add(&xs->events.destroy, &toplevel->destroy);
-	toplevel->request_configure.notify = xwl_request_configure;
-	wl_signal_add(&xs->events.request_configure, &toplevel->request_configure);
-	toplevel->request_move.notify = xwl_request_move;
-	wl_signal_add(&xs->events.request_move, &toplevel->request_move);
-	toplevel->request_resize.notify = xwl_request_resize;
-	wl_signal_add(&xs->events.request_resize, &toplevel->request_resize);
-	toplevel->request_maximize.notify = xwl_request_maximize;
-	wl_signal_add(&xs->events.request_maximize, &toplevel->request_maximize);
-	toplevel->request_fullscreen.notify = xwl_request_fullscreen;
-	wl_signal_add(&xs->events.request_fullscreen, &toplevel->request_fullscreen);
-	toplevel->request_activate.notify = xwl_request_activate;
-	wl_signal_add(&xs->events.request_activate, &toplevel->request_activate);
-	if (xs->surface) { /* it was associated before we heard of it */
-		xwl_associate(&toplevel->associate, NULL);
-	}
-}
-
-/* ...and the override-redirect ones: menus and tooltips, drawn where their program puts them. */
-/* The scene resets the drawn size on every commit: put the zoom back, after it. */
-static void um_commit(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, commit);
-	layout_unmanaged(u);
-}
-
-static void um_map(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, map);
-	u->surf = wlr_scene_surface_create(u->tree, u->xs->surface);
-	/* It belongs to the window under the pointer (a tooltip, a menu just clicked), else the focused one. */
-	struct tinywl_toplevel *owner = NULL, *t;
-	struct wlr_surface *under = u->server->seat->pointer_state.focused_surface;
-	wl_list_for_each(t, &u->server->toplevels, link) {
-		if (under && tl_surface(t) == under) {
-			owner = t;
-			break;
-		}
-		if (!owner) {
-			owner = t; /* the list starts with the focused window */
-		}
-	}
-	u->ax = owner ? owner->wx : 0;
-	u->ay = owner ? owner->wy : 0;
-	u->commit.notify = um_commit;
-	wl_signal_add(&u->xs->surface->events.commit, &u->commit); /* after the scene's own */
-	u->committing = true;
-	wlr_scene_node_raise_to_top(&u->tree->node);
-	layout_unmanaged(u);
-}
-
-static void um_unmap(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, unmap);
-	if (u->committing) {
-		wl_list_remove(&u->commit.link);
-		u->committing = false;
-	}
-	if (u->surf) {
-		wlr_scene_node_destroy(&u->surf->buffer->node);
-		u->surf = NULL;
-	}
-}
-
-static void um_associate(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, associate);
-	u->map.notify = um_map;
-	wl_signal_add(&u->xs->surface->events.map, &u->map);
-	u->unmap.notify = um_unmap;
-	wl_signal_add(&u->xs->surface->events.unmap, &u->unmap);
-	u->attached = true;
-}
-
-static void um_dissociate(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, dissociate);
-	if (u->attached) {
-		wl_list_remove(&u->map.link);
-		wl_list_remove(&u->unmap.link);
-		u->attached = false;
-	}
-}
-
-static void um_moved(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, set_geometry);
-	layout_unmanaged(u);
-}
-
-static void um_request_configure(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, request_configure);
-	struct wlr_xwayland_surface_configure_event *e = data;
-	wlr_xwayland_surface_configure(u->xs, e->x, e->y, e->width, e->height); /* it knows where it wants to be */
-	layout_unmanaged(u);
-}
-
-static void um_destroy(struct wl_listener *listener, void *data) {
-	struct xunmanaged *u = wl_container_of(listener, u, destroy);
-	if (u->committing) {
-		wl_list_remove(&u->commit.link);
-	}
-	if (u->attached) {
-		wl_list_remove(&u->map.link);
-		wl_list_remove(&u->unmap.link);
-	}
-	wl_list_remove(&u->associate.link);
-	wl_list_remove(&u->dissociate.link);
-	wl_list_remove(&u->destroy.link);
-	wl_list_remove(&u->set_geometry.link);
-	wl_list_remove(&u->request_configure.link);
-	wl_list_remove(&u->link);
-	wlr_scene_node_destroy(&u->tree->node);
-	free(u);
-}
-
-static void server_new_xwayland_unmanaged(struct tinywl_server *server, struct wlr_xwayland_surface *xs) {
-	struct xunmanaged *u = calloc(1, sizeof(*u));
-	u->server = server;
-	u->xs = xs;
-	u->tree = wlr_scene_tree_create(server->xtop);
-	wl_list_insert(server->unmanaged.prev, &u->link);
-	u->associate.notify = um_associate;
-	wl_signal_add(&xs->events.associate, &u->associate);
-	u->dissociate.notify = um_dissociate;
-	wl_signal_add(&xs->events.dissociate, &u->dissociate);
-	u->destroy.notify = um_destroy;
-	wl_signal_add(&xs->events.destroy, &u->destroy);
-	u->set_geometry.notify = um_moved;
-	wl_signal_add(&xs->events.set_geometry, &u->set_geometry);
-	u->request_configure.notify = um_request_configure;
-	wl_signal_add(&xs->events.request_configure, &u->request_configure);
-	if (xs->surface) {
-		um_associate(&u->associate, NULL);
-	}
-}
-
-static void server_new_xwayland_surface(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, new_xwayland_surface);
-	struct wlr_xwayland_surface *xs = data;
-	if (xs->override_redirect) {
-		server_new_xwayland_unmanaged(server, xs);
-	} else {
-		server_new_xwayland_toplevel(server, xs);
-	}
-}
-
-/* Xwayland is up: it shares our seat (keyboard, clipboard) and shows our pointer over its windows. */
-static void xwayland_ready(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, xwayland_ready);
-	wlr_xwayland_set_seat(server->xwayland, server->seat);
-	struct wlr_xcursor *xc = wlr_xcursor_manager_get_xcursor(server->cursor_mgr, "default", 1);
-	if (xc && xc->image_count > 0) {
-		struct wlr_xcursor_image *img = xc->images[0];
-		wlr_xwayland_set_cursor(server->xwayland, wlr_xcursor_image_get_buffer(img), img->hotspot_x, img->hotspot_y);
-	}
-	wlr_log(WLR_INFO, "seiza: xwayland ready on DISPLAY=%s", server->xwayland->display_name);
-}
-
-/* Keyboard focus to a layer surface (launcher, menu), deactivating the window that had it. */
-static void layer_focus(struct tinywl_server *server, struct wlr_surface *surface) {
-	if (server->locked) {
-		return;
-	}
-	struct wlr_surface *prev = server->seat->keyboard_state.focused_surface;
-	if (prev) {
-		surface_deactivate(prev);
-	}
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	if (kb) {
-		wlr_seat_keyboard_notify_enter(server->seat, surface, kb->keycodes, kb->num_keycodes, &kb->modifiers);
-	}
-}
-
-/* Place every layer surface against its output, top layer first so that
- * exclusive zones stack the way clients expect.
- * shortcut: the usable area they leave over is ignored, windows float on the
- * canvas under bars; upgrade if windows should avoid bars. */
-static void layers_arrange(struct tinywl_server *server) {
-	struct tinywl_output *o;
-	wl_list_for_each(o, &server->outputs, link) {
-		struct wlr_box full = {0}, usable;
-		wlr_output_layout_get_box(server->output_layout, o->wlr_output, &full);
-		usable = full;
-		for (int layer = 3; layer >= 0; layer--) {
-			struct seiza_layer *sl;
-			wl_list_for_each(sl, &server->layer_surfaces, link) {
-				if (sl->surf->output == o->wlr_output && (int)sl->surf->current.layer == layer) {
-					wlr_scene_layer_surface_v1_configure(sl->scene, &full, &usable);
-				}
-			}
-		}
-		if (o->link.prev == &server->outputs) { /* only the primary monitor sets what windows keep clear of */
-			server->full = full;
-			server->usable = usable;
-		}
-	}
-}
-
-static void layer_commit(struct wl_listener *listener, void *data) {
-	struct seiza_layer *sl = wl_container_of(listener, sl, commit);
-	if (!sl->surf->output) {
-		return;
-	}
-	wlr_scene_node_reparent(&sl->scene->tree->node, sl->server->layers[sl->surf->current.layer]);
-	layers_arrange(sl->server);
-}
-
-static void layer_map(struct wl_listener *listener, void *data) {
-	struct seiza_layer *sl = wl_container_of(listener, sl, map);
-	struct wlr_layer_surface_v1 *ls = sl->surf;
-	if (ls->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP &&
-			ls->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) {
-		layer_focus(sl->server, ls->surface);
-	}
-}
-
-static void layer_unmap(struct wl_listener *listener, void *data) {
-	struct seiza_layer *sl = wl_container_of(listener, sl, unmap);
-	struct tinywl_server *server = sl->server;
-	if (server->seat->keyboard_state.focused_surface == sl->surf->surface &&
-			!wl_list_empty(&server->toplevels)) {
-		focus_toplevel(wl_container_of(server->toplevels.next, (struct tinywl_toplevel *)NULL, link));
-	}
-}
-
-static void layer_destroy(struct wl_listener *listener, void *data) {
-	struct seiza_layer *sl = wl_container_of(listener, sl, destroy);
-	wl_list_remove(&sl->commit.link);
-	wl_list_remove(&sl->map.link);
-	wl_list_remove(&sl->unmap.link);
-	wl_list_remove(&sl->destroy.link);
-	wl_list_remove(&sl->link);
-	free(sl);
-}
-
-static void server_new_layer_surface(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, new_layer_surface);
-	struct wlr_layer_surface_v1 *ls = data;
-	if (!ls->output) { /* the client let us pick */
-		if (wl_list_empty(&server->outputs)) {
-			wlr_layer_surface_v1_destroy(ls);
-			return;
-		}
-		struct tinywl_output *o = wl_container_of(server->outputs.next, o, link); /* the primary monitor... */
-		const char *on = ls->namespace ? strchr(ls->namespace, '@') : NULL; /* "seiza-starfield@HDMI-A-1": asks for that monitor */
-		if (on) {
-			struct tinywl_output *w;
-			wl_list_for_each(w, &server->outputs, link) {
-				if (!strcmp(w->wlr_output->name, on + 1)) {
-					o = w;
-				}
-			}
-		}
-		bool fixed = on || (ls->namespace && (!strcmp(ls->namespace, "seiza-bar") || !strcmp(ls->namespace, "seiza-starfield") || !strcmp(ls->namespace, "seiza-widgets")));
-		struct wlr_output *at = fixed ? NULL : wlr_output_layout_output_at(server->output_layout, server->cursor->x, server->cursor->y);
-		ls->output = at ? at : o->wlr_output; /* ...but pop-ups (panel, launcher, menus) open where the pointer is */
-	}
-	struct seiza_layer *sl = calloc(1, sizeof(*sl));
-	sl->server = server;
-	sl->surf = ls;
-	sl->scene = wlr_scene_layer_surface_v1_create(server->layers[ls->pending.layer], ls);
-	ls->data = sl->scene->tree; /* popups of this surface attach here */
-	wl_list_insert(&server->layer_surfaces, &sl->link);
-	sl->commit.notify = layer_commit;
-	wl_signal_add(&ls->surface->events.commit, &sl->commit);
-	sl->map.notify = layer_map;
-	wl_signal_add(&ls->surface->events.map, &sl->map);
-	sl->unmap.notify = layer_unmap;
-	wl_signal_add(&ls->surface->events.unmap, &sl->unmap);
-	sl->destroy.notify = layer_destroy;
-	wl_signal_add(&ls->events.destroy, &sl->destroy);
-}
-
-/* ---- SEIZA session lock ---- */
-
-static void lock_new_surface(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, lock_new_surface);
-	struct wlr_session_lock_surface_v1 *ls = data;
-	struct wlr_box b = {0};
-	wlr_output_layout_get_box(server->output_layout, ls->output, &b);
-	struct wlr_scene_surface *ss = wlr_scene_surface_create(server->lock_tree, ls->surface);
-	wlr_scene_node_set_position(&ss->buffer->node, b.x, b.y);
-	wlr_session_lock_surface_v1_configure(ls, b.width, b.height);
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	if (kb) {
-		wlr_seat_keyboard_notify_enter(server->seat, ls->surface, kb->keycodes, kb->num_keycodes, &kb->modifiers);
-	}
-}
-
-static void lock_unlock(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, lock_unlock);
-	server->locked = false;
-	if (server->lock_bg) {
-		wlr_scene_node_destroy(&server->lock_bg->node);
-		server->lock_bg = NULL;
-	}
-	wlr_seat_keyboard_notify_clear_focus(server->seat);
-	if (!wl_list_empty(&server->toplevels)) {
-		focus_toplevel(wl_container_of(server->toplevels.next, (struct tinywl_toplevel *)NULL, link));
-	}
-	wlr_log(WLR_INFO, "seiza: unlocked");
-}
-
-/* The lock client went away. If it did not unlock first the session stays locked
- * (black) until a new lock client takes over, as the protocol requires. */
-static void lock_destroy(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, lock_destroy);
-	wl_list_remove(&server->lock_new_surface.link);
-	wl_list_remove(&server->lock_unlock.link);
-	wl_list_remove(&server->lock_destroy.link);
-	server->lock = NULL;
-}
-
-static void server_new_lock(struct wl_listener *listener, void *data) {
-	struct tinywl_server *server = wl_container_of(listener, server, new_lock);
-	struct wlr_session_lock_v1 *lock = data;
-	if (server->lock) { /* already locked by a live client */
-		wlr_session_lock_v1_destroy(lock);
-		return;
-	}
-	server->lock = lock;
-	server->locked = true;
-	if (!server->lock_bg) {
-		struct wlr_box b = {0};
-		wlr_output_layout_get_box(server->output_layout, NULL, &b);
-		float black[4] = {0, 0, 0, 1};
-		server->lock_bg = wlr_scene_rect_create(server->lock_tree, b.width, b.height, black);
-		wlr_scene_node_set_position(&server->lock_bg->node, b.x, b.y);
-	}
-	wlr_seat_keyboard_notify_clear_focus(server->seat);
-	wlr_seat_pointer_clear_focus(server->seat);
-	server->lock_new_surface.notify = lock_new_surface;
-	wl_signal_add(&lock->events.new_surface, &server->lock_new_surface);
-	server->lock_unlock.notify = lock_unlock;
-	wl_signal_add(&lock->events.unlock, &server->lock_unlock);
-	server->lock_destroy.notify = lock_destroy;
-	wl_signal_add(&lock->events.destroy, &server->lock_destroy);
-	wlr_session_lock_v1_send_locked(lock); /* the black rect already covers every output */
-	wlr_log(WLR_INFO, "seiza: locked");
-}
-
-static void xdg_popup_commit(struct wl_listener *listener, void *data) {
-	/* Called when a new surface state is committed. */
-	struct tinywl_popup *popup = wl_container_of(listener, popup, commit);
-
-	if (popup->xdg_popup->base->initial_commit) {
-		/* When an xdg_surface performs an initial commit, the compositor must
-		 * reply with a configure so the client can map the surface.
-		 * tinywl sends an empty configure. A more sophisticated compositor
-		 * might change an xdg_popup's geometry to ensure it's not positioned
-		 * off-screen, for example. */
-		wlr_xdg_surface_schedule_configure(popup->xdg_popup->base);
-	}
-}
-
-static void xdg_popup_destroy(struct wl_listener *listener, void *data) {
-	/* Called when the xdg_popup is destroyed. */
-	struct tinywl_popup *popup = wl_container_of(listener, popup, destroy);
-
-	wl_list_remove(&popup->commit.link);
-	wl_list_remove(&popup->destroy.link);
-
-	free(popup);
-}
-
-static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
-	/* This event is raised when a client creates a new popup. */
-	struct wlr_xdg_popup *xdg_popup = data;
-
-	struct tinywl_popup *popup = calloc(1, sizeof(*popup));
-	popup->xdg_popup = xdg_popup;
-
-	/* We must add xdg popups to the scene graph so they get rendered. The
-	 * wlroots scene graph provides a helper for this, but to use it we must
-	 * provide the proper parent scene node of the xdg popup. To enable this,
-	 * we always set the user data field of xdg_surfaces to the corresponding
-	 * scene node. */
-	struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(xdg_popup->parent);
-	struct wlr_layer_surface_v1 *lparent = wlr_layer_surface_v1_try_from_wlr_surface(xdg_popup->parent);
-	assert(parent != NULL || lparent != NULL); /* popups of layer surfaces (menus, tooltips) hang off the layer's tree */
-	struct wlr_scene_tree *parent_tree = parent ? parent->data : lparent->data;
-	xdg_popup->base->data = wlr_scene_xdg_surface_create(parent_tree, xdg_popup->base);
-
-	popup->commit.notify = xdg_popup_commit;
-	wl_signal_add(&xdg_popup->base->surface->events.commit, &popup->commit);
-
-	popup->destroy.notify = xdg_popup_destroy;
-	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
-}
 
 /* Sends stderr (ours and every program we spawn) to <state dir>/seiza/seiza.log, keeping the
  * previous run as seiza.log.old. SEIZA_LOG=stderr opts out. Failure leaves stderr untouched. */
