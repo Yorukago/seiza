@@ -80,7 +80,7 @@ impl Layout {
 
 /// Scale a premultiplied pixel by `k`/256, all four channels at once.
 fn fade(p: u32, k: u32) -> u32 {
-    (((p & 0x00FF_00FF) * k >> 8) & 0x00FF_00FF) | (((p >> 8 & 0x00FF_00FF) * k) & 0xFF00_FF00)
+    ((((p & 0x00FF_00FF) * k) >> 8) & 0x00FF_00FF) | (((p >> 8 & 0x00FF_00FF) * k) & 0xFF00_FF00)
 }
 
 /// Draw the sprite `src` onto `dst` with its middle at (cx, cy), scaled by `s`, at opacity `a`
@@ -165,7 +165,7 @@ fn glow(cv: &mut Canvas, x: f32, y: f32, r: f32, c: Rgba) {
 fn thread(cv: &mut Canvas, a: (f32, f32), b: (f32, f32), seed: usize, c: Rgba) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len = dx.hypot(dy).max(1.0);
-    let bend = len * (0.06 + (seed % 4) as f32 * 0.015) * if seed % 2 == 0 { 1.0 } else { -1.0 };
+    let bend = len * (0.06 + (seed % 4) as f32 * 0.015) * if seed.is_multiple_of(2) { 1.0 } else { -1.0 };
     let ctrl = ((a.0 + b.0) / 2.0 - dy / len * bend, (a.1 + b.1) / 2.0 + dx / len * bend);
     for pass in 0..2 {
         let steps = (len / 1.6).ceil() as i32;

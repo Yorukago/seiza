@@ -13,7 +13,10 @@ fn main() -> zbus::Result<()> {
     // One per user: it outlives a restarted session, and every copy would run the lock.
     let _only = zbus::blocking::Connection::session().and_then(|c| c.request_name_with_flags("org.seiza.Sleep", zbus::fdo::RequestNameFlags::DoNotQueue.into()).map(|_| c)); // a taken name is an error, not a place in a queue
     if let Err(e) = &_only {
-        return Ok(eprintln!("seiza-sleep: already running ({e})"));
+        return {
+            eprintln!("seiza-sleep: already running ({e})");
+            Ok(())
+        };
     }
     let conn = Connection::system()?;
     let logind = Proxy::new(&conn, "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager")?;

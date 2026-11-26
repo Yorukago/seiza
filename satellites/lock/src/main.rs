@@ -269,11 +269,10 @@ impl SeatHandler for Lock {
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
-        if cap == Capability::Keyboard {
-            if let Some(k) = self.keyboard.take() {
+        if cap == Capability::Keyboard
+            && let Some(k) = self.keyboard.take() {
                 k.release();
             }
-        }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }

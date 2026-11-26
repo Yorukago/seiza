@@ -460,7 +460,7 @@ impl Ui {
     fn thread(cv: &mut Canvas, a: (f32, f32), b: (f32, f32), seed: u64, c: Rgba) {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let len = dx.hypot(dy).max(1.0);
-        let bend = len * (0.12 + (seed % 10) as f32 * 0.01) * if seed % 2 == 0 { 1.0 } else { -1.0 };
+        let bend = len * (0.12 + (seed % 10) as f32 * 0.01) * if seed.is_multiple_of(2) { 1.0 } else { -1.0 };
         let ctrl = ((a.0 + b.0) / 2.0 - dy / len * bend, (a.1 + b.1) / 2.0 + dx / len * bend);
         for pass in 0..2 {
             let steps = (len / 2.5) as i32;

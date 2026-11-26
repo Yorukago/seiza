@@ -483,12 +483,11 @@ impl Bar {
             }
         }
         let polled = self.polled.lock().unwrap().clone();
-        if let Some(p) = polled {
-            if (&p.media, p.mic, p.net, p.bt, p.volume, p.unread) != (&self.media, self.mic, self.net, self.bt, self.volume, self.unread) {
+        if let Some(p) = polled
+            && (&p.media, p.mic, p.net, p.bt, p.volume, p.unread) != (&self.media, self.mic, self.net, self.bt, self.volume, self.unread) {
                 (self.media, self.mic, self.net, self.bt, self.volume, self.unread) = (p.media, p.mic, p.net, p.bt, p.volume, p.unread);
                 self.dirty = true;
             }
-        }
         if self.show.autohide && !self.hidden && self.left_at.is_some_and(|t| t.elapsed() > HIDE_AFTER) {
             self.set_hidden(true);
         }
@@ -548,12 +547,11 @@ impl LayerShellHandler for Bar {
         self.configured = true;
         self.dirty = true;
         // only the islands take the pointer: what floats under them (a star's name) lets clicks through
-        if !self.hidden {
-            if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
+        if !self.hidden
+            && let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
                 region.add(0, 0, self.width as i32, ISLAND_H as i32);
                 self.layer.wl_surface().set_input_region(Some(region.wl_region()));
             }
-        }
     }
 }
 
@@ -568,11 +566,10 @@ impl SeatHandler for Bar {
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
-        if cap == Capability::Pointer {
-            if let Some(p) = self.pointer.take() {
+        if cap == Capability::Pointer
+            && let Some(p) = self.pointer.take() {
                 p.release();
             }
-        }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
@@ -611,8 +608,8 @@ impl PointerHandler for Bar {
                     continue;
                 }
             }
-            if let PointerEventKind::Press { button: BTN_LEFT, .. } = e.kind {
-                if let Some(&(_, _, act)) = self.hits.iter().find(|&&(a, b, _)| x >= a && x < b) {
+            if let PointerEventKind::Press { button: BTN_LEFT, .. } = e.kind
+                && let Some(&(_, _, act)) = self.hits.iter().find(|&&(a, b, _)| x >= a && x < b) {
                     match act {
                         Act::Goto(i) => drop(seiza_common::command(&format!("seiza goto {}", i + 1))),
                         Act::Media => drop(Command::new("playerctl").arg("play-pause").spawn()),
@@ -625,7 +622,6 @@ impl PointerHandler for Bar {
                     }
                     continue;
                 }
-            }
             match e.kind {
                 PointerEventKind::Press { button: BTN_LEFT, .. } if on_volume => {
                     wpctl(&["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);

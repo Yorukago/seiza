@@ -594,14 +594,14 @@ impl Ui {
         let artist = fit(&mut self.t14, &m.artist, room);
         self.t14.draw(cv, tx, 102.0, &artist, rgba(p.text, 0.6));
         let (bx, by, ink) = (x + cw / 2.0, MEDIA_BTN_Y, rgba(p.text, 0.8));
-        cv.shape(bx - 44.0, by, 8.0, ink, |px, py| { let u = px - (bx - 44.0); (u >= -8.0 && u <= -5.0) || (u > -5.0 && (py - by).abs() <= (u + 5.0) * 0.6) });
+        cv.shape(bx - 44.0, by, 8.0, ink, |px, py| { let u = px - (bx - 44.0); (-8.0..=-5.0).contains(&u) || (u > -5.0 && (py - by).abs() <= (u + 5.0) * 0.6) });
         if m.playing {
             cv.round_rect(bx - 7.0, by - 8.0, 5.0, 16.0, 1.5, ink);
             cv.round_rect(bx + 2.0, by - 8.0, 5.0, 16.0, 1.5, ink);
         } else {
             cv.shape(bx, by, 9.0, ink, |px, py| px - bx >= -6.0 && px - bx <= 8.0 && (py - by).abs() <= (8.0 - (px - bx)) * 0.57);
         }
-        cv.shape(bx + 44.0, by, 8.0, ink, |px, py| { let u = px - (bx + 44.0); (u >= 5.0 && u <= 8.0) || (u <= 5.0 && u >= -8.0 && (py - by).abs() <= (5.0 - u) * 0.6) });
+        cv.shape(bx + 44.0, by, 8.0, ink, |px, py| { let u = px - (bx + 44.0); (5.0..=8.0).contains(&u) || ((-8.0..=5.0).contains(&u) && (py - by).abs() <= (5.0 - u) * 0.6) });
         if m.len > 0 {
             // browsers often report no length and a stuck position, so there is no bar without a length
             cv.round_rect(x + 24.0, 125.0, room, 6.0, 3.0, rgba(p.dust, 0.9));

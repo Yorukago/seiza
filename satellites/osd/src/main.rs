@@ -98,7 +98,7 @@ fn render(l: Level, frac: f32, vis: f32, t: f32, text: &mut Text) -> Canvas {
     text.draw(&mut cv, W as f32 - 32.0 - lw, cy + 5.0, &label, ink);
     let k = (vis.clamp(0.0, 1.0) * 256.0) as u32;
     for px in cv.px.iter_mut() {
-        let ch = |shift: u32| (*px >> shift & 0xFF) * k >> 8;
+        let ch = |shift: u32| ((*px >> shift & 0xFF) * k) >> 8;
         *px = ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
     }
     cv
@@ -268,12 +268,11 @@ fn main() {
             let now = read();
             let changed = [(now.0, last.0), (now.1, last.1)].into_iter().find_map(|(n, o)| n.filter(|n| Some(*n) != o));
             last = now;
-            if let Some(l) = changed {
-                if tx.send(Msg(l)).is_ok() {
+            if let Some(l) = changed
+                && tx.send(Msg(l)).is_ok() {
                     poll_conn.display().sync(&poll_qh, Wake);
                     let _ = poll_conn.flush();
                 }
-            }
         }
     });
 

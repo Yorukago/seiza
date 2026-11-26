@@ -72,7 +72,7 @@ struct Msg {
 fn thread(px: &mut [u32], w: usize, h: usize, a: (f32, f32), b: (f32, f32), seed: u64, color: [f32; 3]) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len = dx.hypot(dy).max(1.0);
-    let bend = len * (0.08 + (seed % 5) as f32 * 0.02) * if seed % 2 == 0 { 1.0 } else { -1.0 };
+    let bend = len * (0.08 + (seed % 5) as f32 * 0.02) * if seed.is_multiple_of(2) { 1.0 } else { -1.0 };
     let ctrl = ((a.0 + b.0) / 2.0 - dy / len * bend, (a.1 + b.1) / 2.0 + dx / len * bend);
     for pass in 0..2 {
         let steps = (len / 1.6).ceil() as i32; // close enough that the dots read as one line
@@ -305,7 +305,7 @@ impl Starfield {
                         let (x, y) = ((sx - cx) * k + w as f32 / 2.0, (sy - cy) * k + h as f32 / 2.0);
                         let color = seiza_common::STAR_COLORS[(unit(hv, 32) * 5.999) as usize];
                         let size = radius * (0.6 + unit(hv, 40) * 0.9);
-                        let tw = 0.65 + 0.35 * (t * (0.8 + unit(hv, 48) * 2.2) + unit(hv, 56) * 6.28).sin();
+                        let tw = 0.65 + 0.35 * (t * (0.8 + unit(hv, 48) * 2.2) + unit(hv, 56) * std::f32::consts::TAU).sin();
                         let big = unit(hv, 24) > 0.88;
                         glow(&mut self.frame, w, h, x, y, size * if big { 1.3 } else { 1.0 }, color, bright * tw, big && li > 0);
                     }

@@ -99,7 +99,7 @@ fn fit(t: &mut Text, s: &str, max_w: f32, lines: usize) -> Vec<String> {
 fn fade(cv: &mut Canvas, y0: usize, y1: usize, k: f32) {
     let k = (k.clamp(0.0, 1.0) * 256.0) as u32;
     for px in cv.px[y0 * cv.w..y1.min(cv.h) * cv.w].iter_mut() {
-        let ch = |shift: u32| (*px >> shift & 0xFF) * k >> 8;
+        let ch = |shift: u32| ((*px >> shift & 0xFF) * k) >> 8;
         *px = ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
     }
 }
@@ -333,11 +333,10 @@ impl SeatHandler for Notify {
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
-        if cap == Capability::Pointer {
-            if let Some(p) = self.pointer.take() {
+        if cap == Capability::Pointer
+            && let Some(p) = self.pointer.take() {
                 p.release();
             }
-        }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }

@@ -37,7 +37,7 @@ pub fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -99,7 +99,7 @@ pub struct Voyager {
 impl Voyager {
     pub fn new() -> Voyager {
         let r = readout(now_secs());
-        std::thread::spawn(|| seiza_common::voyager::refresh_if_stale()); // a cache over a day old is renewed for the next opening
+        std::thread::spawn(seiza_common::voyager::refresh_if_stale); // a cache over a day old is renewed for the next opening
         Voyager { r }
     }
 }

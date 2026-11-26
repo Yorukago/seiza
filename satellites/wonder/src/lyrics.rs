@@ -123,7 +123,7 @@ mod tests {
         let l = pick(json, 253).unwrap();
         assert_eq!((l.synced, l.lines), (true, vec![(2.0, "right".to_string())]));
         let plain = pick(&json.replace("[00:02.00] right", ""), 253).unwrap();
-        assert_eq!(plain.synced, false, "no timed lines in range: the plain ones");
+        assert!(!plain.synced, "no timed lines in range: the plain ones");
         assert_eq!(pick(json, 400), None, "nothing about that long");
         assert_eq!(pick("not json", 10), None);
     }

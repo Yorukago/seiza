@@ -803,14 +803,13 @@ smithay_client_toolkit::delegate_dispatch2!(Panel);
 /// Toggle: a running panel is closed by running it again (`open` leaves it be); returns true if we should quit.
 fn single_instance(open_only: bool) -> bool {
     let path = format!("{}/seiza-panel.pid", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()));
-    if let Some(pid) = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
-        if std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "seiza-panel") && pid != std::process::id() {
+    if let Some(pid) = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok())
+        && std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "seiza-panel") && pid != std::process::id() {
             if !open_only {
                 let _ = Command::new("kill").arg(pid.to_string()).status();
             }
             return true;
         }
-    }
     let _ = std::fs::write(&path, std::process::id().to_string());
     false
 }

@@ -138,7 +138,7 @@ fn refresh_forever(conn: Connection, regs: Arc<Mutex<Vec<(String, String)>>>, sh
 fn load_icon(name: &str, theme: &str, pixmap: Option<(i32, i32, Vec<u8>)>) -> Vec<u32> {
     if let Some((w, h, b)) = pixmap.filter(|(w, h, b)| *w > 0 && *h > 0 && b.len() >= (*w * *h * 4) as usize) {
         // ARGB32 in network order: a, r, g, b bytes
-        let argb: Vec<[u8; 4]> = b.chunks_exact(4).map(|c| [c[1], c[2], c[3], c[0]]).collect();
+        let argb: Vec<[u8; 4]> = b.as_chunks::<4>().0.iter().map(|c| [c[1], c[2], c[3], c[0]]).collect();
         return shrink(&argb, w as usize, h as usize);
     }
     find_png(name, theme).and_then(|p| decode_png(&p)).map(|(w, h, rgba)| shrink(&rgba, w, h)).unwrap_or_default()
@@ -199,7 +199,7 @@ fn shrink(src: &[[u8; 4]], w: usize, h: usize) -> Vec<u32> {
                 }
             }
             let n = ((x1 - x0) * (y1 - y0)) as u32;
-            out.push(acc[3] / n << 24 | acc[0] / n << 16 | acc[1] / n << 8 | acc[2] / n);
+            out.push((acc[3] / n) << 24 | (acc[0] / n) << 16 | (acc[1] / n) << 8 | (acc[2] / n));
         }
     }
     out

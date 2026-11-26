@@ -106,13 +106,12 @@ fn start_feeds(cards: &[String], feeds: std::sync::Arc<std::sync::Mutex<Feeds>>)
         std::thread::spawn(move || {
             let src = seiza_common::config::get("calendar", "source").unwrap_or_default();
             loop {
-                if !src.trim().is_empty() {
-                    if let Some(text) = feeds::read_calendar(&src) {
+                if !src.trim().is_empty()
+                    && let Some(text) = feeds::read_calendar(&src) {
                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
                         let rows = feeds::upcoming(feeds::parse_ics(&text), now, 4).iter().map(|e| (feeds::when_text(e), e.what.clone())).collect();
                         feeds.lock().unwrap().agenda = Some(rows);
                     }
-                }
                 std::thread::sleep(Duration::from_secs(5 * 60)); // a file is cheap; a calendar address is fetched again after this
             }
         });
@@ -297,11 +296,10 @@ impl SeatHandler for Widgets {
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
-        if cap == Capability::Pointer {
-            if let Some(p) = self.pointer.take() {
+        if cap == Capability::Pointer
+            && let Some(p) = self.pointer.take() {
                 p.release();
             }
-        }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }

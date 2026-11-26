@@ -108,7 +108,7 @@ pub fn key_items(text: &str) -> Vec<Item> {
         let mut parts: Vec<&str> = combo.split('+').collect();
         let key = parts.pop().unwrap_or("").to_string();
         let mods: Vec<String> = parts.iter().map(|m| m.to_string()).collect();
-        let extra = if cmd.starts_with("seiza goto ") { &cmd["seiza goto ".len()..] } else { "" };
+        let extra = cmd.strip_prefix("seiza goto ").unwrap_or("");
         match rows.iter_mut().find(|r| r.group == group && r.what == what && r.mods == mods) {
             Some(r) => r.keys.push(key),
             None => rows.push(Row { group, what: what.to_string(), alone: format!("{what} {extra}").trim().to_string(), mods, keys: vec![key] }),

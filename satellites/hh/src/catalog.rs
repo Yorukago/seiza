@@ -114,7 +114,7 @@ pub fn toggle_fav(name: &str) -> std::io::Result<bool> {
 }
 
 fn toggle_in(path: &std::path::Path, name: &str) -> std::io::Result<bool> {
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let old = std::fs::read_to_string(path).unwrap_or_default();
     let mut names: Vec<&str> = old.lines().filter(|l| !l.trim().is_empty()).collect();
     let was = names.iter().any(|n| n.trim() == name);
     if was {
