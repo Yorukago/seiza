@@ -11,3 +11,13 @@ satellites/*/target/
 satellites/target/
 inspo/*.pdf
 src/figures-builtin.h
+
+# kept locally, not published
+inspo/
+tests/
+spike/
+things-to-do.txt
+NOTES-*.txt
+docs/*-design.md
+docs/plans/
+docs/superpowers/
