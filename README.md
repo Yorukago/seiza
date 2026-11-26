@@ -46,20 +46,20 @@ rebuilds, installs and restarts them.
 <!-- TODO: the 5-10 keybindings people need first (Super+... ), or point to seiza-help -->
 (for sake of ease of use, ill call the SUPER key the meta key)
 
-meta + H           help
-meta + L           launcher (+ tab inside is star listed)
-meta + V           clipboard
-meta + G           HueHaven (refer to my other github repo)
+- meta + H           help
+- meta + L           launcher (+ tab inside is star listed)
+- meta + V           clipboard
+- meta + G           HueHaven (refer to my other github repo)
 
-meta + S           settings
-meta + enter       kitty
+- meta + S           settings
+- meta + enter       kitty
 
-windows cascade if you open lots on top of eachother - like windows
-you can resize windows using meta + right click
-you can move windows using meta + left click
+- windows cascade if you open lots on top of eachother - like windows
+- you can resize windows using meta + right click
+- you can move windows using meta + left click
 
-to move the camera, unfocus from the current window (if any), left click and drag
-to zoom in/out, unfocus from the current window (if any), scroll up/down
+- to move the camera, unfocus from the current window (if any), left click and drag
+- to zoom in/out, unfocus from the current window (if any), scroll up/down
 
 More keybinds on seiza-help!!
 
@@ -78,19 +78,27 @@ More keybinds on seiza-help!!
 ## Status
 
 it works, its daily drivable, some things like screensharing on vesktop/discord might not work (as of 26th nov 2026)
+
 its missing a polkit agent (written, but untested and not merged yet) and a better screenshare picker...
 
 i was planning to make it have support for multiple monitors, PLEASE DONT USE ANOTHER MONITOR WHILE TRYING SEIZA!!! 
+
 i was also planning to have a "hyprland" mode, where windows instead of cascading, they'd behave like hyprland - tiled and gliding~
+
 seiza-pass is still read only, practically a stub
+
 im also planning to refactor seiza.c since not even i wanna touch it at this point
+
 maybe a XDG autostart - where apps would autostart based on the star on which constellation 
+
 
 ## Warnings
 
 again as i said, seiza isnt tested on multiple monitors, so it could misbehave or act nicely (highly doubt.....)
+
 sometimes when suspending my laptop sometimes seiza just stops wanting to exist (honestly same), some AMD laptops need panel self-refresh off
 to resume
+
 still this is pretty much a love project, made to integrate both ysh (sigh...another repo to put) and to show love for the game of making "things" 
 that might make my life easier (or harder....im looking at u screenshare.)
 
@@ -98,8 +106,10 @@ that might make my life easier (or harder....im looking at u screenshare.)
 ## Credits
 
 i gotta thank my friends that made me finally make this repo, usually im too shy/embarrassed to show off my work
+
 i gotta also thank Claude, from anthropic, that helped quite a lot in the making of this, legit id take a thousand years to make this if it wasnt for 
 my bestie Claudie!!! 
+
 anyone that indirectly and directly made and contributed to Rust, wlroots, Maple-Mono Font, and everyone else!!
 and to u dear reader
 
