@@ -39,11 +39,10 @@ fn parse_font() -> Font {
         ["/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"].map(String::from),
     );
     for path in candidates {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(f) = Font::from_bytes(bytes, FontSettings::default()) {
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(f) = Font::from_bytes(bytes, FontSettings::default()) {
                 return f;
             }
-        }
     }
     panic!("no usable font found (install any sans TTF, e.g. noto-fonts)");
 }
@@ -115,7 +114,7 @@ fn emoji_sprite(ch: char, px: f32) -> Option<Sprite> {
                 }
             }
             let n = ((y1.min(sh) - y0) * (x1.min(sw) - x0)).max(1) as u32;
-            out[y * w + x] = sum[0] / n << 24 | sum[1] / n << 16 | sum[2] / n << 8 | sum[3] / n;
+            out[y * w + x] = (sum[0] / n) << 24 | (sum[1] / n) << 16 | (sum[2] / n) << 8 | (sum[3] / n);
         }
     }
     Some(Sprite { w, h, px: out })
@@ -262,7 +261,7 @@ impl Canvas {
                 if *s == 0 {
                     continue;
                 }
-                let f = |sh: u32| (*s >> sh & 255) * k >> 8;
+                let f = |sh: u32| ((*s >> sh & 255) * k) >> 8;
                 let (sa, dv) = (f(24), *d);
                 let inv = 255 - sa;
                 let ch = |sh: u32| (f(sh) + (dv >> sh & 255) * inv / 255).min(255) << sh;

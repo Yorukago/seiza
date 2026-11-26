@@ -17,11 +17,10 @@ pub fn read_ram_pct() -> Option<u32> {
 pub fn read_temp() -> Option<u32> {
     for e in std::fs::read_dir("/sys/class/hwmon").ok()?.filter_map(Result::ok) {
         let name = std::fs::read_to_string(e.path().join("name")).unwrap_or_default();
-        if ["k10temp", "coretemp", "zenpower", "cpu_thermal"].contains(&name.trim()) {
-            if let Ok(t) = std::fs::read_to_string(e.path().join("temp1_input")) {
+        if ["k10temp", "coretemp", "zenpower", "cpu_thermal"].contains(&name.trim())
+            && let Ok(t) = std::fs::read_to_string(e.path().join("temp1_input")) {
                 return Some(t.trim().parse::<u32>().ok()? / 1000);
             }
-        }
     }
     None
 }

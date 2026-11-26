@@ -185,7 +185,7 @@ mod tests {
     fn a_horizons_answer_is_read_and_a_wrong_one_is_refused() {
         let answer = "header\n$$SOE\n2461366.500000000 = A.D. 2026-Nov-22 00:00:00.0000 TDB\n X =-4.820818293445841E+09 Y =-2.052982148090313E+10 Z = 1.485364785922957E+10\n VX=-2.069379816160355E+00 VY=-1.361137120557069E+01 VZ= 9.831446714192410E+00\n$$EOE\ntail";
         let v = parse_horizons(answer).unwrap();
-        assert_eq!((v.jd, v.pos[0], v.vel[2]), (2_461_366.5, -4.820_818_293_445_841e9, 9.831_446_714_192_410));
+        assert_eq!((v.jd, v.pos[0], v.vel[2]), (2_461_366.5, -4.820_818_293_445_841e9, 9.831_446_714_192_41));
         assert!(parse_horizons("<html>503</html>").is_none());
         assert!(parse_horizons(&answer.replace("E+10", "E+03").replace("E+09", "E+03")).is_none(), "Voyager is not a few km from the Sun");
     }

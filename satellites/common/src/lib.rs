@@ -118,17 +118,15 @@ fn sock_path() -> String {
 /// Blocks; returns when `on_state` returns false (run it on its own thread).
 pub fn subscribe(mut on_state: impl FnMut(State) -> bool) {
     loop {
-        if let Ok(mut s) = UnixStream::connect(sock_path()) {
-            if s.write_all(b"seiza subscribe\n").is_ok() {
+        if let Ok(mut s) = UnixStream::connect(sock_path())
+            && s.write_all(b"seiza subscribe\n").is_ok() {
                 for line in BufReader::new(s).lines().map_while(Result::ok) {
-                    if let Some(st) = State::parse(&line) {
-                        if !on_state(st) {
+                    if let Some(st) = State::parse(&line)
+                        && !on_state(st) {
                             return;
                         }
-                    }
                 }
             }
-        }
         thread::sleep(Duration::from_secs(1));
     }
 }
